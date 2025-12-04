@@ -182,15 +182,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 });
 
                 tui::run_tui(blocklist_arc.clone(), logs_arc.clone()).await?;
-                println!(r#"
-    ██████╗ ███████╗ ██████╗ ██╗███████╗
-   ██╔═══██╗██╔════╝██╔════╝ ██║██╔════╝
-   ████████║█████╗  ██║  ███╗██║███████╗
-   ██╔═══██║██╔══╝  ██║   ██║██║╚════██║
-   ██║   ██║███████╗╚██████╔╝██║███████║
-   ╚═╝   ╚═╝╚══════╝ ╚═════╝ ╚═╝╚══════╝
-      eBPF FIREWALL :: SECURITY MATRIX
-    "#);
+                println!(r#"eBPF FIREWALL :: SECURITY MATRIX"#);
                 println!("Exited TUI. Entering Interactive Mode.");
             } else {
                  // For Load command, we also need to poll events.
