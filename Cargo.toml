@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "aegis-cli",
+    "aegis-common",
+    "aegis-ebpf",
+    "xtask",
+]
+default-members = ["aegis-cli", "xtask"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

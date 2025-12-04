@@ -1,0 +1,9 @@
+/target
+/debug
+/release
+**/*.rs.bk
+*.swp
+.idea
+.vscode
+*.log
+aegis.yaml
