@@ -15,6 +15,8 @@ use aya::util::online_cpus;
 use bytes::BytesMut;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
+use chrono;
+use serde_json;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -49,7 +51,8 @@ struct Opt {
 #[derive(Subcommand)]
 enum Commands {
     Load,
-    Tui, // New TUI mode
+    Tui, // TUI mode
+    Daemon, // Headless daemon mode (no REPL)
     Save {
         #[clap(short, long, default_value = "aegis.yaml")]
         file: String,
@@ -65,7 +68,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
     env_logger::init();
 
-    println!(r#"
+    // Banner shown conditionally (not for TUI - it has its own header)
+    if !matches!(opt.command, Commands::Tui) {
+        println!(r#"
     ██████╗ ███████╗ ██████╗ ██╗███████╗
    ██╔═══██╗██╔════╝██╔════╝ ██║██╔════╝
    ████████║█████╗  ██║  ███╗██║███████╗
@@ -74,6 +79,7 @@ async fn main() -> Result<(), anyhow::Error> {
    ╚═╝   ╚═╝╚══════╝ ╚═════╝ ╚═╝╚══════╝
       eBPF FIREWALL :: SECURITY MATRIX
     "#);
+    }
 
     // Bump memlock rlimit
     let rlim = libc::rlimit {
@@ -85,13 +91,17 @@ async fn main() -> Result<(), anyhow::Error> {
         println!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
+    // Load Config
+    let config_path = "aegis.yaml";
+    let cfg = config::Config::load(config_path).unwrap_or_else(|_| config::Config { rules: vec![], remote_log: None });
+
     // Load eBPF
-    let path = "target/bpfel-unknown-none/release/aegis";
-    let mut bpf = Ebpf::load_file(path)?;
+    let ebpf_path = "/usr/local/share/aegis/aegis.o";
+    let mut bpf = Ebpf::load_file(ebpf_path)?;
     
-    // Common setup for Load and Tui
+    // Common setup for Load, Tui, and Daemon
     match opt.command {
-        Commands::Load | Commands::Tui => {
+        Commands::Load | Commands::Tui | Commands::Daemon => {
             let program: &mut Xdp = bpf.program_mut("xdp_firewall").unwrap().try_into()?;
             program.load()?;
             
@@ -107,6 +117,20 @@ async fn main() -> Result<(), anyhow::Error> {
             let blocklist: HashMap<_, FlowKey, u32> = HashMap::try_from(blocklist_map)?;
             let blocklist_arc = Arc::new(Mutex::new(blocklist)); // Wrap in Arc<Mutex> for sharing
             
+            // Restore rules from config
+            {
+                let mut map = blocklist_arc.lock().unwrap();
+                for rule in &cfg.rules {
+                    let key = FlowKey {
+                        src_ip: u32::from(rule.ip).to_be(),
+                        dst_port: rule.port,
+                        proto: config::parse_proto(&rule.proto),
+                        _pad: 0,
+                    };
+                    let _ = map.insert(key, 2, 0);
+                }
+            }
+            
             // Shared Logs
             let logs_arc = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -119,10 +143,12 @@ async fn main() -> Result<(), anyhow::Error> {
             let cpus = online_cpus().map_err(|(_, e)| e)?;
             
             let logs_clone = logs_arc.clone();
+            let remote_log_base = cfg.remote_log.clone();
 
             for cpu_id in cpus {
                 let mut buf = events.open(cpu_id, None)?;
                 let logs_inner = logs_clone.clone();
+                let remote_log = remote_log_base.clone();
                 event_futures.push(async move {
                     let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
                     loop {
@@ -132,20 +158,29 @@ async fn main() -> Result<(), anyhow::Error> {
                                     let buf = &mut buffers[i];
                                     let ptr = buf.as_ptr() as *const PacketLog;
                                     let log = unsafe { ptr.read_unaligned() };
-                                    let src_ip = Ipv4Addr::from(log.ipv4_addr);
+                                    let src_ip = Ipv4Addr::from(u32::from_be(log.ipv4_addr));
                                     
                                     let msg = match log.action {
-                                        2 => format!("LOG: Dropped packet from {} (Proto: {}, Port: {})", src_ip, log.proto, log.port),
-                                        3 => format!("⚠️  SUSPICIOUS: Heuristic Drop from {} (Proto: {}, Port: {})", src_ip, log.proto, log.port),
+                                        2 => format!("LOG: Dropped packet from {}", src_ip),
+                                        3 => format!("⚠️  SUSPICIOUS: Heuristic Drop from {}", src_ip),
+                                        4 => format!("💀 DPI ALERT: Payload Drop from {}", src_ip),
+                                        5 => format!("🔥 RATE LIMIT: SYN Flood from {}", src_ip),
                                         _ => format!("LOG: Unknown action {} from {}", log.action, src_ip),
                                     };
-                                    
-                                    // Print to stdout if NOT in TUI mode, else append to shared logs
-                                    // Actually, we can just append to shared logs and print if needed?
-                                    // For TUI, we MUST NOT print to stdout.
-                                    // Let's check command again? No, we are inside match.
-                                    // We need to know if we are in TUI mode.
-                                    
+
+                                    // Remote Logging
+                                    if let Some(ref remote) = remote_log {
+                                        let json_log = serde_json::json!({
+                                            "src_ip": src_ip.to_string(),
+                                            "action": log.action,
+                                            "msg": msg,
+                                            "timestamp": chrono::Utc::now().to_rfc3339()
+                                        });
+                                        let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok();
+                                        if let Some(s) = socket {
+                                            let _ = s.send_to(json_log.to_string().as_bytes(), remote);
+                                        }
+                                    }
                                     {
                                         let mut logs = logs_inner.lock().unwrap();
                                         if logs.len() >= 100 { logs.pop_front(); }
@@ -182,8 +217,19 @@ async fn main() -> Result<(), anyhow::Error> {
                 });
 
                 tui::run_tui(blocklist_arc.clone(), logs_arc.clone()).await?;
-                println!(r#"eBPF FIREWALL :: SECURITY MATRIX"#);
-                println!("Exited TUI. Entering Interactive Mode.");
+                println!("\nExited TUI. Entering Interactive Mode...");
+            } else if let Commands::Daemon = opt.command {
+                // Daemon mode: no REPL, just run until SIGTERM
+                tokio::spawn(async move {
+                    loop {
+                        event_futures.next().await;
+                    }
+                });
+                
+                println!("Daemon mode active on {}. Send SIGTERM to stop.", opt.iface);
+                signal::ctrl_c().await?;
+                println!("Shutting down...");
+                return Ok(());
             } else {
                  // For Load command, we also need to poll events.
                  // If we didn't run TUI, we still need the event loop.
@@ -299,7 +345,7 @@ where T: std::borrow::BorrowMut<MapData>
                     action: "drop".to_string(),
                 });
             }
-            let cfg = config::Config { rules };
+            let cfg = config::Config { rules, remote_log: None };
             cfg.save(file)?;
             println!("Saved rules to {}", file);
         }

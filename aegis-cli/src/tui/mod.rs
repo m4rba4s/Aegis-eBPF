@@ -325,18 +325,41 @@ where
 }
 
 fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app: &mut App<T>) {
+    // Stats
+    let total = app.connections.len();
+    let tcp_count = app.connections.iter().filter(|c| c.proto == "TCP").count();
+    let udp_count = app.connections.iter().filter(|c| c.proto == "UDP").count();
+    let blocked_count = app.connections.iter().filter(|c| c.is_blocked).count();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(60),
-            Constraint::Percentage(40),
+            Constraint::Length(3),  // Stats
+            Constraint::Min(10),    // Main
+            Constraint::Length(3),  // Help
         ])
         .split(f.size());
 
-    let top_chunks = Layout::default()
+    // Stats Bar
+    let stats_text = format!(
+        "  Total: {} │ TCP: {} │ UDP: {} │ 🚫 Blocked: {}",
+        total, tcp_count, udp_count, blocked_count
+    );
+    let stats = Paragraph::new(stats_text)
+        .style(Style::default().fg(Color::White).bg(Color::DarkGray))
+        .block(Block::default().borders(Borders::ALL).title("⚡ AEGIS SOC DASHBOARD"));
+    f.render_widget(stats, chunks[0]);
+
+    // Main Area
+    let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(chunks[1]);
+
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(chunks[0]);
+        .split(main_chunks[0]);
 
     // Connections List
     let items: Vec<ListItem> = app
@@ -358,11 +381,11 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Active Connections (Space to Toggle Block)"))
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-        .highlight_symbol(">> ");
+        .block(Block::default().borders(Borders::ALL).title("🌐 Active Connections"))
+        .highlight_style(Style::default().bg(Color::Rgb(40, 40, 80)).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▶ ");
 
-    f.render_stateful_widget(list, top_chunks[0], &mut app.state);
+    f.render_stateful_widget(list, left_chunks[0], &mut app.state);
 
     // Details Pane
     let selected_info = if let Some(i) = app.state.selected() {
@@ -389,19 +412,21 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
     };
 
     let details = Paragraph::new(selected_info)
-        .block(Block::default().borders(Borders::ALL).title("Intel"))
+        .block(Block::default().borders(Borders::ALL).title("🎯 Intel"))
         .wrap(Wrap { trim: true });
     
-    f.render_widget(details, top_chunks[1]);
+    f.render_widget(details, main_chunks[1]);
 
     // Logs
     let logs: Vec<ListItem> = app
         .logs
         .iter()
-        .rev() // Show newest first? Or scroll? List usually shows top to bottom.
-        .take(20)
+        .rev()
+        .take(15)
         .map(|l| {
-            let style = if l.contains("SUSPICIOUS") || l.contains("BANNED") {
+            let style = if l.contains("DPI") {
+                Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)
+            } else if l.contains("SUSPICIOUS") || l.contains("BANNED") {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else if l.contains("Unblocked") {
                 Style::default().fg(Color::Green)
@@ -413,8 +438,15 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
         .collect();
 
     let log_list = List::new(logs)
-        .block(Block::default().borders(Borders::ALL).title("Security Events"))
+        .block(Block::default().borders(Borders::ALL).title("📜 Security Events"))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     
-    f.render_widget(log_list, chunks[1]);
+    f.render_widget(log_list, left_chunks[1]);
+
+    // Help Footer
+    let help_text = " ↑/↓ Navigate │ SPACE Block/Unblock │ q Quit ";
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::Black).bg(Color::Rgb(100, 100, 150)))
+        .block(Block::default());
+    f.render_widget(help, chunks[2]);
 }
