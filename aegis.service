@@ -1,0 +1,15 @@
+[Unit]
+Description=Aegis eBPF Firewall
+After=network.target
+Documentation=https://github.com/m4rba4s/Aegis-eBPF
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kworker-u4 --iface eth0 daemon
+Restart=always
+RestartSec=5
+User=root
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

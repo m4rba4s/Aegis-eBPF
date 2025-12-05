@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub remote_log: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

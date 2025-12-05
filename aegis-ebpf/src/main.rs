@@ -31,11 +31,27 @@ pub struct FlowKey {
     pub _pad: u8,
 }
 
+// Rate limit state per IP
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct RateLimitState {
+    pub tokens: u32,      // Current tokens
+    pub last_update: u64, // Last update timestamp (ns)
+}
+
 #[map]
 static BLOCKLIST: HashMap<FlowKey, u32> = HashMap::with_max_entries(1024, 0);
 
 #[map]
 static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
+
+// Rate limit map: IP -> RateLimitState
+#[map]
+static RATE_LIMIT: HashMap<u32, RateLimitState> = HashMap::with_max_entries(4096, 0);
+
+// Config: tokens per second refill rate, max bucket size
+const TOKENS_PER_SEC: u32 = 100;  // 100 SYN packets/sec allowed
+const MAX_TOKENS: u32 = 200;      // Burst capacity
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
@@ -50,9 +66,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     
     // Only handle IPv4
     let ether_type = unsafe { (*eth_hdr).ether_type };
-    // Debug: Print ether_type
-    // unsafe { aya_ebpf::helpers::gen::bpf_printk(b"EtherType: %x\0".as_ptr() as *const _, 1, u16::from_be(ether_type) as u64) };
-
     if u16::from_be(ether_type) != ETH_P_IP {
          return Ok(xdp_action::XDP_PASS);
     }
@@ -61,36 +74,30 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     let src_addr = unsafe { (*ipv4_hdr).src_addr };
     let proto = unsafe { (*ipv4_hdr).proto };
     
-    // Parse L4 Port and Flags
+    // Check IP header length - SKIP packets with IP options
+    // Standard IP header is 20 bytes (IHL=5)
+    // If IHL > 5, skip this packet to avoid variable offset issues
+    let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
+    if ip_ihl != 5 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    
+    // Fixed L4 offset: ETH(14) + IP(20) = 34
+    const L4_OFFSET: usize = 34;
+    
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
-    let ip_len = unsafe { ((*ipv4_hdr).ihl() & 0x0F) * 4 } as usize;
-    let l4_offset = EthHdr::LEN + ip_len;
 
     if proto == 6 { // TCP
-        let tcp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?; // dst_port is at offset 2
+        // dst_port at L4+2
+        let tcp_hdr: *const u16 = ptr_at(&ctx, L4_OFFSET + 2)?;
         dst_port = u16::from_be(unsafe { *tcp_hdr });
         
-        // TCP Flags are at offset 13 (12th byte is data offset, 13th is flags)
-        // struct tcphdr {
-        //   __be16 source;
-        //   __be16 dest;
-        //   __be32 seq;
-        //   __be32 ack_seq;
-        //   __u16 res1:4, doff:4, fin:1, syn:1, rst:1, psh:1, ack:1, urg:1, ece:1, cwr:1;
-        //   ...
-        // }
-        // In raw bytes:
-        // Offset 0: Source (2)
-        // Offset 2: Dest (2)
-        // Offset 4: Seq (4)
-        // Offset 8: Ack (4)
-        // Offset 12: Data Offset + Res (1)
-        // Offset 13: Flags (1)
-        let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
+        // TCP flags at L4+13
+        let flags_ptr: *const u8 = ptr_at(&ctx, L4_OFFSET + 13)?;
         tcp_flags = unsafe { *flags_ptr };
     } else if proto == 17 { // UDP
-        let udp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?; // dst_port is at offset 2
+        let udp_hdr: *const u16 = ptr_at(&ctx, L4_OFFSET + 2)?;
         dst_port = u16::from_be(unsafe { *udp_hdr });
     }
 
@@ -98,14 +105,12 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     if proto == 6 {
         let fin = tcp_flags & 0x01 != 0;
         let syn = tcp_flags & 0x02 != 0;
-        let _rst = tcp_flags & 0x04 != 0;
         let psh = tcp_flags & 0x08 != 0;
-        let _ack = tcp_flags & 0x10 != 0;
         let urg = tcp_flags & 0x20 != 0;
         
         // 1. Xmas Tree Scan (FIN + URG + PSH)
         if fin && urg && psh {
-            return log_and_return(&ctx, src_addr, dst_port, proto, 3); // 3 = SUSPICIOUS
+            return log_and_return(&ctx, src_addr, dst_port, proto, 3);
         }
         
         // 2. Null Scan (No flags set)
@@ -120,12 +125,112 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     }
     // ------------------
 
+    // --- SYN FLOOD RATE LIMITING ---
+    if proto == 6 {
+        let syn = tcp_flags & 0x02 != 0;
+        let ack = tcp_flags & 0x10 != 0;
+        
+        // Only rate limit pure SYN packets (SYN without ACK)
+        if syn && !ack {
+            // Get current time in nanoseconds
+            let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+            
+            // Lookup or create rate limit state
+            if let Some(state) = unsafe { RATE_LIMIT.get_ptr_mut(&src_addr) } {
+                let state = unsafe { &mut *state };
+                
+                // Calculate time delta in seconds (approx)
+                let delta_ns = now_ns.saturating_sub(state.last_update);
+                let delta_sec = (delta_ns / 1_000_000_000) as u32;
+                
+                // Refill tokens (token bucket)
+                let new_tokens = state.tokens.saturating_add(delta_sec * TOKENS_PER_SEC);
+                state.tokens = if new_tokens > MAX_TOKENS { MAX_TOKENS } else { new_tokens };
+                state.last_update = now_ns;
+                
+                // Check if we have tokens
+                if state.tokens > 0 {
+                    state.tokens -= 1;
+                    // Allow packet
+                } else {
+                    // SYN FLOOD DETECTED - drop
+                    return log_and_return(&ctx, src_addr, dst_port, proto, 5); // 5 = RATE_LIMIT
+                }
+            } else {
+                // First packet from this IP - initialize with max tokens - 1
+                let new_state = RateLimitState {
+                    tokens: MAX_TOKENS - 1,
+                    last_update: now_ns,
+                };
+                let _ = unsafe { RATE_LIMIT.insert(&src_addr, &new_state, 0) };
+            }
+        }
+    }
+    // ------------------
+
+    // Only inspect TCP packets with NO options (data offset = 5)
+    // ETH(14) + IP(20) + TCP(20) = 54 = payload start
+    if proto == 6 {
+        // Read TCP data offset at L4+12 (upper 4 bits)
+        let doff_ptr: *const u8 = ptr_at(&ctx, L4_OFFSET + 12)?;
+        let doff = (unsafe { *doff_ptr } >> 4) & 0x0F;
+        
+        // Only proceed if no TCP options (doff == 5 means 20 byte header)
+        if doff == 5 {
+            const PAYLOAD_START: usize = 54; // 14 + 20 + 20
+            
+            // Check "GET /admin" (10 bytes)
+            // G=0x47 E=0x45 T=0x54 ' '=0x20 /=0x2F a=0x61 d=0x64 m=0x6D i=0x69 n=0x6E
+            if let Ok(b0) = ptr_at::<u8>(&ctx, PAYLOAD_START) {
+                if unsafe { *b0 } == 0x47 { // G
+                    if let Ok(b1) = ptr_at::<u8>(&ctx, PAYLOAD_START + 1) {
+                        if unsafe { *b1 } == 0x45 { // E
+                            if let Ok(b2) = ptr_at::<u8>(&ctx, PAYLOAD_START + 2) {
+                                if unsafe { *b2 } == 0x54 { // T
+                                    if let Ok(b3) = ptr_at::<u8>(&ctx, PAYLOAD_START + 3) {
+                                        if unsafe { *b3 } == 0x20 { // ' '
+                                            if let Ok(b4) = ptr_at::<u8>(&ctx, PAYLOAD_START + 4) {
+                                                if unsafe { *b4 } == 0x2F { // /
+                                                    if let Ok(b5) = ptr_at::<u8>(&ctx, PAYLOAD_START + 5) {
+                                                        if unsafe { *b5 } == 0x61 { // a
+                                                            if let Ok(b6) = ptr_at::<u8>(&ctx, PAYLOAD_START + 6) {
+                                                                if unsafe { *b6 } == 0x64 { // d
+                                                                    if let Ok(b7) = ptr_at::<u8>(&ctx, PAYLOAD_START + 7) {
+                                                                        if unsafe { *b7 } == 0x6D { // m
+                                                                            if let Ok(b8) = ptr_at::<u8>(&ctx, PAYLOAD_START + 8) {
+                                                                                if unsafe { *b8 } == 0x69 { // i
+                                                                                    if let Ok(b9) = ptr_at::<u8>(&ctx, PAYLOAD_START + 9) {
+                                                                                        if unsafe { *b9 } == 0x6E { // n
+                                                                                            // DPI MATCH: GET /admin
+                                                                                            return log_and_return(&ctx, src_addr, dst_port, proto, 4);
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ------------------
+
     // 1. Exact Match Lookup
     let key_exact = FlowKey {
-        src_ip: src_addr, // Keep Network Byte Order for map key
-        dst_port: dst_port, // Host Byte Order for simplicity in map? No, let's use Host for Port, Network for IP.
-                            // Actually, let's be consistent. IP is BE (from packet). Port is Host (converted).
-                            // Let's store Port as Host in Key.
+        src_ip: src_addr,
+        dst_port: dst_port,
         proto: proto,
         _pad: 0,
     };
