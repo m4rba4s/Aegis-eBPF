@@ -105,7 +105,8 @@ async fn main() -> Result<(), anyhow::Error> {
             let program: &mut Xdp = bpf.program_mut("xdp_firewall").unwrap().try_into()?;
             program.load()?;
             
-            let flags = if opt.iface == "lo" {
+            let flags = if opt.iface == "lo" || opt.iface.starts_with("wg") {
+                println!("ℹ️  Using XDP Generic Mode (SKB) for virtual interface: {}", opt.iface);
                 XdpFlags::SKB_MODE
             } else {
                 XdpFlags::default()
@@ -131,6 +132,20 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             }
             
+            // Set interface mode in CONFIG map
+            // L3 mode (1) for WireGuard/tun interfaces, L2 mode (0) for Ethernet
+            {
+                let config_map = bpf.take_map("CONFIG").expect("CONFIG map not found");
+                let mut config: HashMap<_, u32, u32> = HashMap::try_from(config_map)?;
+                let mode: u32 = if opt.iface.starts_with("wg") || opt.iface.starts_with("tun") {
+                    println!("ℹ️  Setting L3 mode (raw IP) for interface: {}", opt.iface);
+                    1  // L3 mode
+                } else {
+                    0  // L2 mode (Ethernet)
+                };
+                config.insert(0u32, mode, 0)?;
+            }
+            
             // Shared Logs
             let logs_arc = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -144,11 +159,14 @@ async fn main() -> Result<(), anyhow::Error> {
             
             let logs_clone = logs_arc.clone();
             let remote_log_base = cfg.remote_log.clone();
+            let blocklist_clone = blocklist_arc.clone(); // Clone for event loop
 
             for cpu_id in cpus {
                 let mut buf = events.open(cpu_id, None)?;
                 let logs_inner = logs_clone.clone();
                 let remote_log = remote_log_base.clone();
+                let blocklist_inner = blocklist_clone.clone(); // Clone for this CPU task
+                
                 event_futures.push(async move {
                     let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
                     loop {
@@ -186,6 +204,28 @@ async fn main() -> Result<(), anyhow::Error> {
                                         if logs.len() >= 100 { logs.pop_front(); }
                                         logs.push_back(msg.clone());
                                     }
+
+                                    // --- DYNAMIC AUTO-BAN (OODA Loop) ---
+                                    // If action is 4 (DPI) or 5 (Rate Limit), auto-ban the IP
+                                    if log.action == 4 || log.action == 5 {
+                                        let mut blocklist = blocklist_inner.lock().unwrap();
+                                        let key = FlowKey {
+                                            src_ip: log.ipv4_addr, // Already Network Byte Order from eBPF
+                                            dst_port: 0,           // Wildcard port
+                                            proto: 0,              // Wildcard proto
+                                            _pad: 0,
+                                        };
+                                        // Insert into map with action 2 (DROP)
+                                        // Note: We use insert(key, 2, 0)
+                                        if let Err(e) = blocklist.insert(key, 2, 0) {
+                                            let mut logs = logs_inner.lock().unwrap();
+                                            logs.push_back(format!("❌ AUTO-BAN FAILED for {}: {}", src_ip, e));
+                                        } else {
+                                            let mut logs = logs_inner.lock().unwrap();
+                                            logs.push_back(format!("⛔ AUTO-BANNED {} (OODA Trigger)", src_ip));
+                                        }
+                                    }
+                                    // ------------------------------------
                                 }
                             }
                             Err(_e) => {
