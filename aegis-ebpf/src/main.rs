@@ -49,6 +49,10 @@ static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
 #[map]
 static RATE_LIMIT: HashMap<u32, RateLimitState> = HashMap::with_max_entries(4096, 0);
 
+// Config map: key 0 = interface mode (0 = L2/Ethernet, 1 = L3/raw IP like WireGuard)
+#[map]
+static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+
 // Config: tokens per second refill rate, max bucket size
 const TOKENS_PER_SEC: u32 = 100;  // 100 SYN packets/sec allowed
 const MAX_TOKENS: u32 = 200;      // Burst capacity
@@ -62,42 +66,52 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
-    let eth_hdr: *const EthHdr = ptr_at(&ctx, 0)?;
+    // Check CONFIG map for interface mode (0 = L2/Ethernet, 1 = L3/raw IP)
+    // Default to L2 if not set
+    let config_key: u32 = 0;
+    let is_l3_mode = unsafe {
+        CONFIG.get(&config_key).copied().unwrap_or(0) == 1
+    };
     
-    // Only handle IPv4
-    let ether_type = unsafe { (*eth_hdr).ether_type };
-    if u16::from_be(ether_type) != ETH_P_IP {
-         return Ok(xdp_action::XDP_PASS);
-    }
+    let (ip_offset, l4_base_offset) = if is_l3_mode {
+        // L3 interface (WireGuard/tun) - IP starts at offset 0
+        (0usize, 20usize)
+    } else {
+        // L2 interface (Ethernet) - check ether_type first
+        let eth_hdr: *const EthHdr = ptr_at(&ctx, 0)?;
+        let ether_type = unsafe { (*eth_hdr).ether_type };
+        if u16::from_be(ether_type) != ETH_P_IP {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        (EthHdr::LEN, EthHdr::LEN + 20)
+    };
 
-    let ipv4_hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
+    let ipv4_hdr: *const Ipv4Hdr = ptr_at(&ctx, ip_offset)?;
     let src_addr = unsafe { (*ipv4_hdr).src_addr };
     let proto = unsafe { (*ipv4_hdr).proto };
     
     // Check IP header length - SKIP packets with IP options
-    // Standard IP header is 20 bytes (IHL=5)
-    // If IHL > 5, skip this packet to avoid variable offset issues
     let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
     if ip_ihl != 5 {
         return Ok(xdp_action::XDP_PASS);
     }
     
-    // Fixed L4 offset: ETH(14) + IP(20) = 34
-    const L4_OFFSET: usize = 34;
+    // L4 offset depends on interface type
+    let l4_offset = l4_base_offset;
     
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
 
     if proto == 6 { // TCP
         // dst_port at L4+2
-        let tcp_hdr: *const u16 = ptr_at(&ctx, L4_OFFSET + 2)?;
+        let tcp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
         dst_port = u16::from_be(unsafe { *tcp_hdr });
         
         // TCP flags at L4+13
-        let flags_ptr: *const u8 = ptr_at(&ctx, L4_OFFSET + 13)?;
+        let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
         tcp_flags = unsafe { *flags_ptr };
     } else if proto == 17 { // UDP
-        let udp_hdr: *const u16 = ptr_at(&ctx, L4_OFFSET + 2)?;
+        let udp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
         dst_port = u16::from_be(unsafe { *udp_hdr });
     }
 
@@ -172,34 +186,49 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // ETH(14) + IP(20) + TCP(20) = 54 = payload start
     if proto == 6 {
         // Read TCP data offset at L4+12 (upper 4 bits)
-        let doff_ptr: *const u8 = ptr_at(&ctx, L4_OFFSET + 12)?;
+        let doff_ptr: *const u8 = ptr_at(&ctx, l4_offset + 12)?;
         let doff = (unsafe { *doff_ptr } >> 4) & 0x0F;
         
-        // Only proceed if no TCP options (doff == 5 means 20 byte header)
-        if doff == 5 {
-            const PAYLOAD_START: usize = 54; // 14 + 20 + 20
-            
+        // Only proceed if doff is within reasonable bounds (5..=10)
+        // We unroll the loop to satisfy the verifier (no variable offsets allowed)
+        let payload_offset = if doff == 5 {
+            l4_offset + 20
+        } else if doff == 6 {
+            l4_offset + 24
+        } else if doff == 7 {
+            l4_offset + 28
+        } else if doff == 8 {
+            l4_offset + 32
+        } else if doff == 9 {
+            l4_offset + 36
+        } else if doff == 10 {
+            l4_offset + 40
+        } else {
+            0 // Skip
+        };
+
+        if payload_offset > 0 {
             // Check "GET /admin" (10 bytes)
             // G=0x47 E=0x45 T=0x54 ' '=0x20 /=0x2F a=0x61 d=0x64 m=0x6D i=0x69 n=0x6E
-            if let Ok(b0) = ptr_at::<u8>(&ctx, PAYLOAD_START) {
+            if let Ok(b0) = ptr_at::<u8>(&ctx, payload_offset) {
                 if unsafe { *b0 } == 0x47 { // G
-                    if let Ok(b1) = ptr_at::<u8>(&ctx, PAYLOAD_START + 1) {
+                    if let Ok(b1) = ptr_at::<u8>(&ctx, payload_offset + 1) {
                         if unsafe { *b1 } == 0x45 { // E
-                            if let Ok(b2) = ptr_at::<u8>(&ctx, PAYLOAD_START + 2) {
+                            if let Ok(b2) = ptr_at::<u8>(&ctx, payload_offset + 2) {
                                 if unsafe { *b2 } == 0x54 { // T
-                                    if let Ok(b3) = ptr_at::<u8>(&ctx, PAYLOAD_START + 3) {
+                                    if let Ok(b3) = ptr_at::<u8>(&ctx, payload_offset + 3) {
                                         if unsafe { *b3 } == 0x20 { // ' '
-                                            if let Ok(b4) = ptr_at::<u8>(&ctx, PAYLOAD_START + 4) {
+                                            if let Ok(b4) = ptr_at::<u8>(&ctx, payload_offset + 4) {
                                                 if unsafe { *b4 } == 0x2F { // /
-                                                    if let Ok(b5) = ptr_at::<u8>(&ctx, PAYLOAD_START + 5) {
+                                                    if let Ok(b5) = ptr_at::<u8>(&ctx, payload_offset + 5) {
                                                         if unsafe { *b5 } == 0x61 { // a
-                                                            if let Ok(b6) = ptr_at::<u8>(&ctx, PAYLOAD_START + 6) {
+                                                            if let Ok(b6) = ptr_at::<u8>(&ctx, payload_offset + 6) {
                                                                 if unsafe { *b6 } == 0x64 { // d
-                                                                    if let Ok(b7) = ptr_at::<u8>(&ctx, PAYLOAD_START + 7) {
+                                                                    if let Ok(b7) = ptr_at::<u8>(&ctx, payload_offset + 7) {
                                                                         if unsafe { *b7 } == 0x6D { // m
-                                                                            if let Ok(b8) = ptr_at::<u8>(&ctx, PAYLOAD_START + 8) {
+                                                                            if let Ok(b8) = ptr_at::<u8>(&ctx, payload_offset + 8) {
                                                                                 if unsafe { *b8 } == 0x69 { // i
-                                                                                    if let Ok(b9) = ptr_at::<u8>(&ctx, PAYLOAD_START + 9) {
+                                                                                    if let Ok(b9) = ptr_at::<u8>(&ctx, payload_offset + 9) {
                                                                                         if unsafe { *b9 } == 0x6E { // n
                                                                                             // DPI MATCH: GET /admin
                                                                                             return log_and_return(&ctx, src_addr, dst_port, proto, 4);
@@ -226,7 +255,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         }
     }
     // ------------------
-
+    
     // 1. Exact Match Lookup
     let key_exact = FlowKey {
         src_ip: src_addr,
@@ -248,6 +277,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         if let Some(action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
             log_and_return(&ctx, src_addr, dst_port, proto, *action)
         } else {
+            // DEBUG: Log PASS for this IP to verify XDP is seeing packets
+            // Uncomment next line to enable verbose logging (WARNING: high volume!)
+            // EVENTS.output(&ctx, &PacketLog { ipv4_addr: src_addr, port: dst_port, proto, action: 0 }, 0);
             Ok(xdp_action::XDP_PASS)
         }
     }

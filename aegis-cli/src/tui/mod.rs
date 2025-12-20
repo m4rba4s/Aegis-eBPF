@@ -187,13 +187,19 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                     
                     if conn.is_blocked {
                         // Unblock
-                        if let Ok(_) = map.remove(&key) {
-                            self.logs.push_back(format!("LOG: Unblocked {}", ipv4));
+                        match map.remove(&key) {
+                            Ok(_) => self.logs.push_back(format!(
+                                "LOG: Unblocked {} (key=0x{:08x})", ipv4, key.src_ip)),
+                            Err(e) => self.logs.push_back(format!(
+                                "ERR: Unblock {} FAILED: {}", ipv4, e)),
                         }
                     } else {
                         // Block
-                        if let Ok(_) = map.insert(key, 2, 0) {
-                            self.logs.push_back(format!("LOG: BANNED {}", ipv4));
+                        match map.insert(key, 2, 0) {
+                            Ok(_) => self.logs.push_back(format!(
+                                "LOG: BANNED {} (key=0x{:08x})", ipv4, key.src_ip)),
+                            Err(e) => self.logs.push_back(format!(
+                                "ERR: Block {} FAILED: {}", ipv4, e)),
                         }
                     }
                 }
