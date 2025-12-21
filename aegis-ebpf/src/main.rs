@@ -209,7 +209,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         let bitmap_index = port_index / 32;
         let bit_position = port_index % 32;
         
-        if let Some(state) = unsafe { PORT_SCAN.get_ptr_mut(&src_addr) } {
+        if let Some(state) = PORT_SCAN.get_ptr_mut(&src_addr) {
             let state_ref = unsafe { &mut *state };
             
             // Reset if window expired
@@ -262,7 +262,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
             
             // Lookup or create rate limit state
-            if let Some(state) = unsafe { RATE_LIMIT.get_ptr_mut(&src_addr) } {
+            if let Some(state) = RATE_LIMIT.get_ptr_mut(&src_addr) {
                 let state = unsafe { &mut *state };
                 
                 // Calculate time delta in seconds (approx)
@@ -289,81 +289,28 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     tokens: MAX_TOKENS - 1,
                     last_update: now_ns,
                 };
-                let _ = unsafe { RATE_LIMIT.insert(&src_addr, &new_state, 0) };
+                let _ = RATE_LIMIT.insert(&src_addr, &new_state, 0);
             }
         }
     }
     // ------------------
 
-    // Only inspect TCP packets with NO options (data offset = 5)
-    // ETH(14) + IP(20) + TCP(20) = 54 = payload start
-    if proto == 6 {
+    // --- DPI SECTION (DISABLED) ---
+    // Deep Packet Inspection for specific patterns
+    // TODO: Make configurable via CONFIG map
+    // Currently disabled - enable only if needed
+    #[allow(dead_code)]
+    const DPI_ENABLED: bool = false;
+    
+    if DPI_ENABLED && proto == 6 {
         // Read TCP data offset at L4+12 (upper 4 bits)
-        let doff_ptr: *const u8 = ptr_at(&ctx, l4_offset + 12)?;
-        let doff = (unsafe { *doff_ptr } >> 4) & 0x0F;
-        
-        // Only proceed if doff is within reasonable bounds (5..=10)
-        // We unroll the loop to satisfy the verifier (no variable offsets allowed)
-        let payload_offset = if doff == 5 {
-            l4_offset + 20
-        } else if doff == 6 {
-            l4_offset + 24
-        } else if doff == 7 {
-            l4_offset + 28
-        } else if doff == 8 {
-            l4_offset + 32
-        } else if doff == 9 {
-            l4_offset + 36
-        } else if doff == 10 {
-            l4_offset + 40
-        } else {
-            0 // Skip
-        };
-
-        if payload_offset > 0 {
-            // Check "GET /admin" (10 bytes)
-            // G=0x47 E=0x45 T=0x54 ' '=0x20 /=0x2F a=0x61 d=0x64 m=0x6D i=0x69 n=0x6E
-            if let Ok(b0) = ptr_at::<u8>(&ctx, payload_offset) {
-                if unsafe { *b0 } == 0x47 { // G
-                    if let Ok(b1) = ptr_at::<u8>(&ctx, payload_offset + 1) {
-                        if unsafe { *b1 } == 0x45 { // E
-                            if let Ok(b2) = ptr_at::<u8>(&ctx, payload_offset + 2) {
-                                if unsafe { *b2 } == 0x54 { // T
-                                    if let Ok(b3) = ptr_at::<u8>(&ctx, payload_offset + 3) {
-                                        if unsafe { *b3 } == 0x20 { // ' '
-                                            if let Ok(b4) = ptr_at::<u8>(&ctx, payload_offset + 4) {
-                                                if unsafe { *b4 } == 0x2F { // /
-                                                    if let Ok(b5) = ptr_at::<u8>(&ctx, payload_offset + 5) {
-                                                        if unsafe { *b5 } == 0x61 { // a
-                                                            if let Ok(b6) = ptr_at::<u8>(&ctx, payload_offset + 6) {
-                                                                if unsafe { *b6 } == 0x64 { // d
-                                                                    if let Ok(b7) = ptr_at::<u8>(&ctx, payload_offset + 7) {
-                                                                        if unsafe { *b7 } == 0x6D { // m
-                                                                            if let Ok(b8) = ptr_at::<u8>(&ctx, payload_offset + 8) {
-                                                                                if unsafe { *b8 } == 0x69 { // i
-                                                                                    if let Ok(b9) = ptr_at::<u8>(&ctx, payload_offset + 9) {
-                                                                                        if unsafe { *b9 } == 0x6E { // n
-                                                                                            // DPI MATCH: GET /admin
-                                                                                            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_NONE, total_len);
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Ok(doff_ptr) = ptr_at::<u8>(&ctx, l4_offset + 12) {
+            let doff = (unsafe { *doff_ptr } >> 4) & 0x0F;
+            if doff >= 5 && doff <= 10 {
+                let payload_offset = l4_offset + (doff as usize) * 4;
+                // Pattern matching would go here
+                // For now, just pass through
+                let _ = payload_offset;
             }
         }
     }
