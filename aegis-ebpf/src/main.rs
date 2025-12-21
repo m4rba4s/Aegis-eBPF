@@ -16,11 +16,33 @@ use parsing::ptr_at;
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct PacketLog {
-    pub ipv4_addr: u32,
-    pub port: u16,
-    pub proto: u8,
-    pub action: u32,
+    pub src_ip: u32,      // Source IP address
+    pub dst_ip: u32,      // Destination IP address
+    pub src_port: u16,    // Source port
+    pub dst_port: u16,    // Destination port
+    pub proto: u8,        // Protocol (6=TCP, 17=UDP)
+    pub tcp_flags: u8,    // TCP flags byte
+    pub action: u8,       // 0=PASS, 1=DROP, 2=ALERT
+    pub threat_type: u8,  // Threat category (see ThreatType)
+    pub packet_len: u16,  // Packet length
+    pub _pad: u16,        // Padding for alignment
+    pub timestamp: u64,   // Kernel timestamp (ns)
 }
+
+// Threat types for IDS categorization
+pub const THREAT_NONE: u8 = 0;
+pub const THREAT_SCAN_XMAS: u8 = 1;
+pub const THREAT_SCAN_NULL: u8 = 2;
+pub const THREAT_SCAN_SYNFIN: u8 = 3;
+pub const THREAT_SCAN_PORT: u8 = 4;
+pub const THREAT_FLOOD_SYN: u8 = 5;
+pub const THREAT_BLOCKLIST: u8 = 6;
+pub const THREAT_INCOMING_SYN: u8 = 7;
+
+// Actions
+pub const ACTION_PASS: u8 = 0;
+pub const ACTION_DROP: u8 = 1;
+pub const ACTION_ALERT: u8 = 2;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -106,7 +128,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     let ipv4_hdr: *const Ipv4Hdr = ptr_at(&ctx, ip_offset)?;
     let src_addr = unsafe { (*ipv4_hdr).src_addr };
+    let dst_addr = unsafe { (*ipv4_hdr).dst_addr };
     let proto = unsafe { (*ipv4_hdr).proto };
+    let total_len = u16::from_be(unsafe { (*ipv4_hdr).tot_len });
     
     // Check IP header length - SKIP packets with IP options
     let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
@@ -117,10 +141,15 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // L4 offset depends on interface type
     let l4_offset = l4_base_offset;
     
+    let mut src_port = 0u16;
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
 
     if proto == 6 { // TCP
+        // src_port at L4+0
+        let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *src_port_ptr });
+        
         // dst_port at L4+2
         let tcp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
         dst_port = u16::from_be(unsafe { *tcp_hdr });
@@ -129,6 +158,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
         tcp_flags = unsafe { *flags_ptr };
     } else if proto == 17 { // UDP
+        let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *src_port_ptr });
+        
         let udp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
         dst_port = u16::from_be(unsafe { *udp_hdr });
     }
@@ -143,23 +175,27 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         
         // 1. Xmas Tree Scan (FIN + URG + PSH)
         if fin && urg && psh {
-            return log_and_return(&ctx, src_addr, dst_port, proto, 3);
+            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
+                proto, tcp_flags, ACTION_DROP, THREAT_SCAN_XMAS, total_len);
         }
         
         // 2. Null Scan (No flags set)
         if tcp_flags == 0 {
-             return log_and_return(&ctx, src_addr, dst_port, proto, 3);
+            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
+                proto, tcp_flags, ACTION_DROP, THREAT_SCAN_NULL, total_len);
         }
         
         // 3. SYN + FIN (Illegal)
         if syn && fin {
-             return log_and_return(&ctx, src_addr, dst_port, proto, 3);
+            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
+                proto, tcp_flags, ACTION_DROP, THREAT_SCAN_SYNFIN, total_len);
         }
         
         // 4. DROP ALL incoming SYN (no ACK) - blocks nmap and all new incoming connections
         // This is aggressive but effective against ALL scans
         if syn && !ack {
-            return log_and_return(&ctx, src_addr, dst_port, proto, 3);
+            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
+                proto, tcp_flags, ACTION_DROP, THREAT_INCOMING_SYN, total_len);
         }
     }
     // ------------------
@@ -195,7 +231,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 // Check threshold
                 if state_ref.port_count > PORT_SCAN_THRESHOLD {
                     // Port scan detected!
-                    return log_and_return(&ctx, src_addr, dst_port, proto, 6); // action 6 = PORT SCAN
+                    return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
+                        proto, tcp_flags, ACTION_DROP, THREAT_SCAN_PORT, total_len);
                 }
             }
         } else {
@@ -243,7 +280,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     // Allow packet
                 } else {
                     // SYN FLOOD DETECTED - drop
-                    return log_and_return(&ctx, src_addr, dst_port, proto, 5); // 5 = RATE_LIMIT
+                    return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
+                        proto, tcp_flags, ACTION_DROP, THREAT_FLOOD_SYN, total_len);
                 }
             } else {
                 // First packet from this IP - initialize with max tokens - 1
@@ -306,7 +344,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                                                                                     if let Ok(b9) = ptr_at::<u8>(&ctx, payload_offset + 9) {
                                                                                         if unsafe { *b9 } == 0x6E { // n
                                                                                             // DPI MATCH: GET /admin
-                                                                                            return log_and_return(&ctx, src_addr, dst_port, proto, 4);
+                                                                                            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_NONE, total_len);
                                                                                         }
                                                                                     }
                                                                                 }
@@ -339,8 +377,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         _pad: 0,
     };
 
-    if let Some(action) = unsafe { BLOCKLIST.get(&key_exact) } {
-        log_and_return(&ctx, src_addr, dst_port, proto, *action)
+    if let Some(_action) = unsafe { BLOCKLIST.get(&key_exact) } {
+        log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len)
     } else {
         // 2. Wildcard Port/Proto Lookup (Block IP entirely)
         let key_wildcard = FlowKey {
@@ -349,8 +387,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             proto: 0,
             _pad: 0,
         };
-        if let Some(action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
-            log_and_return(&ctx, src_addr, dst_port, proto, *action)
+        if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
+            log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len)
         } else {
             // DEBUG: Log PASS for this IP to verify XDP is seeing packets
             // Uncomment next line to enable verbose logging (WARNING: high volume!)
@@ -360,15 +398,40 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     }
 }
 
-fn log_and_return(ctx: &XdpContext, ip: u32, port: u16, proto: u8, action: u32) -> Result<u32, ()> {
+fn log_and_return(
+    ctx: &XdpContext,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    proto: u8,
+    tcp_flags: u8,
+    action: u8,
+    threat_type: u8,
+    packet_len: u16,
+) -> Result<u32, ()> {
+    let timestamp = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    
     let log_entry = PacketLog {
-        ipv4_addr: ip,
-        port: port,
-        proto: proto,
-        action: action,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        proto,
+        tcp_flags,
+        action,
+        threat_type,
+        packet_len,
+        _pad: 0,
+        timestamp,
     };
     EVENTS.output(ctx, &log_entry, 0);
-    Ok(xdp_action::XDP_DROP)
+    
+    if action == ACTION_DROP {
+        Ok(xdp_action::XDP_DROP)
+    } else {
+        Ok(xdp_action::XDP_PASS)
+    }
 }
 
 #[panic_handler]

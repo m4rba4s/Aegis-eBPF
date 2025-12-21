@@ -18,14 +18,8 @@ use std::collections::VecDeque;
 use chrono;
 use serde_json;
 
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct PacketLog {
-    pub ipv4_addr: u32,
-    pub port: u16,
-    pub proto: u8,
-    pub action: u32,
-}
+// Import PacketLog from aegis-common (IDS/IPS extended structure)
+use aegis_common::PacketLog;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -61,6 +55,22 @@ enum Commands {
         #[clap(short, long, default_value = "aegis.yaml")]
         file: String,
     },
+}
+
+/// Format TCP flags byte into human-readable string
+fn format_tcp_flags(flags: u8) -> String {
+    let mut result = String::new();
+    if flags & 0x01 != 0 { result.push_str("FIN "); }
+    if flags & 0x02 != 0 { result.push_str("SYN "); }
+    if flags & 0x04 != 0 { result.push_str("RST "); }
+    if flags & 0x08 != 0 { result.push_str("PSH "); }
+    if flags & 0x10 != 0 { result.push_str("ACK "); }
+    if flags & 0x20 != 0 { result.push_str("URG "); }
+    if result.is_empty() {
+        format!("0x{:02x}", flags)
+    } else {
+        result.trim().to_string()
+    }
 }
 
 #[tokio::main]
@@ -176,24 +186,48 @@ async fn main() -> Result<(), anyhow::Error> {
                                     let buf = &mut buffers[i];
                                     let ptr = buf.as_ptr() as *const PacketLog;
                                     let log = unsafe { ptr.read_unaligned() };
-                                    let src_ip = Ipv4Addr::from(u32::from_be(log.ipv4_addr));
+                                    let src_ip = Ipv4Addr::from(u32::from_be(log.src_ip));
+                                    let dst_ip = Ipv4Addr::from(u32::from_be(log.dst_ip));
                                     
-                                    let msg = match log.action {
-                                        2 => format!("LOG: Dropped packet from {}", src_ip),
-                                        3 => format!("⚠️  SUSPICIOUS: Heuristic Drop from {}", src_ip),
-                                        4 => format!("💀 DPI ALERT: Payload Drop from {}", src_ip),
-                                        5 => format!("🔥 RATE LIMIT: SYN Flood from {}", src_ip),
-                                        6 => format!("🔍 PORT SCAN: Detected from {} (port {})", src_ip, log.port),
-                                        100 => format!("🔍 TCP flags=0x{:02x} from {} port {}", log.proto, src_ip, log.port),
-                                        _ => format!("LOG: Unknown action {} from {}", log.action, src_ip),
+                                    // Format threat type
+                                    let threat_str = match log.threat_type {
+                                        1 => "XMAS_SCAN",
+                                        2 => "NULL_SCAN",
+                                        3 => "SYNFIN_SCAN",
+                                        4 => "PORT_SCAN",
+                                        5 => "SYN_FLOOD",
+                                        6 => "BLOCKLIST",
+                                        7 => "INCOMING_SYN",
+                                        _ => "UNKNOWN",
+                                    };
+                                    
+                                    // Format TCP flags
+                                    let flags_str = format_tcp_flags(log.tcp_flags);
+                                    
+                                    let msg = match log.threat_type {
+                                        1 => format!("🎄 XMAS SCAN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
+                                        2 => format!("⚫ NULL SCAN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        3 => format!("💀 SYNFIN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
+                                        4 => format!("🔍 PORT SCAN: {} scanned port {}", src_ip, log.dst_port),
+                                        5 => format!("🔥 SYN FLOOD: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        6 => format!("🚫 BLOCKED: {} (blocklist)", src_ip),
+                                        7 => format!("🛡️ DROP SYN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        _ => format!("📋 LOG: {} -> {}:{} [{}] threat={}", 
+                                            src_ip, dst_ip, log.dst_port, flags_str, threat_str),
                                     };
 
-                                    // Remote Logging
+                                    // Remote Logging (JSON)
                                     if let Some(ref remote) = remote_log {
                                         let json_log = serde_json::json!({
                                             "src_ip": src_ip.to_string(),
+                                            "dst_ip": dst_ip.to_string(),
+                                            "src_port": log.src_port,
+                                            "dst_port": log.dst_port,
+                                            "proto": log.proto,
+                                            "tcp_flags": log.tcp_flags,
                                             "action": log.action,
-                                            "msg": msg,
+                                            "threat_type": threat_str,
+                                            "packet_len": log.packet_len,
                                             "timestamp": chrono::Utc::now().to_rfc3339()
                                         });
                                         let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok();
@@ -208,11 +242,11 @@ async fn main() -> Result<(), anyhow::Error> {
                                     }
 
                                     // --- DYNAMIC AUTO-BAN (OODA Loop) ---
-                                    // If action is 4 (DPI) or 5 (Rate Limit), auto-ban the IP
-                                    if log.action == 4 || log.action == 5 {
+                                    // Auto-ban on SYN FLOOD or PORT SCAN
+                                    if log.threat_type == 5 || log.threat_type == 4 {
                                         let mut blocklist = blocklist_inner.lock().unwrap();
                                         let key = FlowKey {
-                                            src_ip: log.ipv4_addr, // Already Network Byte Order from eBPF
+                                            src_ip: log.src_ip, // Already Network Byte Order from eBPF
                                             dst_port: 0,           // Wildcard port
                                             proto: 0,              // Wildcard proto
                                             _pad: 0,
