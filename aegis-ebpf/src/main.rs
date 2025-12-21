@@ -39,6 +39,16 @@ pub struct RateLimitState {
     pub last_update: u64, // Last update timestamp (ns)
 }
 
+// Port Scan detection state per source IP
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct PortScanState {
+    pub port_bitmap: [u32; 8],  // 256 bits = ports 0-255 (common ports)
+    pub port_count: u16,        // Count of unique ports accessed
+    pub first_seen: u64,        // First packet timestamp (ns)
+    pub _pad: [u8; 6],          // Padding for alignment
+}
+
 #[map]
 static BLOCKLIST: HashMap<FlowKey, u32> = HashMap::with_max_entries(1024, 0);
 
@@ -53,9 +63,17 @@ static RATE_LIMIT: HashMap<u32, RateLimitState> = HashMap::with_max_entries(4096
 #[map]
 static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
 
+// Port Scan detection map: source IP -> PortScanState
+#[map]
+static PORT_SCAN: HashMap<u32, PortScanState> = HashMap::with_max_entries(4096, 0);
+
 // Config: tokens per second refill rate, max bucket size
 const TOKENS_PER_SEC: u32 = 100;  // 100 SYN packets/sec allowed
 const MAX_TOKENS: u32 = 200;      // Burst capacity
+
+// Port Scan detection thresholds
+const PORT_SCAN_THRESHOLD: u16 = 10;     // Alert if >10 unique ports accessed
+const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
@@ -142,6 +160,56 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         // This is aggressive but effective against ALL scans
         if syn && !ack {
             return log_and_return(&ctx, src_addr, dst_port, proto, 3);
+        }
+    }
+    // ------------------
+
+    // --- PORT SCAN DETECTION ---
+    // Track unique destination ports per source IP
+    // If >10 unique ports in 5 seconds = port scan
+    if proto == 6 || proto == 17 { // TCP or UDP
+        let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+        let port_index = (dst_port & 0xFF) as usize; // Only track ports 0-255
+        let bitmap_index = port_index / 32;
+        let bit_position = port_index % 32;
+        
+        if let Some(state) = unsafe { PORT_SCAN.get_ptr_mut(&src_addr) } {
+            let state_ref = unsafe { &mut *state };
+            
+            // Reset if window expired
+            if now_ns - state_ref.first_seen > PORT_SCAN_WINDOW_NS {
+                state_ref.port_bitmap = [0u32; 8];
+                state_ref.port_count = 0;
+                state_ref.first_seen = now_ns;
+            }
+            
+            // Check if this port was already seen
+            if bitmap_index < 8 {
+                let bit_mask = 1u32 << bit_position;
+                if state_ref.port_bitmap[bitmap_index] & bit_mask == 0 {
+                    // New port - mark it
+                    state_ref.port_bitmap[bitmap_index] |= bit_mask;
+                    state_ref.port_count += 1;
+                }
+                
+                // Check threshold
+                if state_ref.port_count > PORT_SCAN_THRESHOLD {
+                    // Port scan detected!
+                    return log_and_return(&ctx, src_addr, dst_port, proto, 6); // action 6 = PORT SCAN
+                }
+            }
+        } else {
+            // First packet from this IP - initialize
+            let mut new_state = PortScanState {
+                port_bitmap: [0u32; 8],
+                port_count: 1,
+                first_seen: now_ns,
+                _pad: [0u8; 6],
+            };
+            if bitmap_index < 8 {
+                new_state.port_bitmap[bitmap_index] = 1u32 << bit_position;
+            }
+            let _ = PORT_SCAN.insert(&src_addr, &new_state, 0);
         }
     }
     // ------------------

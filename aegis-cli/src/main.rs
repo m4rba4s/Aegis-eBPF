@@ -183,6 +183,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                         3 => format!("⚠️  SUSPICIOUS: Heuristic Drop from {}", src_ip),
                                         4 => format!("💀 DPI ALERT: Payload Drop from {}", src_ip),
                                         5 => format!("🔥 RATE LIMIT: SYN Flood from {}", src_ip),
+                                        6 => format!("🔍 PORT SCAN: Detected from {} (port {})", src_ip, log.port),
                                         100 => format!("🔍 TCP flags=0x{:02x} from {} port {}", log.proto, src_ip, log.port),
                                         _ => format!("LOG: Unknown action {} from {}", log.action, src_ip),
                                     };
