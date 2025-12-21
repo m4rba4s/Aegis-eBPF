@@ -120,6 +120,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         let fin = tcp_flags & 0x01 != 0;
         let syn = tcp_flags & 0x02 != 0;
         let psh = tcp_flags & 0x08 != 0;
+        let ack = tcp_flags & 0x10 != 0;
         let urg = tcp_flags & 0x20 != 0;
         
         // 1. Xmas Tree Scan (FIN + URG + PSH)
@@ -135,6 +136,12 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         // 3. SYN + FIN (Illegal)
         if syn && fin {
              return log_and_return(&ctx, src_addr, dst_port, proto, 3);
+        }
+        
+        // 4. DROP ALL incoming SYN (no ACK) - blocks nmap and all new incoming connections
+        // This is aggressive but effective against ALL scans
+        if syn && !ack {
+            return log_and_return(&ctx, src_addr, dst_port, proto, 3);
         }
     }
     // ------------------

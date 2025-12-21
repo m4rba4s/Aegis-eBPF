@@ -183,6 +183,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                         3 => format!("⚠️  SUSPICIOUS: Heuristic Drop from {}", src_ip),
                                         4 => format!("💀 DPI ALERT: Payload Drop from {}", src_ip),
                                         5 => format!("🔥 RATE LIMIT: SYN Flood from {}", src_ip),
+                                        100 => format!("🔍 TCP flags=0x{:02x} from {} port {}", log.proto, src_ip, log.port),
                                         _ => format!("LOG: Unknown action {} from {}", log.action, src_ip),
                                     };
 
@@ -257,7 +258,8 @@ async fn main() -> Result<(), anyhow::Error> {
                 });
 
                 tui::run_tui(blocklist_arc.clone(), logs_arc.clone()).await?;
-                println!("\nExited TUI. Entering Interactive Mode...");
+                println!("\nExiting Aegis...");
+                return Ok(());
             } else if let Commands::Daemon = opt.command {
                 // Daemon mode: no REPL, just run until SIGTERM
                 tokio::spawn(async move {
