@@ -7,9 +7,11 @@
 
 mod parser;
 mod downloader;
+mod loader;
 
 pub use parser::*;
 pub use downloader::*;
+pub use loader::*;
 
 use std::net::Ipv4Addr;
 use std::collections::HashSet;

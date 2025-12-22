@@ -65,12 +65,14 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum FeedsAction {
-    /// Update all enabled threat feeds
+    /// Update all enabled threat feeds (download only, no sudo required)
     Update,
     /// List configured feeds
     List,
     /// Show feed statistics
     Stats,
+    /// Load feeds into eBPF blocklist (requires sudo)
+    Load,
 }
 
 /// Format TCP flags byte into human-readable string
@@ -157,6 +159,40 @@ async fn main() -> Result<(), anyhow::Error> {
                 println!("📊 Feed Statistics:\n");
                 println!("  Cache dir: {:?}", feeds::cache_dir());
                 println!("  (Run 'feeds update' first to load feeds)");
+            }
+            FeedsAction::Load => {
+                println!("🔄 Loading threat feeds into eBPF blocklist...\n");
+                println!("⚠️  This requires sudo and eBPF program loaded.\n");
+                
+                // Load eBPF just for map access
+                let ebpf_path = "/usr/local/share/aegis/aegis.o";
+                let mut bpf = match Ebpf::load_file(ebpf_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        println!("❌ Failed to load eBPF: {}", e);
+                        return Ok(());
+                    }
+                };
+                
+                // Get CIDR_BLOCKLIST map
+                let mut cidr_map: aya::maps::LpmTrie<_, aegis_common::LpmKeyIpv4, aegis_common::CidrBlockEntry> = 
+                    match aya::maps::LpmTrie::try_from(bpf.map_mut("CIDR_BLOCKLIST").unwrap()) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            println!("❌ Failed to get CIDR_BLOCKLIST map: {}", e);
+                            return Ok(());
+                        }
+                    };
+                
+                // Load feeds
+                match feeds::load_feeds_to_map(&mut cidr_map) {
+                    Ok(count) => {
+                        println!("✅ Loaded {} IPs into CIDR blocklist", count);
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to load feeds: {}", e);
+                    }
+                }
             }
         }
         return Ok(());

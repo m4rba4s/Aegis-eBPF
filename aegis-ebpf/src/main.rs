@@ -7,7 +7,7 @@ mod parsing;
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{HashMap, PerfEventArray},
+    maps::{HashMap, PerfEventArray, lpm_trie::{LpmTrie, Key}},
     programs::XdpContext,
 };
 use headers::{EthHdr, Ipv4Hdr, ETH_P_IP};
@@ -71,8 +71,30 @@ pub struct PortScanState {
     pub _pad: [u8; 6],          // Padding for alignment
 }
 
+/// LPM key for CIDR matching (prefix + IP)
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct LpmKeyIpv4 {
+    pub prefix_len: u32,  // Number of bits in prefix (0-32)
+    pub addr: u32,        // IPv4 address in network byte order
+}
+
+/// Value for CIDR blocklist entry
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct CidrBlockEntry {
+    pub category: u8,    // Feed category (1=Spamhaus, 2=AbuseCh, etc.)
+    pub _pad: [u8; 3],
+}
+
+// Exact match blocklist (legacy, for manual blocks)
 #[map]
 static BLOCKLIST: HashMap<FlowKey, u32> = HashMap::with_max_entries(1024, 0);
+
+// CIDR prefix blocklist using LPM Trie (for threat feeds)
+// Supports up to 50K CIDR prefixes efficiently
+#[map]
+static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(65536, 0);
 
 #[map]
 static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
@@ -331,7 +353,18 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     }
     // ------------------
     
-    // 1. Exact Match Lookup
+    // 0. CIDR Blocklist Lookup (threat feeds - most efficient)
+    let cidr_key = Key::new(32, LpmKeyIpv4 {
+        prefix_len: 32,
+        addr: src_addr,
+    });
+    
+    if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
+        return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
+            proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len);
+    }
+    
+    // 1. Exact Match Lookup (manual blocks)
     let key_exact = FlowKey {
         src_ip: src_addr,
         dst_port: dst_port,
@@ -352,9 +385,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
             log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len)
         } else {
-            // DEBUG: Log PASS for this IP to verify XDP is seeing packets
-            // Uncomment next line to enable verbose logging (WARNING: high volume!)
-            // EVENTS.output(&ctx, &PacketLog { ipv4_addr: src_addr, port: dst_port, proto, action: 0 }, 0);
             Ok(xdp_action::XDP_PASS)
         }
     }
