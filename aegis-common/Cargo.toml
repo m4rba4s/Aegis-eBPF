@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-user = ["dep:serde"]
+user = ["dep:serde", "dep:aya"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
+aya = { version = "0.13", optional = true }
