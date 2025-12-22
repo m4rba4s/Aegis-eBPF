@@ -4,6 +4,20 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Source cargo if available
+if [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+fi
+
+# Check for cargo
+if ! command -v cargo &> /dev/null; then
+    echo "❌ cargo not found. Run this script without sudo first to build:"
+    echo "   cargo run -p xtask -- build-ebpf --profile release"
+    echo "   cargo build --release -p aegis-cli"
+    echo "Then run: sudo ./install.sh --install-only"
+    exit 1
+fi
+
 echo "═══════════════════════════════════════════════════════"
 echo "  🛡️  AEGIS XDP FIREWALL - INSTALLER"
 echo "═══════════════════════════════════════════════════════"
