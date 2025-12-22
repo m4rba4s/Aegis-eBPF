@@ -1,5 +1,6 @@
 mod config;
 mod tui;
+mod feeds;
 
 use aya::Ebpf;
 use aya::programs::{Xdp, XdpFlags};
@@ -55,6 +56,21 @@ enum Commands {
         #[clap(short, long, default_value = "aegis.yaml")]
         file: String,
     },
+    /// Threat feed management
+    Feeds {
+        #[clap(subcommand)]
+        action: FeedsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum FeedsAction {
+    /// Update all enabled threat feeds
+    Update,
+    /// List configured feeds
+    List,
+    /// Show feed statistics
+    Stats,
 }
 
 /// Format TCP flags byte into human-readable string
@@ -105,7 +121,48 @@ async fn main() -> Result<(), anyhow::Error> {
     let config_path = "aegis.yaml";
     let cfg = config::Config::load(config_path).unwrap_or_else(|_| config::Config { rules: vec![], remote_log: None });
 
-    // Load eBPF
+    // Handle Feeds command early (no eBPF needed)
+    if let Commands::Feeds { action } = &opt.command {
+        match action {
+            FeedsAction::Update => {
+                println!("🔄 Updating threat feeds...\n");
+                let configs = feeds::FeedConfig::defaults();
+                let mut total_ips = 0usize;
+                
+                for config in configs.iter().filter(|c| c.enabled) {
+                    print!("  {} ... ", config.name);
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                    match feeds::download_feed_blocking(config) {
+                        Ok(result) => {
+                            println!("✅ {} IPs", result.ip_count);
+                            total_ips += result.ip_count;
+                        }
+                        Err(e) => {
+                            println!("❌ {}", e);
+                        }
+                    }
+                }
+                println!("\n📊 Total: {} IPs loaded", total_ips);
+            }
+            FeedsAction::List => {
+                println!("📋 Configured Threat Feeds:\n");
+                for config in feeds::FeedConfig::defaults() {
+                    let status = if config.enabled { "✅" } else { "❌" };
+                    println!("  {} {} ({:?})", status, config.name, config.category);
+                    println!("     URL: {}", config.url);
+                    println!("     Update: every {}h\n", config.update_interval_secs / 3600);
+                }
+            }
+            FeedsAction::Stats => {
+                println!("📊 Feed Statistics:\n");
+                println!("  Cache dir: {:?}", feeds::cache_dir());
+                println!("  (Run 'feeds update' first to load feeds)");
+            }
+        }
+        return Ok(());
+    }
+
+    // Load eBPF (only for commands that need it)
     let ebpf_path = "/usr/local/share/aegis/aegis.o";
     let mut bpf = Ebpf::load_file(ebpf_path)?;
     
@@ -373,6 +430,10 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         Commands::Restore { file: _ } => {
              println!("Please use the 'restore' command inside the running 'load' session.");
+        }
+        Commands::Feeds { .. } => {
+            // Handled before eBPF loading - should never reach here
+            unreachable!("Feeds command should be handled before eBPF loading");
         }
     }
 
