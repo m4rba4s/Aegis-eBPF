@@ -71,50 +71,86 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             let ip = conn.ip;
             let mut geo = "Locating...".to_string();
             
-            // Geo Cache Logic
-            {
-                let map = cache.lock().unwrap();
-                if let Some(g) = map.get(&ip) {
-                    geo = g.clone();
+            // Check if IP is private/internal (no geo lookup needed)
+            let is_private = match ip {
+                IpAddr::V4(ipv4) => {
+                    let octets = ipv4.octets();
+                    // Private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    // CGNAT range: 100.64.0.0/10 (used by VPNs like Mullvad)
+                    // Localhost: 127.0.0.0/8
+                    octets[0] == 10 ||
+                    (octets[0] == 172 && (octets[1] & 0xF0) == 16) ||
+                    (octets[0] == 192 && octets[1] == 168) ||
+                    (octets[0] == 100 && (octets[1] & 0xC0) == 64) ||  // 100.64.0.0/10 CGNAT
+                    octets[0] == 127
                 }
-            }
-
-            let should_fetch = {
-                let mut map = cache.lock().unwrap();
-                if !map.contains_key(&ip) {
-                    map.insert(ip, "Fetching...".to_string());
-                    true
-                } else {
-                    false
-                }
+                IpAddr::V6(ipv6) => ipv6.is_loopback(),
             };
-
-            if should_fetch {
-                let cache_clone = cache.clone();
-                thread::spawn(move || {
-                    let url = format!("http://ip-api.com/json/{}", ip);
-                    let val: String = match reqwest::blocking::get(&url) {
-                        Ok(resp) => {
-                            if let Ok(json) = resp.json::<Value>() {
-                                let country = json["countryCode"].as_str().unwrap_or("??");
-                                let city = json["city"].as_str().unwrap_or("Unknown");
-                                format!("{} {}", country, city)
-                            } else {
-                                "Geo Error".to_string()
-                            }
+            
+            if is_private {
+                geo = match ip {
+                    IpAddr::V4(ipv4) => {
+                        let octets = ipv4.octets();
+                        if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
+                            "VPN Internal".to_string()  // Mullvad CGNAT
+                        } else if octets[0] == 127 {
+                            "Localhost".to_string()
+                        } else {
+                            "Private LAN".to_string()
                         }
-                        Err(_) => "Net Error".to_string(),
-                    };
-                    let mut map = cache_clone.lock().unwrap();
-                    map.insert(ip, val);
-                });
-            }
+                    }
+                    _ => "Private".to_string(),
+                };
+            } else {
+                // Geo Cache Logic for public IPs
+                {
+                    let map = cache.lock().unwrap();
+                    if let Some(g) = map.get(&ip) {
+                        geo = g.clone();
+                    }
+                }
 
-            // Re-read geo
-            {
-                let map = cache.lock().unwrap();
-                if let Some(g) = map.get(&ip) {
-                    geo = g.clone();
+                let should_fetch = {
+                    let mut map = cache.lock().unwrap();
+                    if !map.contains_key(&ip) {
+                        map.insert(ip, "Fetching...".to_string());
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if should_fetch {
+                    let cache_clone = cache.clone();
+                    thread::spawn(move || {
+                        let url = format!("http://ip-api.com/json/{}", ip);
+                        let val: String = match reqwest::blocking::get(&url) {
+                            Ok(resp) => {
+                                if let Ok(json) = resp.json::<Value>() {
+                                    if json["status"].as_str() == Some("fail") {
+                                        "Private/Reserved".to_string()
+                                    } else {
+                                        let country = json["countryCode"].as_str().unwrap_or("??");
+                                        let city = json["city"].as_str().unwrap_or("Unknown");
+                                        format!("{} {}", country, city)
+                                    }
+                                } else {
+                                    "Geo Error".to_string()
+                                }
+                            }
+                            Err(_) => "Net Error".to_string(),
+                        };
+                        let mut map = cache_clone.lock().unwrap();
+                        map.insert(ip, val);
+                    });
+                }
+
+                // Re-read geo
+                {
+                    let map = cache.lock().unwrap();
+                    if let Some(g) = map.get(&ip) {
+                        geo = g.clone();
+                    }
                 }
             }
 
