@@ -111,6 +111,50 @@ static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
 #[map]
 static PORT_SCAN: HashMap<u32, PortScanState> = HashMap::with_max_entries(4096, 0);
 
+// --- CONNECTION TRACKING (Stateful Firewall) ---
+
+/// Connection states
+pub const CONN_NEW: u8 = 0;
+pub const CONN_SYN_SENT: u8 = 1;      // Outgoing SYN sent
+pub const CONN_SYN_RECV: u8 = 2;      // SYN received, awaiting SYN-ACK
+pub const CONN_ESTABLISHED: u8 = 3;   // 3-way handshake complete
+pub const CONN_FIN_WAIT: u8 = 4;      // FIN sent/received
+pub const CONN_CLOSED: u8 = 5;        // Ready for cleanup
+
+/// 5-tuple connection key
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct ConnTrackKey {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Connection state with timing
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct ConnTrackState {
+    pub state: u8,          // CONN_* state
+    pub direction: u8,      // 0 = outgoing (we initiated), 1 = incoming
+    pub _pad: [u8; 2],
+    pub last_seen: u64,     // Last packet timestamp (ns)
+    pub packets: u32,       // Packet count
+    pub bytes: u32,         // Byte count
+}
+
+// Connection tracking map: 5-tuple -> state
+// Tracks both directions of a connection
+#[map]
+static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(65536, 0);
+
+// Connection timeout: 5 minutes for ESTABLISHED, 30s for others
+const CONN_TIMEOUT_ESTABLISHED_NS: u64 = 300_000_000_000; // 5 min
+const CONN_TIMEOUT_OTHER_NS: u64 = 30_000_000_000;        // 30 sec
+// ------------------------------------------
+
 // Config: tokens per second refill rate, max bucket size
 const TOKENS_PER_SEC: u32 = 100;  // 100 SYN packets/sec allowed
 const MAX_TOKENS: u32 = 200;      // Burst capacity
@@ -202,7 +246,54 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     }
     // ------------------
 
-    // --- HEURISTICS ---
+    // --- CONNECTION TRACKING (Stateful Firewall) ---
+    // ESTABLISHED connections bypass all detection (fast path)
+    let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    
+    // Build connection key (incoming direction: swap src/dst for lookup)
+    let conn_key = ConnTrackKey {
+        src_ip: dst_addr,      // Our IP as "source" of the connection
+        dst_ip: src_addr,      // Remote IP as "destination"
+        src_port: dst_port,    // Our port
+        dst_port: src_port,    // Remote port  
+        proto,
+        _pad: [0u8; 3],
+    };
+    
+    // Check if this is an existing ESTABLISHED connection
+    if let Some(state) = unsafe { CONN_TRACK.get(&conn_key) } {
+        if state.state == CONN_ESTABLISHED {
+            // Fast path: ESTABLISHED connection, update last_seen and pass
+            let mut updated = *state;
+            updated.last_seen = now_ns;
+            updated.packets = updated.packets.saturating_add(1);
+            updated.bytes = updated.bytes.saturating_add(total_len as u32);
+            let _ = CONN_TRACK.insert(&conn_key, &updated, 0);
+            return Ok(xdp_action::XDP_PASS);
+        }
+    }
+    
+    // Also check the reverse direction (outgoing packets)
+    let conn_key_rev = ConnTrackKey {
+        src_ip: src_addr,
+        dst_ip: dst_addr,
+        src_port,
+        dst_port,
+        proto,
+        _pad: [0u8; 3],
+    };
+    
+    if let Some(state) = unsafe { CONN_TRACK.get(&conn_key_rev) } {
+        if state.state == CONN_ESTABLISHED {
+            let mut updated = *state;
+            updated.last_seen = now_ns;
+            updated.packets = updated.packets.saturating_add(1);
+            updated.bytes = updated.bytes.saturating_add(total_len as u32);
+            let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
+            return Ok(xdp_action::XDP_PASS);
+        }
+    }
+    // ------------------
     if proto == 6 {
         let fin = tcp_flags & 0x01 != 0;
         let syn = tcp_flags & 0x02 != 0;
@@ -385,6 +476,56 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
             log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len)
         } else {
+            // --- CREATE/UPDATE CONNECTION TRACKING ---
+            // If we reach here, packet is allowed - track the connection
+            
+            if proto == 6 { // TCP
+                let syn = tcp_flags & 0x02 != 0;
+                let ack = tcp_flags & 0x10 != 0;
+                
+                // Incoming SYN-ACK = response to our SYN = ESTABLISHED
+                if syn && ack {
+                    let new_conn = ConnTrackState {
+                        state: CONN_ESTABLISHED,
+                        direction: 0, // We initiated
+                        _pad: [0u8; 2],
+                        last_seen: now_ns,
+                        packets: 1,
+                        bytes: total_len as u32,
+                    };
+                    // Key: our outgoing connection (reversed)
+                    let out_key = ConnTrackKey {
+                        src_ip: dst_addr,
+                        dst_ip: src_addr,
+                        src_port: dst_port,
+                        dst_port: src_port,
+                        proto,
+                        _pad: [0u8; 3],
+                    };
+                    let _ = CONN_TRACK.insert(&out_key, &new_conn, 0);
+                }
+            } else if proto == 17 { // UDP - pseudo-connection
+                // Any valid UDP response = ESTABLISHED
+                let new_conn = ConnTrackState {
+                    state: CONN_ESTABLISHED,
+                    direction: 0,
+                    _pad: [0u8; 2],
+                    last_seen: now_ns,
+                    packets: 1,
+                    bytes: total_len as u32,
+                };
+                let out_key = ConnTrackKey {
+                    src_ip: dst_addr,
+                    dst_ip: src_addr,
+                    src_port: dst_port,
+                    dst_port: src_port,
+                    proto,
+                    _pad: [0u8; 3],
+                };
+                let _ = CONN_TRACK.insert(&out_key, &new_conn, 0);
+            }
+            // -------------------------------------------
+            
             Ok(xdp_action::XDP_PASS)
         }
     }
