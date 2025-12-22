@@ -160,7 +160,8 @@ const TOKENS_PER_SEC: u32 = 100;  // 100 SYN packets/sec allowed
 const MAX_TOKENS: u32 = 200;      // Burst capacity
 
 // Port Scan detection thresholds
-const PORT_SCAN_THRESHOLD: u16 = 10;     // Alert if >10 unique ports accessed
+// Increased to 50 to reduce false positives from browsers/proxies (Burp Suite, etc.)
+const PORT_SCAN_THRESHOLD: u16 = 50;     // Alert if >50 unique ports accessed
 const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
 
 #[xdp]
