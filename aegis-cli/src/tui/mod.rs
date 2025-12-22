@@ -123,6 +123,9 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                 if should_fetch {
                     let cache_clone = cache.clone();
                     thread::spawn(move || {
+                        // Throttle requests to avoid ip-api.com rate limiting (45/min)
+                        thread::sleep(std::time::Duration::from_millis(100));
+                        
                         let url = format!("http://ip-api.com/json/{}", ip);
                         let val: String = match reqwest::blocking::get(&url) {
                             Ok(resp) => {
