@@ -319,12 +319,13 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 proto, tcp_flags, ACTION_DROP, THREAT_SCAN_SYNFIN, total_len);
         }
         
-        // 4. DROP ALL incoming SYN (no ACK) - blocks nmap and all new incoming connections
-        // This is aggressive but effective against ALL scans
-        if syn && !ack {
-            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, THREAT_INCOMING_SYN, total_len);
-        }
+        // NOTE: We intentionally DO NOT block all incoming SYN here.
+        // The SYN-ACK (response to our outgoing SYN) is needed for connections to work.
+        // Connection tracking handles this: once we get SYN-ACK, connection becomes ESTABLISHED
+        // and future packets use the fast-path.
+        //
+        // For inbound server scenarios (if you're running a server), you'd want to allow
+        // incoming SYN to specific ports anyway.
     }
     // ------------------
 
