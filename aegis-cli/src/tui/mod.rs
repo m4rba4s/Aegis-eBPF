@@ -459,13 +459,29 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
     
     f.render_widget(details, main_chunks[1]);
 
-    // Logs
-    let logs: Vec<ListItem> = app
-        .logs
+    // Logs with deduplication
+    // Group consecutive identical events with count
+    let mut deduped_logs: Vec<(String, usize)> = Vec::new();
+    for log in app.logs.iter().rev().take(50) {
+        // Extract key part of log (IP + action) for dedup
+        if let Some(last) = deduped_logs.last_mut() {
+            if last.0 == *log {
+                last.1 += 1;
+                continue;
+            }
+        }
+        deduped_logs.push((log.clone(), 1));
+    }
+    
+    let logs: Vec<ListItem> = deduped_logs
         .iter()
-        .rev()
         .take(15)
-        .map(|l| {
+        .map(|(l, count)| {
+            let display = if *count > 1 {
+                format!("{} [x{}]", l, count)
+            } else {
+                l.clone()
+            };
             let style = if l.contains("DPI") {
                 Style::default().fg(Color::Rgb(255, 100, 100)).add_modifier(Modifier::BOLD)
             } else if l.contains("SUSPICIOUS") || l.contains("BANNED") {
@@ -475,7 +491,7 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
             } else {
                 Style::default().fg(Color::Gray)
             };
-            ListItem::new(Span::styled(l, style))
+            ListItem::new(Span::styled(display, style))
         })
         .collect();
 
