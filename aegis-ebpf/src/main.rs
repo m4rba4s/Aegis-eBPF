@@ -187,6 +187,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         dst_port = u16::from_be(unsafe { *udp_hdr });
     }
 
+    // --- WHITELIST CHECK (EARLY) ---
+    // MUST be before heuristics to avoid blocking VPN internal traffic
+    let src_octets = src_addr.to_be_bytes();
+    let is_whitelisted = 
+        src_octets[0] == 10 ||  // 10.0.0.0/8
+        (src_octets[0] == 172 && (src_octets[1] & 0xF0) == 16) ||  // 172.16.0.0/12
+        (src_octets[0] == 192 && src_octets[1] == 168) ||  // 192.168.0.0/16
+        (src_octets[0] == 100 && (src_octets[1] & 0xC0) == 64) ||  // 100.64.0.0/10 CGNAT/VPN
+        src_octets[0] == 127;  // 127.0.0.0/8 localhost
+    
+    if is_whitelisted {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    // ------------------
+
     // --- HEURISTICS ---
     if proto == 6 {
         let fin = tcp_flags & 0x01 != 0;
@@ -219,21 +234,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
                 proto, tcp_flags, ACTION_DROP, THREAT_INCOMING_SYN, total_len);
         }
-    }
-    // ------------------
-
-    // --- WHITELIST CHECK ---
-    // Skip detection for private/VPN internal IPs (100.64.0.0/10 CGNAT, 10.0.0.0/8, etc.)
-    let src_octets = src_addr.to_be_bytes();
-    let is_whitelisted = 
-        src_octets[0] == 10 ||  // 10.0.0.0/8
-        (src_octets[0] == 172 && (src_octets[1] & 0xF0) == 16) ||  // 172.16.0.0/12
-        (src_octets[0] == 192 && src_octets[1] == 168) ||  // 192.168.0.0/16
-        (src_octets[0] == 100 && (src_octets[1] & 0xC0) == 64) ||  // 100.64.0.0/10 CGNAT/VPN
-        src_octets[0] == 127;  // 127.0.0.0/8 localhost
-    
-    if is_whitelisted {
-        return Ok(xdp_action::XDP_PASS);
     }
     // ------------------
 
