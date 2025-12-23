@@ -332,8 +332,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     // --- PORT SCAN DETECTION ---
     // Track unique destination ports per source IP
-    // If >10 unique ports in 5 seconds = port scan
-    if proto == 6 || proto == 17 { // TCP or UDP
+    // If >50 unique ports in 5 seconds = port scan
+    // NOTE: Only TCP - UDP naturally uses many ports (streaming, gaming, VoIP)
+    if proto == 6 { // TCP only
         let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
         let port_index = (dst_port & 0xFF) as usize; // Only track ports 0-255
         let bitmap_index = port_index / 32;
