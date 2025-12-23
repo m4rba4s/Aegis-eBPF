@@ -1,0 +1,32 @@
+[Unit]
+Description=Aegis eBPF XDP Firewall
+Documentation=https://github.com/mindlock/aegis
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aegis-cli -i %i daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/log/aegis /var/lib/aegis
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aegis
+
+[Install]
+WantedBy=multi-user.target

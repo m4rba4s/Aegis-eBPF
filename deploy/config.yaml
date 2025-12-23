@@ -1,0 +1,84 @@
+# Aegis eBPF Firewall Configuration
+# /etc/aegis/config.yaml
+
+# Network interface to protect
+interface: wg0-mullvad
+
+# Detection thresholds
+detection:
+  port_scan:
+    threshold: 50 # Unique ports in window to trigger alert
+    window_secs: 5 # Time window for port scan detection
+
+  rate_limit:
+    tokens_per_sec: 100 # SYN packets/sec allowed
+    max_tokens: 200 # Burst capacity
+
+# Connection tracking
+connection_tracking:
+  enabled: true
+  max_connections: 65536
+  established_timeout_secs: 300 # 5 minutes
+  other_timeout_secs: 30
+
+# Whitelist (bypass all detection)
+whitelist:
+  networks:
+    - 10.0.0.0/8 # Private
+    - 172.16.0.0/12 # Private
+    - 192.168.0.0/16 # Private
+    - 100.64.0.0/10 # CGNAT/VPN
+    - 127.0.0.0/8 # Localhost
+
+  # Additional IPs/CIDRs to whitelist
+  custom: []
+
+  # Ports to always allow (destination)
+  ports: []
+
+# Threat feeds
+feeds:
+  enabled: true
+  auto_update: true
+  update_interval_hours: 24
+
+  sources:
+    - name: spamhaus_drop
+      url: https://www.spamhaus.org/drop/drop.txt
+      enabled: true
+
+    - name: spamhaus_edrop
+      url: https://www.spamhaus.org/drop/edrop.txt
+      enabled: true
+
+    - name: abuse_ch_feodo
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+      enabled: true
+
+    - name: firehol_level1
+      url: https://iplists.firehol.org/files/firehol_level1.netset
+      enabled: true
+
+# Logging
+logging:
+  level: info # debug, info, warn, error
+
+  # File logging (JSON format for SIEM)
+  file:
+    enabled: true
+    path: /var/log/aegis/events.json
+    max_size_mb: 100
+    max_files: 10
+
+  # Remote syslog
+  syslog:
+    enabled: false
+    server: ""
+    port: 514
+
+# Alerting (future)
+alerts:
+  enabled: false
+  webhook_url: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
