@@ -557,8 +557,8 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
     
     f.render_widget(log_list, left_chunks[1]);
 
-    // Help Footer
-    let help_text = " ↑/↓ Navigate │ SPACE Block/Unblock │ q Quit ";
+    // Help Footer with module hotkeys
+    let help_text = " ↑/↓ Navigate │ SPACE Block │ q Quit  │  MODULES: 1:PortScan 2:RateLimit 3:ThreatFeeds 4:ConnTrack 5:ScanDetect 0:All";
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Black).bg(Color::Rgb(100, 100, 150)))
         .block(Block::default());
