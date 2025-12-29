@@ -335,7 +335,7 @@ where
              app.logs = shared.clone();
         }
 
-        terminal.draw(|f| ui(f, &mut app))?;
+        terminal.draw(|f| ui(f, &mut app, &config_ref))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
@@ -422,7 +422,11 @@ where
     Ok(())
 }
 
-fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app: &mut App<T>) {
+fn ui<T: std::borrow::BorrowMut<MapData> + 'static, C: std::borrow::BorrowMut<MapData> + 'static>(
+    f: &mut ratatui::Frame, 
+    app: &mut App<T>,
+    config: &Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
+) {
     // Stats
     let total = app.connections.len();
     let tcp_count = app.connections.iter().filter(|c| c.proto == "TCP").count();
@@ -557,10 +561,36 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static>(f: &mut ratatui::Frame, app:
     
     f.render_widget(log_list, left_chunks[1]);
 
-    // Help Footer with module hotkeys
-    let help_text = " ↑/↓ Navigate │ SPACE Block │ q Quit  │  MODULES: 1:PortScan 2:RateLimit 3:ThreatFeeds 4:ConnTrack 5:ScanDetect 0:All";
-    let help = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::Black).bg(Color::Rgb(100, 100, 150)))
+    // Help Footer with colored module status
+    let base_style = Style::default().fg(Color::Black).bg(Color::Rgb(100, 100, 150));
+    let on_style = Style::default().fg(Color::Green).bg(Color::Rgb(100, 100, 150)).add_modifier(Modifier::BOLD);
+    let off_style = Style::default().fg(Color::Red).bg(Color::Rgb(100, 100, 150));
+    
+    // Read module states from config
+    let (m1, m2, m3, m4, m5) = if let Ok(cfg) = config.lock() {
+        (
+            cfg.get(&1u32, 0).unwrap_or(1) == 1,
+            cfg.get(&2u32, 0).unwrap_or(1) == 1,
+            cfg.get(&3u32, 0).unwrap_or(1) == 1,
+            cfg.get(&4u32, 0).unwrap_or(1) == 1,
+            cfg.get(&5u32, 0).unwrap_or(1) == 1,
+        )
+    } else {
+        (true, true, true, true, true)
+    };
+    
+    use ratatui::text::{Line, Span};
+    let help_line = Line::from(vec![
+        Span::styled(" ↑/↓ │ SPACE │ q │ ", base_style),
+        Span::styled("1:PortScan ", if m1 { on_style } else { off_style }),
+        Span::styled("2:RateLimit ", if m2 { on_style } else { off_style }),
+        Span::styled("3:ThreatFeeds ", if m3 { on_style } else { off_style }),
+        Span::styled("4:ConnTrack ", if m4 { on_style } else { off_style }),
+        Span::styled("5:ScanDetect ", if m5 { on_style } else { off_style }),
+        Span::styled("0:All", base_style),
+    ]);
+    let help = Paragraph::new(help_line)
+        .style(base_style)
         .block(Block::default());
     f.render_widget(help, chunks[2]);
 }
