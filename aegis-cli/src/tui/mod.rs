@@ -286,12 +286,14 @@ fn read_proc_net_tcp() -> Vec<RawConnection> {
     conns
 }
 
-pub async fn run_tui<T>(
+pub async fn run_tui<T, C>(
     blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>,
     logs: Arc<Mutex<VecDeque<String>>>,
+    config: Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
 ) -> Result<(), anyhow::Error>
 where
     T: std::borrow::BorrowMut<MapData> + 'static,
+    C: std::borrow::BorrowMut<MapData> + 'static,
 {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -300,6 +302,7 @@ where
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(blocklist);
+    let config_ref = config.clone();  // For hotkey handlers
     let tick_rate = Duration::from_millis(1000);
     let mut last_tick = Instant::now();
 
@@ -346,6 +349,56 @@ where
                         KeyCode::Down => app.next(),
                         KeyCode::Up => app.previous(),
                         KeyCode::Char(' ') => app.toggle_block(),
+                        // Module toggles (1-5 individual, 0 all)
+                        KeyCode::Char('1') => {
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let cur = cfg.get(&1u32, 0).unwrap_or(1);
+                                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                                let _ = cfg.insert(1u32, new_val, 0);
+                                app.logs.push_back(format!("🔧 PORT SCAN: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF" }));
+                            }
+                        }
+                        KeyCode::Char('2') => {
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let cur = cfg.get(&2u32, 0).unwrap_or(1);
+                                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                                let _ = cfg.insert(2u32, new_val, 0);
+                                app.logs.push_back(format!("🔧 RATE LIMIT: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF" }));
+                            }
+                        }
+                        KeyCode::Char('3') => {
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let cur = cfg.get(&3u32, 0).unwrap_or(1);
+                                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                                let _ = cfg.insert(3u32, new_val, 0);
+                                app.logs.push_back(format!("🔧 THREAT FEEDS: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF" }));
+                            }
+                        }
+                        KeyCode::Char('4') => {
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let cur = cfg.get(&4u32, 0).unwrap_or(1);
+                                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                                let _ = cfg.insert(4u32, new_val, 0);
+                                app.logs.push_back(format!("🔧 CONN TRACK: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF" }));
+                            }
+                        }
+                        KeyCode::Char('5') => {
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let cur = cfg.get(&5u32, 0).unwrap_or(1);
+                                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                                let _ = cfg.insert(5u32, new_val, 0);
+                                app.logs.push_back(format!("🔧 SCAN DETECT: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF" }));
+                            }
+                        }
+                        KeyCode::Char('0') => {
+                            // Toggle all: if any on → all off, else all on
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let any_on = (1u32..=5u32).any(|k| cfg.get(&k, 0).unwrap_or(1) == 1);
+                                let new_val = if any_on { 0u32 } else { 1u32 };
+                                for k in 1u32..=5u32 { let _ = cfg.insert(k, new_val, 0); }
+                                app.logs.push_back(format!("🛡️ ALL MODULES: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF (passthrough)" }));
+                            }
+                        }
                         _ => {}
                     }
                 }

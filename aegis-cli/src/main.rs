@@ -235,19 +235,26 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             }
             
-            // Set interface mode in CONFIG map
-            // L3 mode (1) for WireGuard/tun interfaces, L2 mode (0) for Ethernet
-            {
-                let config_map = bpf.take_map("CONFIG").expect("CONFIG map not found");
-                let mut config: HashMap<_, u32, u32> = HashMap::try_from(config_map)?;
-                let mode: u32 = if opt.iface.starts_with("wg") || opt.iface.starts_with("tun") {
-                    println!("ℹ️  Setting L3 mode (raw IP) for interface: {}", opt.iface);
-                    1  // L3 mode
-                } else {
-                    0  // L2 mode (Ethernet)
-                };
-                config.insert(0u32, mode, 0)?;
+            // Set interface mode and initialize defense modules in CONFIG map
+            let config_map = bpf.take_map("CONFIG").expect("CONFIG map not found");
+            let mut config: HashMap<_, u32, u32> = HashMap::try_from(config_map)?;
+            
+            // Key 0: Interface mode (L3 for WireGuard/tun, L2 for Ethernet)
+            let mode: u32 = if opt.iface.starts_with("wg") || opt.iface.starts_with("tun") {
+                println!("ℹ️  Setting L3 mode (raw IP) for interface: {}", opt.iface);
+                1
+            } else {
+                0
+            };
+            config.insert(0u32, mode, 0)?;
+            
+            // Keys 1-5: Defense modules (all enabled by default)
+            // 1=PortScan, 2=RateLimit, 3=ThreatFeeds, 4=ConnTrack, 5=ScanDetect
+            for key in 1u32..=5u32 {
+                config.insert(key, 1u32, 0)?;
             }
+            println!("🛡️  All defense modules ENABLED");
+            let config_arc = Arc::new(Mutex::new(config));
             
             // Shared Logs
             let logs_arc = Arc::new(Mutex::new(VecDeque::new()));
@@ -385,7 +392,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 });
 
-                tui::run_tui(blocklist_arc.clone(), logs_arc.clone()).await?;
+                tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone()).await?;
                 println!("\nExiting Aegis...");
                 return Ok(());
             } else if let Commands::Daemon = opt.command {

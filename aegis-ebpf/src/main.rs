@@ -103,9 +103,19 @@ static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
 #[map]
 static RATE_LIMIT: HashMap<u32, RateLimitState> = HashMap::with_max_entries(4096, 0);
 
-// Config map: key 0 = interface mode (0 = L2/Ethernet, 1 = L3/raw IP like WireGuard)
+// Config map for runtime toggles
+// Key 0 = interface mode (0 = L2/Ethernet, 1 = L3/raw IP)
+// Keys 1-5 = defense modules (1 = enabled, 0 = disabled)
 #[map]
 static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+
+// CONFIG keys
+const CFG_INTERFACE_MODE: u32 = 0;
+const CFG_PORT_SCAN: u32 = 1;
+const CFG_RATE_LIMIT: u32 = 2;
+const CFG_THREAT_FEEDS: u32 = 3;
+const CFG_CONN_TRACK: u32 = 4;
+const CFG_SCAN_DETECT: u32 = 5;
 
 // Port Scan detection map: source IP -> PortScanState
 #[map]
@@ -163,6 +173,12 @@ const MAX_TOKENS: u32 = 200;      // Burst capacity
 // Increased to 50 to reduce false positives from browsers/proxies (Burp Suite, etc.)
 const PORT_SCAN_THRESHOLD: u16 = 50;     // Alert if >50 unique ports accessed
 const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
+
+// Helper: check if module is enabled (default: enabled if not set)
+#[inline(always)]
+fn is_module_enabled(key: u32) -> bool {
+    unsafe { CONFIG.get(&key).copied().unwrap_or(1) == 1 }
+}
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
@@ -285,7 +301,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     };
     
     if let Some(state) = unsafe { CONN_TRACK.get(&conn_key_rev) } {
-        if state.state == CONN_ESTABLISHED {
+        if state.state == CONN_ESTABLISHED && is_module_enabled(CFG_CONN_TRACK) {
             let mut updated = *state;
             updated.last_seen = now_ns;
             updated.packets = updated.packets.saturating_add(1);
@@ -295,7 +311,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         }
     }
     // ------------------
-    if proto == 6 {
+    
+    // --- SCAN DETECTION (Xmas/Null/SYN+FIN) ---
+    if is_module_enabled(CFG_SCAN_DETECT) && proto == 6 {
         let fin = tcp_flags & 0x01 != 0;
         let syn = tcp_flags & 0x02 != 0;
         let psh = tcp_flags & 0x08 != 0;
@@ -334,7 +352,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // Track unique destination ports per source IP
     // If >50 unique ports in 5 seconds = port scan
     // NOTE: Only TCP - UDP naturally uses many ports (streaming, gaming, VoIP)
-    if proto == 6 { // TCP only
+    if is_module_enabled(CFG_PORT_SCAN) && proto == 6 { // TCP only
         let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
         let port_index = (dst_port & 0xFF) as usize; // Only track ports 0-255
         let bitmap_index = port_index / 32;
@@ -448,14 +466,16 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // ------------------
     
     // 0. CIDR Blocklist Lookup (threat feeds - most efficient)
-    let cidr_key = Key::new(32, LpmKeyIpv4 {
-        prefix_len: 32,
-        addr: src_addr,
-    });
-    
-    if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
-        return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
-            proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len);
+    if is_module_enabled(CFG_THREAT_FEEDS) {
+        let cidr_key = Key::new(32, LpmKeyIpv4 {
+            prefix_len: 32,
+            addr: src_addr,
+        });
+        
+        if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
+            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
+                proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len);
+        }
     }
     
     // 1. Exact Match Lookup (manual blocks)
