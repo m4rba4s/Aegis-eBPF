@@ -298,11 +298,28 @@ async fn main() -> Result<(), anyhow::Error> {
                                         5 => "SYN_FLOOD",
                                         6 => "BLOCKLIST",
                                         7 => "INCOMING_SYN",
+                                        _ => "NONE",
+                                    };
+                                    
+                                    // Format reason (WHY this action)
+                                    let reason_str = match log.reason {
+                                        0 => "DEFAULT",
+                                        1 => "WHITELIST",
+                                        2 => "CONNTRACK",
+                                        3 => "MANUAL_BLOCK",
+                                        4 => "CIDR_FEED",
+                                        5 => "PORTSCAN",
+                                        6 => "TCP_ANOMALY",
+                                        7 => "RATELIMIT",
+                                        8 => "IPV6_POLICY",
+                                        9 => "MALFORMED",
                                         _ => "UNKNOWN",
                                     };
                                     
                                     // Format TCP flags
                                     let flags_str = format_tcp_flags(log.tcp_flags);
+                                    
+                                    let action_icon = if log.action == 1 { "❌" } else { "✅" };
                                     
                                     let msg = match log.threat_type {
                                         1 => format!("🎄 XMAS SCAN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
@@ -310,10 +327,10 @@ async fn main() -> Result<(), anyhow::Error> {
                                         3 => format!("💀 SYNFIN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
                                         4 => format!("🔍 PORT SCAN: {} scanned port {}", src_ip, log.dst_port),
                                         5 => format!("🔥 SYN FLOOD: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
-                                        6 => format!("🚫 BLOCKED: {} (blocklist)", src_ip),
+                                        6 => format!("🚫 BLOCKED: {} ({})", src_ip, reason_str),
                                         7 => format!("🛡️ DROP SYN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
-                                        _ => format!("📋 LOG: {} -> {}:{} [{}] threat={}", 
-                                            src_ip, dst_ip, log.dst_port, flags_str, threat_str),
+                                        _ => format!("{} {} -> {}:{} [{}] reason={}", 
+                                            action_icon, src_ip, dst_ip, log.dst_port, flags_str, reason_str),
                                     };
 
                                     // Remote Logging (JSON)
@@ -326,6 +343,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                             "proto": log.proto,
                                             "tcp_flags": log.tcp_flags,
                                             "action": log.action,
+                                            "reason": reason_str,
                                             "threat_type": threat_str,
                                             "packet_len": log.packet_len,
                                             "timestamp": chrono::Utc::now().to_rfc3339()
