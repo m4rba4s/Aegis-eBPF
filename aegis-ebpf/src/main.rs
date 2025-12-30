@@ -116,6 +116,7 @@ const CFG_RATE_LIMIT: u32 = 2;
 const CFG_THREAT_FEEDS: u32 = 3;
 const CFG_CONN_TRACK: u32 = 4;
 const CFG_SCAN_DETECT: u32 = 5;
+const CFG_VERBOSE: u32 = 6;  // Log ALL packets (noisy!)
 
 // Port Scan detection map: source IP -> PortScanState
 #[map]
@@ -259,6 +260,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         src_octets[0] == 127;  // 127.0.0.0/8 localhost
     
     if is_whitelisted {
+        // Verbose logging for whitelisted traffic
+        if is_module_enabled(CFG_VERBOSE) {
+            log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, THREAT_NONE, total_len);
+        }
         return Ok(xdp_action::XDP_PASS);
     }
     // ------------------
@@ -307,6 +312,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             updated.packets = updated.packets.saturating_add(1);
             updated.bytes = updated.bytes.saturating_add(total_len as u32);
             let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
+            // Verbose logging for CT fast-path
+            if is_module_enabled(CFG_VERBOSE) {
+                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, THREAT_NONE, total_len);
+            }
             return Ok(xdp_action::XDP_PASS);
         }
     }
@@ -549,9 +558,45 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             }
             // -------------------------------------------
             
+            // Verbose logging for normal pass
+            if is_module_enabled(CFG_VERBOSE) {
+                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, THREAT_NONE, total_len);
+            }
             Ok(xdp_action::XDP_PASS)
         }
     }
+}
+
+// Log packet without returning (for verbose mode)
+#[inline(always)]
+fn log_packet(
+    ctx: &XdpContext,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    proto: u8,
+    tcp_flags: u8,
+    action: u8,
+    threat_type: u8,
+    packet_len: u16,
+) {
+    let timestamp = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    
+    let log_entry = PacketLog {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        proto,
+        tcp_flags,
+        action,
+        threat_type,
+        packet_len,
+        _pad: 0,
+        timestamp,
+    };
+    EVENTS.output(ctx, &log_entry, 0);
 }
 
 fn log_and_return(
