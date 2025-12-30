@@ -390,6 +390,14 @@ where
                                 app.logs.push_back(format!("🔧 SCAN DETECT: {}", if new_val == 1 { "✅ ON" } else { "❌ OFF" }));
                             }
                         }
+                        KeyCode::Char('6') => {
+                            if let Ok(mut cfg) = config_ref.lock() {
+                                let cur = cfg.get(&6u32, 0).unwrap_or(0);  // Default OFF
+                                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                                let _ = cfg.insert(6u32, new_val, 0);
+                                app.logs.push_back(format!("📝 VERBOSE LOG: {}", if new_val == 1 { "✅ ON (logging ALL packets!)" } else { "❌ OFF" }));
+                            }
+                        }
                         KeyCode::Char('0') => {
                             // Toggle all: if any on → all off, else all on
                             if let Ok(mut cfg) = config_ref.lock() {
@@ -567,26 +575,29 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static, C: std::borrow::BorrowMut<Ma
     let off_style = Style::default().fg(Color::Red).bg(Color::Rgb(100, 100, 150));
     
     // Read module states from config
-    let (m1, m2, m3, m4, m5) = if let Ok(cfg) = config.lock() {
+    let (m1, m2, m3, m4, m5, m6) = if let Ok(cfg) = config.lock() {
         (
             cfg.get(&1u32, 0).unwrap_or(1) == 1,
             cfg.get(&2u32, 0).unwrap_or(1) == 1,
             cfg.get(&3u32, 0).unwrap_or(1) == 1,
             cfg.get(&4u32, 0).unwrap_or(1) == 1,
             cfg.get(&5u32, 0).unwrap_or(1) == 1,
+            cfg.get(&6u32, 0).unwrap_or(0) == 1,  // Verbose default OFF
         )
     } else {
-        (true, true, true, true, true)
+        (true, true, true, true, true, false)
     };
     
     use ratatui::text::{Line, Span};
+    let verbose_style = if m6 { Style::default().fg(Color::Magenta).bg(Color::Rgb(100, 100, 150)).add_modifier(Modifier::BOLD) } else { off_style };
     let help_line = Line::from(vec![
-        Span::styled(" ↑/↓ │ SPACE │ q │ ", base_style),
-        Span::styled("1:PortScan ", if m1 { on_style } else { off_style }),
-        Span::styled("2:RateLimit ", if m2 { on_style } else { off_style }),
-        Span::styled("3:ThreatFeeds ", if m3 { on_style } else { off_style }),
-        Span::styled("4:ConnTrack ", if m4 { on_style } else { off_style }),
-        Span::styled("5:ScanDetect ", if m5 { on_style } else { off_style }),
+        Span::styled(" ↑/↓ │ q │ ", base_style),
+        Span::styled("1:PS ", if m1 { on_style } else { off_style }),
+        Span::styled("2:RL ", if m2 { on_style } else { off_style }),
+        Span::styled("3:TF ", if m3 { on_style } else { off_style }),
+        Span::styled("4:CT ", if m4 { on_style } else { off_style }),
+        Span::styled("5:SD ", if m5 { on_style } else { off_style }),
+        Span::styled("6:VERBOSE ", verbose_style),
         Span::styled("0:All", base_style),
     ]);
     let help = Paragraph::new(help_line)
