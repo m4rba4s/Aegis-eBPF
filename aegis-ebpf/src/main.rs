@@ -16,20 +16,33 @@ use parsing::ptr_at;
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct PacketLog {
-    pub src_ip: u32,      // Source IP address
-    pub dst_ip: u32,      // Destination IP address
-    pub src_port: u16,    // Source port
-    pub dst_port: u16,    // Destination port
-    pub proto: u8,        // Protocol (6=TCP, 17=UDP)
-    pub tcp_flags: u8,    // TCP flags byte
-    pub action: u8,       // 0=PASS, 1=DROP, 2=ALERT
-    pub threat_type: u8,  // Threat category (see ThreatType)
-    pub packet_len: u16,  // Packet length
-    pub _pad: u16,        // Padding for alignment
-    pub timestamp: u64,   // Kernel timestamp (ns)
-}
+    pub src_ip: u32,      // 4  Source IP address
+    pub dst_ip: u32,      // 4  Destination IP address
+    pub src_port: u16,    // 2  Source port
+    pub dst_port: u16,    // 2  Destination port
+    pub proto: u8,        // 1  Protocol (6=TCP, 17=UDP)
+    pub tcp_flags: u8,    // 1  TCP flags byte
+    pub action: u8,       // 1  0=PASS, 1=DROP
+    pub reason: u8,       // 1  Verdict reason
+    pub threat_type: u8,  // 1  Threat category
+    pub hook: u8,         // 1  Hook point (XDP=1)
+    pub packet_len: u16,  // 2  Packet length
+    pub timestamp: u64,   // 8  Kernel timestamp (ns)
+}                         // Total: 32 bytes
 
-// Threat types for IDS categorization
+// Verdict reasons (WHY)
+pub const REASON_DEFAULT: u8 = 0;
+pub const REASON_WHITELIST: u8 = 1;
+pub const REASON_CONNTRACK: u8 = 2;
+pub const REASON_MANUAL_BLOCK: u8 = 3;
+pub const REASON_CIDR_FEED: u8 = 4;
+pub const REASON_PORTSCAN: u8 = 5;
+pub const REASON_TCP_ANOMALY: u8 = 6;
+pub const REASON_RATELIMIT: u8 = 7;
+pub const REASON_IPV6_POLICY: u8 = 8;
+pub const REASON_MALFORMED: u8 = 9;
+
+// Threat types (WHAT was detected)
 pub const THREAT_NONE: u8 = 0;
 pub const THREAT_SCAN_XMAS: u8 = 1;
 pub const THREAT_SCAN_NULL: u8 = 2;
@@ -43,6 +56,27 @@ pub const THREAT_INCOMING_SYN: u8 = 7;
 pub const ACTION_PASS: u8 = 0;
 pub const ACTION_DROP: u8 = 1;
 pub const ACTION_ALERT: u8 = 2;
+
+// Hook point
+pub const HOOK_XDP: u8 = 1;
+
+// Stats counters (per-CPU array index)
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Stats {
+    pub pkts_seen: u64,
+    pub pkts_pass: u64,
+    pub pkts_drop: u64,
+    pub events_ok: u64,
+    pub events_fail: u64,
+    pub ipv6_seen: u64,
+    pub ipv6_pass: u64,
+    pub ipv6_drop: u64,
+    pub block_manual: u64,
+    pub block_cidr: u64,
+    pub portscan_hits: u64,
+    pub conntrack_hits: u64,
+}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -98,6 +132,10 @@ static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_e
 
 #[map]
 static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
+
+// Per-CPU health statistics
+#[map]
+static STATS: aya_ebpf::maps::PerCpuArray<Stats> = aya_ebpf::maps::PerCpuArray::with_max_entries(1, 0);
 
 // Rate limit map: IP -> RateLimitState
 #[map]
@@ -262,7 +300,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     if is_whitelisted {
         // Verbose logging for whitelisted traffic
         if is_module_enabled(CFG_VERBOSE) {
-            log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, THREAT_NONE, total_len);
+            log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_WHITELIST, THREAT_NONE, total_len);
         }
         return Ok(xdp_action::XDP_PASS);
     }
@@ -314,7 +352,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
             // Verbose logging for CT fast-path
             if is_module_enabled(CFG_VERBOSE) {
-                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, THREAT_NONE, total_len);
+                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_CONNTRACK, THREAT_NONE, total_len);
             }
             return Ok(xdp_action::XDP_PASS);
         }
@@ -332,19 +370,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         // 1. Xmas Tree Scan (FIN + URG + PSH)
         if fin && urg && psh {
             return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
-                proto, tcp_flags, ACTION_DROP, THREAT_SCAN_XMAS, total_len);
+                proto, tcp_flags, ACTION_DROP, REASON_TCP_ANOMALY, THREAT_SCAN_XMAS, total_len);
         }
         
         // 2. Null Scan (No flags set)
         if tcp_flags == 0 {
             return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, THREAT_SCAN_NULL, total_len);
+                proto, tcp_flags, ACTION_DROP, REASON_TCP_ANOMALY, THREAT_SCAN_NULL, total_len);
         }
         
         // 3. SYN + FIN (Illegal)
         if syn && fin {
             return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, THREAT_SCAN_SYNFIN, total_len);
+                proto, tcp_flags, ACTION_DROP, REASON_TCP_ANOMALY, THREAT_SCAN_SYNFIN, total_len);
         }
         
         // NOTE: We intentionally DO NOT block all incoming SYN here.
@@ -390,7 +428,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 if state_ref.port_count > PORT_SCAN_THRESHOLD {
                     // Port scan detected!
                     return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                        proto, tcp_flags, ACTION_DROP, THREAT_SCAN_PORT, total_len);
+                        proto, tcp_flags, ACTION_DROP, REASON_PORTSCAN, THREAT_SCAN_PORT, total_len);
                 }
             }
         } else {
@@ -439,7 +477,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 } else {
                     // SYN FLOOD DETECTED - drop
                     return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                        proto, tcp_flags, ACTION_DROP, THREAT_FLOOD_SYN, total_len);
+                        proto, tcp_flags, ACTION_DROP, REASON_RATELIMIT, THREAT_FLOOD_SYN, total_len);
                 }
             } else {
                 // First packet from this IP - initialize with max tokens - 1
@@ -483,7 +521,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         
         if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
             return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
-                proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len);
+                proto, tcp_flags, ACTION_DROP, REASON_CIDR_FEED, THREAT_BLOCKLIST, total_len);
         }
     }
     
@@ -496,7 +534,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     };
 
     if let Some(_action) = unsafe { BLOCKLIST.get(&key_exact) } {
-        log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len)
+        log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len)
     } else {
         // 2. Wildcard Port/Proto Lookup (Block IP entirely)
         let key_wildcard = FlowKey {
@@ -506,7 +544,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             _pad: 0,
         };
         if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
-            log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, THREAT_BLOCKLIST, total_len)
+            log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len)
         } else {
             // --- CREATE/UPDATE CONNECTION TRACKING ---
             // If we reach here, packet is allowed - track the connection
@@ -560,7 +598,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             
             // Verbose logging for normal pass
             if is_module_enabled(CFG_VERBOSE) {
-                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, THREAT_NONE, total_len);
+                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_DEFAULT, THREAT_NONE, total_len);
             }
             Ok(xdp_action::XDP_PASS)
         }
@@ -578,6 +616,7 @@ fn log_packet(
     proto: u8,
     tcp_flags: u8,
     action: u8,
+    reason: u8,
     threat_type: u8,
     packet_len: u16,
 ) {
@@ -591,9 +630,10 @@ fn log_packet(
         proto,
         tcp_flags,
         action,
+        reason,
         threat_type,
+        hook: HOOK_XDP,
         packet_len,
-        _pad: 0,
         timestamp,
     };
     EVENTS.output(ctx, &log_entry, 0);
@@ -608,6 +648,7 @@ fn log_and_return(
     proto: u8,
     tcp_flags: u8,
     action: u8,
+    reason: u8,
     threat_type: u8,
     packet_len: u16,
 ) -> Result<u32, ()> {
@@ -621,9 +662,10 @@ fn log_and_return(
         proto,
         tcp_flags,
         action,
+        reason,
         threat_type,
+        hook: HOOK_XDP,
         packet_len,
-        _pad: 0,
         timestamp,
     };
     EVENTS.output(ctx, &log_entry, 0);
