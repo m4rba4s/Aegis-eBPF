@@ -570,9 +570,9 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static, C: std::borrow::BorrowMut<Ma
     f.render_widget(log_list, left_chunks[1]);
 
     // Help Footer with colored module status
-    let base_style = Style::default().fg(Color::Black).bg(Color::Rgb(100, 100, 150));
-    let on_style = Style::default().fg(Color::Green).bg(Color::Rgb(100, 100, 150)).add_modifier(Modifier::BOLD);
-    let off_style = Style::default().fg(Color::Red).bg(Color::Rgb(100, 100, 150));
+    let base_style = Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 60));
+    let on_style = Style::default().fg(Color::Green).bg(Color::Rgb(40, 40, 60)).add_modifier(Modifier::BOLD);
+    let off_style = Style::default().fg(Color::DarkGray).bg(Color::Rgb(40, 40, 60));
     
     // Read module states from config
     let (m1, m2, m3, m4, m5, m6) = if let Ok(cfg) = config.lock() {
@@ -589,16 +589,15 @@ fn ui<T: std::borrow::BorrowMut<MapData> + 'static, C: std::borrow::BorrowMut<Ma
     };
     
     use ratatui::text::{Line, Span};
-    let verbose_style = if m6 { Style::default().fg(Color::Magenta).bg(Color::Rgb(100, 100, 150)).add_modifier(Modifier::BOLD) } else { off_style };
+    let verbose_style = if m6 { Style::default().fg(Color::Magenta).bg(Color::Rgb(40, 40, 60)).add_modifier(Modifier::BOLD) } else { off_style };
     let help_line = Line::from(vec![
-        Span::styled(" ↑/↓ │ q │ ", base_style),
-        Span::styled("1:PS ", if m1 { on_style } else { off_style }),
-        Span::styled("2:RL ", if m2 { on_style } else { off_style }),
-        Span::styled("3:TF ", if m3 { on_style } else { off_style }),
-        Span::styled("4:CT ", if m4 { on_style } else { off_style }),
-        Span::styled("5:SD ", if m5 { on_style } else { off_style }),
-        Span::styled("6:VERBOSE ", verbose_style),
-        Span::styled("0:All", base_style),
+        Span::styled(" ↑/↓ q │ 0:ALL ", base_style),
+        Span::styled("1:PortScan ", if m1 { on_style } else { off_style }),
+        Span::styled("2:RateLimit ", if m2 { on_style } else { off_style }),
+        Span::styled("3:Threats ", if m3 { on_style } else { off_style }),
+        Span::styled("4:ConnTrack ", if m4 { on_style } else { off_style }),
+        Span::styled("5:ScanDetect ", if m5 { on_style } else { off_style }),
+        Span::styled("6:VERBOSE", verbose_style),
     ]);
     let help = Paragraph::new(help_line)
         .style(base_style)
