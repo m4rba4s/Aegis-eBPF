@@ -124,24 +124,32 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                     let cache_clone = cache.clone();
                     thread::spawn(move || {
                         // Throttle requests to avoid ip-api.com rate limiting (45/min)
-                        thread::sleep(std::time::Duration::from_millis(100));
+                        thread::sleep(std::time::Duration::from_millis(200));
                         
+                        // Note: ip-api.com free tier only supports HTTP, not HTTPS
                         let url = format!("http://ip-api.com/json/{}", ip);
-                        let val: String = match reqwest::blocking::get(&url) {
-                            Ok(resp) => {
-                                if let Ok(json) = resp.json::<Value>() {
-                                    if json["status"].as_str() == Some("fail") {
-                                        "Private/Reserved".to_string()
+                        let client = reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(3))
+                            .build();
+                        
+                        let val: String = match client {
+                            Ok(c) => match c.get(&url).send() {
+                                Ok(resp) => {
+                                    if let Ok(json) = resp.json::<Value>() {
+                                        if json["status"].as_str() == Some("fail") {
+                                            "Private LAN".to_string()
+                                        } else {
+                                            let country = json["countryCode"].as_str().unwrap_or("??");
+                                            let city = json["city"].as_str().unwrap_or("Unknown");
+                                            format!("{} {}", country, city)
+                                        }
                                     } else {
-                                        let country = json["countryCode"].as_str().unwrap_or("??");
-                                        let city = json["city"].as_str().unwrap_or("Unknown");
-                                        format!("{} {}", country, city)
+                                        "Parse Error".to_string()
                                     }
-                                } else {
-                                    "Geo Error".to_string()
                                 }
-                            }
-                            Err(_) => "Net Error".to_string(),
+                                Err(_) => "Offline".to_string(),
+                            },
+                            Err(_) => "No Client".to_string(),
                         };
                         let mut map = cache_clone.lock().unwrap();
                         map.insert(ip, val);
