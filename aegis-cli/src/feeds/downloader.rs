@@ -6,17 +6,28 @@ use std::path::PathBuf;
 use std::fs;
 
 use super::{FeedConfig, FeedCategory};
-use super::parser::parse_feed;
+use super::parser::{parse_feed_cidr, CidrEntry};
 
-/// Download result
+/// CIDR entry ready for eBPF (network byte order)
+pub struct CidrEntryBpf {
+    pub addr: u32,        // Network byte order
+    pub prefix_len: u8,
+}
+
+/// Download result with CIDR entries
 pub struct DownloadResult {
     pub feed_name: String,
     pub category: FeedCategory,
-    pub ip_count: usize,
-    pub ips: Vec<u32>,  // In network byte order for eBPF
+    pub entries: Vec<CidrEntryBpf>,
 }
 
-/// Download a single feed
+impl DownloadResult {
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Download a single feed (async)
 pub async fn download_feed(config: &FeedConfig) -> Result<DownloadResult, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
@@ -39,20 +50,22 @@ pub async fn download_feed(config: &FeedConfig) -> Result<DownloadResult, String
         .await
         .map_err(|e| format!("Read error: {}", e))?;
     
-    // Parse IPs
-    let ips = parse_feed(&content);
+    // Parse CIDR entries with real prefix info
+    let cidr_entries = parse_feed_cidr(&content);
     
-    // Convert to network byte order u32 for eBPF
-    let ips_u32: Vec<u32> = ips
+    // Convert to BPF format (network byte order)
+    let entries: Vec<CidrEntryBpf> = cidr_entries
         .iter()
-        .map(|ip| u32::from(*ip).to_be())
+        .map(|e| CidrEntryBpf {
+            addr: u32::from(e.addr).to_be(),
+            prefix_len: e.prefix_len,
+        })
         .collect();
     
     Ok(DownloadResult {
         feed_name: config.name.clone(),
         category: config.category,
-        ip_count: ips_u32.len(),
-        ips: ips_u32,
+        entries,
     })
 }
 
@@ -77,20 +90,22 @@ pub fn download_feed_blocking(config: &FeedConfig) -> Result<DownloadResult, Str
         .text()
         .map_err(|e| format!("Read error: {}", e))?;
     
-    // Parse IPs
-    let ips = parse_feed(&content);
+    // Parse CIDR entries with real prefix info
+    let cidr_entries = parse_feed_cidr(&content);
     
-    // Convert to network byte order u32 for eBPF
-    let ips_u32: Vec<u32> = ips
+    // Convert to BPF format (network byte order)
+    let entries: Vec<CidrEntryBpf> = cidr_entries
         .iter()
-        .map(|ip| u32::from(*ip).to_be())
+        .map(|e| CidrEntryBpf {
+            addr: u32::from(e.addr).to_be(),
+            prefix_len: e.prefix_len,
+        })
         .collect();
     
     Ok(DownloadResult {
         feed_name: config.name.clone(),
         category: config.category,
-        ip_count: ips_u32.len(),
-        ips: ips_u32,
+        entries,
     })
 }
 

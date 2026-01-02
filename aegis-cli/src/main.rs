@@ -140,8 +140,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     std::io::Write::flush(&mut std::io::stdout()).ok();
                     match feeds::download_feed_blocking(config) {
                         Ok(result) => {
-                            println!("✅ {} IPs", result.ip_count);
-                            total_ips += result.ip_count;
+                            println!("✅ {} CIDR entries", result.entry_count());
+                            total_ips += result.entry_count();
                         }
                         Err(e) => {
                             println!("❌ {}", e);
