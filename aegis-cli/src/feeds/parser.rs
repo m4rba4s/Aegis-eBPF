@@ -3,9 +3,16 @@
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
+/// CIDR entry with network address and prefix length
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CidrEntry {
+    pub addr: Ipv4Addr,
+    pub prefix_len: u8,
+}
+
 /// Parse a line from a feed file, extracting IP or CIDR
 /// Returns None for comments, empty lines, or invalid entries
-pub fn parse_line(line: &str) -> Option<Vec<Ipv4Addr>> {
+pub fn parse_line_cidr(line: &str) -> Option<CidrEntry> {
     let line = line.trim();
     
     // Skip comments and empty lines
@@ -25,53 +32,53 @@ pub fn parse_line(line: &str) -> Option<Vec<Ipv4Addr>> {
     
     // Check if it's a CIDR notation
     if ip_part.contains('/') {
-        return parse_cidr(ip_part);
+        let parts: Vec<&str> = ip_part.split('/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        
+        let ip = Ipv4Addr::from_str(parts[0]).ok()?;
+        let prefix_len: u8 = parts[1].parse().ok()?;
+        
+        if prefix_len > 32 {
+            return None;
+        }
+        
+        // Normalize to network address (mask off host bits)
+        let addr_u32 = u32::from(ip);
+        let mask: u32 = if prefix_len == 0 { 0 } else { !((1u32 << (32 - prefix_len)) - 1) };
+        let network = addr_u32 & mask;
+        
+        return Some(CidrEntry {
+            addr: Ipv4Addr::from(network),
+            prefix_len,
+        });
     }
     
-    // Try to parse as single IP
+    // Single IP = /32
     if let Ok(ip) = Ipv4Addr::from_str(ip_part) {
-        return Some(vec![ip]);
+        return Some(CidrEntry {
+            addr: ip,
+            prefix_len: 32,
+        });
     }
     
     None
 }
 
-/// Expand CIDR notation to individual IPs
-/// For large ranges, only returns first 256 IPs to avoid memory explosion
-fn parse_cidr(cidr: &str) -> Option<Vec<Ipv4Addr>> {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    
-    let base_ip = Ipv4Addr::from_str(parts[0]).ok()?;
-    let prefix_len: u8 = parts[1].parse().ok()?;
-    
-    if prefix_len > 32 {
-        return None;
-    }
-    
-    // For /24 and smaller, expand all IPs
-    // For larger ranges, just use the network address
-    if prefix_len >= 24 {
-        let base: u32 = u32::from(base_ip);
-        let mask: u32 = !((1u32 << (32 - prefix_len)) - 1);
-        let network = base & mask;
-        let host_count = 1u32 << (32 - prefix_len);
-        
-        let ips: Vec<Ipv4Addr> = (0..host_count)
-            .map(|i| Ipv4Addr::from(network + i))
-            .collect();
-        
-        Some(ips)
-    } else {
-        // For larger ranges (/23 and up), just store the network address
-        // The eBPF will need to do prefix matching
-        Some(vec![base_ip])
-    }
+/// Parse entire feed content, returning CIDR entries
+pub fn parse_feed_cidr(content: &str) -> Vec<CidrEntry> {
+    content
+        .lines()
+        .filter_map(parse_line_cidr)
+        .collect()
 }
 
-/// Parse entire feed content
+// Legacy function for backward compatibility
+pub fn parse_line(line: &str) -> Option<Vec<Ipv4Addr>> {
+    parse_line_cidr(line).map(|e| vec![e.addr])
+}
+
 pub fn parse_feed(content: &str) -> Vec<Ipv4Addr> {
     content
         .lines()
