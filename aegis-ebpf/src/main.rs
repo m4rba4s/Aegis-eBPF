@@ -344,7 +344,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     };
     
     if let Some(state) = unsafe { CONN_TRACK.get(&conn_key_rev) } {
-        if state.state == CONN_ESTABLISHED && is_module_enabled(CFG_CONN_TRACK) {
+        // Check if entry is expired (lazy eviction)
+        let timeout = if state.state == CONN_ESTABLISHED {
+            CONN_TIMEOUT_ESTABLISHED_NS
+        } else {
+            CONN_TIMEOUT_OTHER_NS
+        };
+        
+        let age_ns = now_ns.saturating_sub(state.last_seen);
+        
+        if age_ns > timeout {
+            // Entry expired - delete it (lazy cleanup)
+            let _ = CONN_TRACK.remove(&conn_key_rev);
+            // Continue to normal processing, don't use this entry
+        } else if state.state == CONN_ESTABLISHED && is_module_enabled(CFG_CONN_TRACK) {
+            // Valid entry - update and fast-path
             let mut updated = *state;
             updated.last_seen = now_ns;
             updated.packets = updated.packets.saturating_add(1);
