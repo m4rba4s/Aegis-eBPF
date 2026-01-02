@@ -294,14 +294,16 @@ fn read_proc_net_tcp() -> Vec<RawConnection> {
     conns
 }
 
-pub async fn run_tui<T, C>(
+pub async fn run_tui<T, C, S>(
     blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>,
     logs: Arc<Mutex<VecDeque<String>>>,
     config: Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
+    stats: Arc<Mutex<aya::maps::PerCpuArray<S, aegis_common::Stats>>>,
 ) -> Result<(), anyhow::Error>
 where
     T: std::borrow::BorrowMut<MapData> + 'static,
     C: std::borrow::BorrowMut<MapData> + 'static,
+    S: std::borrow::BorrowMut<MapData> + 'static,
 {
     enable_raw_mode()?;
     let mut stdout = io::stdout();

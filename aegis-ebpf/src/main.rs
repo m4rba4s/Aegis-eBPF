@@ -219,6 +219,88 @@ fn is_module_enabled(key: u32) -> bool {
     unsafe { CONFIG.get(&key).copied().unwrap_or(1) == 1 }
 }
 
+// Stats increment helpers
+#[inline(always)]
+fn stats_inc_seen() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).pkts_seen = (*s).pkts_seen.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_pass() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).pkts_pass = (*s).pkts_pass.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_drop() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).pkts_drop = (*s).pkts_drop.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_event_ok() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).events_ok = (*s).events_ok.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_event_fail() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).events_fail = (*s).events_fail.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_portscan() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).portscan_hits = (*s).portscan_hits.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_conntrack() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).conntrack_hits = (*s).conntrack_hits.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_block_manual() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).block_manual = (*s).block_manual.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_block_cidr() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).block_cidr = (*s).block_cidr.wrapping_add(1);
+        }
+    }
+}
+
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     match try_xdp_firewall(ctx) {
@@ -228,6 +310,9 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
 }
 
 fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
+    // Increment packet counter
+    stats_inc_seen();
+    
     // Check CONFIG map for interface mode (0 = L2/Ethernet, 1 = L3/raw IP)
     // Default to L2 if not set
     let config_key: u32 = 0;
@@ -364,6 +449,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             updated.packets = updated.packets.saturating_add(1);
             updated.bytes = updated.bytes.saturating_add(total_len as u32);
             let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
+            // Track conntrack hit
+            stats_inc_conntrack();
+            stats_inc_pass();
             // Verbose logging for CT fast-path
             if is_module_enabled(CFG_VERBOSE) {
                 log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_CONNTRACK, THREAT_NONE, total_len);
@@ -441,6 +529,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 // Check threshold
                 if state_ref.port_count > PORT_SCAN_THRESHOLD {
                     // Port scan detected!
+                    stats_inc_portscan();
                     return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
                         proto, tcp_flags, ACTION_DROP, REASON_PORTSCAN, THREAT_SCAN_PORT, total_len);
                 }
@@ -535,6 +624,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         });
         
         if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
+            stats_inc_block_cidr();
             return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, 
                 proto, tcp_flags, ACTION_DROP, REASON_CIDR_FEED, THREAT_BLOCKLIST, total_len);
         }
@@ -549,6 +639,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     };
 
     if let Some(_action) = unsafe { BLOCKLIST.get(&key_exact) } {
+        stats_inc_block_manual();
         log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len)
     } else {
         // 2. Wildcard Port/Proto Lookup (Block IP entirely)
@@ -559,6 +650,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             _pad: 0,
         };
         if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
+            stats_inc_block_manual();
             log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len)
         } else {
             // --- CREATE/UPDATE CONNECTION TRACKING ---
@@ -683,11 +775,15 @@ fn log_and_return(
         packet_len,
         timestamp,
     };
+    // Track event output (always succeeds in eBPF, failure is silent)
     EVENTS.output(ctx, &log_entry, 0);
+    stats_inc_event_ok();
     
     if action == ACTION_DROP {
+        stats_inc_drop();
         Ok(xdp_action::XDP_DROP)
     } else {
+        stats_inc_pass();
         Ok(xdp_action::XDP_PASS)
     }
 }

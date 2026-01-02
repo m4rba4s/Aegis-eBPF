@@ -261,6 +261,11 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("🛡️  All defense modules ENABLED");
             let config_arc = Arc::new(Mutex::new(config));
             
+            // Take ownership of STATS for health metrics
+            let stats_map = bpf.take_map("STATS").expect("STATS map not found");
+            let stats: aya::maps::PerCpuArray<_, aegis_common::Stats> = aya::maps::PerCpuArray::try_from(stats_map)?;
+            let stats_arc = Arc::new(Mutex::new(stats));
+            
             // Shared Logs
             let logs_arc = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -415,7 +420,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 });
 
-                tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone()).await?;
+                tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone(), stats_arc.clone()).await?;
                 println!("\n🔌 Detaching XDP from {}...", opt.iface);
                 // Detach XDP by dropping the program (forces cleanup)
                 drop(bpf);
