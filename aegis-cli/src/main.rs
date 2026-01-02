@@ -208,13 +208,14 @@ async fn main() -> Result<(), anyhow::Error> {
             let program: &mut Xdp = bpf.program_mut("xdp_firewall").unwrap().try_into()?;
             program.load()?;
             
-            let flags = if opt.iface == "lo" || opt.iface.starts_with("wg") {
-                println!("ℹ️  Using XDP Generic Mode (SKB) for virtual interface: {}", opt.iface);
+            let flags = if opt.iface == "lo" || opt.iface.starts_with("wg") || opt.iface.starts_with("wl") {
+                println!("ℹ️  Using XDP Generic Mode (SKB) for virtual/wireless interface: {}", opt.iface);
                 XdpFlags::SKB_MODE
             } else {
                 XdpFlags::default()
             };
-            program.attach(&opt.iface, flags)?;
+            let link_id = program.attach(&opt.iface, flags)?;
+            println!("✅ XDP attached to {} (link_id: {:?})", opt.iface, link_id);
             
             // Take ownership of BLOCKLIST
             let blocklist_map = bpf.take_map("BLOCKLIST").expect("BLOCKLIST not found");
@@ -411,7 +412,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 });
 
                 tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone()).await?;
-                println!("\nExiting Aegis...");
+                println!("\n🔌 Detaching XDP from {}...", opt.iface);
+                // Detach XDP by dropping the program (forces cleanup)
+                drop(bpf);
+                println!("✅ XDP detached. Exiting Aegis...");
                 return Ok(());
             } else if let Commands::Daemon = opt.command {
                 // Daemon mode: no REPL, just run until SIGTERM
