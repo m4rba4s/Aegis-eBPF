@@ -39,6 +39,10 @@ struct Opt {
     #[clap(short, long, default_value = "lo")]
     iface: String,
     
+    /// Path to eBPF object file
+    #[clap(long, default_value = "/usr/local/share/aegis/aegis.o")]
+    ebpf_path: String,
+    
     #[clap(subcommand)]
     command: Commands,
 }
@@ -165,7 +169,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 println!("⚠️  This requires sudo and eBPF program loaded.\n");
                 
                 // Load eBPF just for map access
-                let ebpf_path = "/usr/local/share/aegis/aegis.o";
+                let ebpf_path = &opt.ebpf_path;
                 let mut bpf = match Ebpf::load_file(ebpf_path) {
                     Ok(b) => b,
                     Err(e) => {
@@ -199,7 +203,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // Load eBPF (only for commands that need it)
-    let ebpf_path = "/usr/local/share/aegis/aegis.o";
+    let ebpf_path = &opt.ebpf_path;
     let mut bpf = Ebpf::load_file(ebpf_path)?;
     
     // Common setup for Load, Tui, and Daemon
@@ -418,16 +422,36 @@ async fn main() -> Result<(), anyhow::Error> {
                 println!("✅ XDP detached. Exiting Aegis...");
                 return Ok(());
             } else if let Commands::Daemon = opt.command {
-                // Daemon mode: no REPL, just run until SIGTERM
+                // Daemon mode: no REPL, just run until SIGTERM/SIGINT
+                let iface_for_shutdown = opt.iface.clone();
                 tokio::spawn(async move {
                     loop {
                         event_futures.next().await;
                     }
                 });
                 
-                println!("Daemon mode active on {}. Send SIGTERM to stop.", opt.iface);
-                signal::ctrl_c().await?;
-                println!("Shutting down...");
+                println!("🔥 Daemon mode active on {}. Send SIGTERM or SIGINT to stop.", opt.iface);
+                
+                // Handle both SIGTERM (systemd) and SIGINT (Ctrl+C)
+                #[cfg(unix)]
+                {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to create SIGTERM handler");
+                    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to create SIGINT handler");
+                    
+                    tokio::select! {
+                        _ = sigterm.recv() => println!("\n📥 Received SIGTERM"),
+                        _ = sigint.recv() => println!("\n📥 Received SIGINT (Ctrl+C)"),
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    signal::ctrl_c().await?;
+                }
+                
+                println!("🔌 Detaching XDP from {}...", iface_for_shutdown);
+                drop(bpf);
+                println!("✅ XDP detached. Shutdown complete.");
                 return Ok(());
             } else {
                  // For Load command, we also need to poll events.
