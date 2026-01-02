@@ -448,7 +448,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // ------------------
 
     // --- SYN FLOOD RATE LIMITING ---
-    if proto == 6 {
+    // Module toggle check
+    if is_module_enabled(CFG_RATE_LIMIT) && proto == 6 {
         let syn = tcp_flags & 0x02 != 0;
         let ack = tcp_flags & 0x10 != 0;
         
