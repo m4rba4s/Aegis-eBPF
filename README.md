@@ -7,7 +7,7 @@
 ![Rust](https://img.shields.io/badge/built_with-Rust-red.svg)
 ![eBPF](https://img.shields.io/badge/tech-eBPF%2FXDP-green.svg)
 
-## 💀 Overview
+##  Overview
 
 **Aegis** is a next-generation firewall built on **eBPF (Extended Berkeley Packet Filter)** and **XDP (eXpress Data Path)**. It operates at the earliest possible point in the networking stack (driver level), allowing it to drop malicious traffic before the OS kernel even processes it.
 
@@ -16,7 +16,7 @@ Unlike traditional firewalls (iptables/nftables), Aegis is:
 -   **Safe**: Verified by the kernel verifier to ensure system stability.
 -   **Interactive**: Features a cyberpunk-style TUI for real-time monitoring.
 
-## ⚡ Features
+##  Features
 
 -   **XDP Packet Filtering**: Drop packets at the NIC driver level.
 -   **Interactive TUI**: Real-time dashboard with active connections, logs, and "Space-to-Ban" mechanics.
@@ -28,7 +28,7 @@ Unlike traditional firewalls (iptables/nftables), Aegis is:
 -   **Persistence**: Save and restore rules to YAML.
 -   **Portability**: Statically linked (Rustls), runs on any Linux Kernel 5.8+ with BTF.
 
-## 🚀 Installation
+##  Installation
 
 ### Prerequisites
 -   Linux Kernel **>= 5.8**
@@ -44,7 +44,7 @@ sudo dnf install elfutils-libelf-devel zlib-devel
 cargo build --release
 ```
 
-## 🎮 Usage
+##  Usage
 
 ### 1. Interactive TUI (Recommended)
 Launch the tactical dashboard:
@@ -65,7 +65,7 @@ Inside the REPL:
 -   `list` - Show active rules.
 -   `save` / `restore` - Manage configuration.
 
-## 🏗️ Architecture
+##  Architecture
 
 -   **Kernel Space (`aegis-ebpf`)**:
     -   Written in Rust (Aya).
