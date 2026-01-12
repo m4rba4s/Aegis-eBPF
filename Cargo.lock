@@ -11,6 +11,7 @@ dependencies = [
  "aya",
  "aya-log",
  "bytes",
+ "caps",
  "chrono",
  "clap",
  "crossterm",
@@ -39,6 +40,15 @@ dependencies = [
 name = "aegis-ebpf"
 version = "0.1.0"
 dependencies = [
+ "aegis-common",
+ "aya-ebpf",
+]
+
+[[package]]
+name = "aegis-tc"
+version = "0.1.0"
+dependencies = [
+ "aegis-common",
  "aya-ebpf",
 ]
 
@@ -279,6 +289,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "caps"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd1ddba47aba30b6a889298ad0109c3b8dcb0e8fc993b459daa7067d46f865e0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

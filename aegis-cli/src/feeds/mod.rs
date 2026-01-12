@@ -1,5 +1,5 @@
 //! Threat Feed Integration Module
-//! 
+//!
 //! Downloads and parses external threat intelligence feeds:
 //! - Spamhaus DROP/EDROP
 //! - Abuse.ch Feodo Tracker
@@ -9,15 +9,15 @@ mod parser;
 mod downloader;
 mod loader;
 
-pub use parser::*;
-pub use downloader::*;
-pub use loader::*;
+// Re-export used items
+pub use downloader::{cache_dir, download_feed_blocking};
+pub use loader::load_feeds_to_map;
 
 use std::net::Ipv4Addr;
-use std::collections::HashSet;
 
 /// Feed categories for classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum FeedCategory {
     None = 0,
     Spamhaus = 1,
@@ -27,7 +27,8 @@ pub enum FeedCategory {
     Manual = 5,
 }
 
-/// A blocked IP entry with metadata
+/// A blocked IP entry with metadata (for future use)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct BlockedIp {
     pub ip: Ipv4Addr,
@@ -81,20 +82,22 @@ impl FeedConfig {
     }
 }
 
-/// Feed manager for loading and updating feeds
+/// Feed manager for loading and updating feeds (for future use)
+#[allow(dead_code)]
 pub struct FeedManager {
     pub feeds: Vec<FeedConfig>,
-    pub blocked_ips: HashSet<u32>,  // IPs in network byte order
+    pub blocked_ips: std::collections::HashSet<u32>, // IPs in network byte order
 }
 
+#[allow(dead_code)]
 impl FeedManager {
     pub fn new() -> Self {
         Self {
             feeds: FeedConfig::defaults(),
-            blocked_ips: HashSet::new(),
+            blocked_ips: std::collections::HashSet::new(),
         }
     }
-    
+
     /// Get total blocked IP count
     pub fn blocked_count(&self) -> usize {
         self.blocked_ips.len()
