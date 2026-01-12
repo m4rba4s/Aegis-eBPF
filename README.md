@@ -80,6 +80,6 @@ Inside the REPL:
 
 ## ⚠️ Disclaimer
 This tool is intended for **defensive security research** and **system hardening**. The author is not responsible for any misuse.
-
+Linecense MIT
 ---
 *Crafted with 💀 by Mindlock*
