@@ -78,7 +78,6 @@ Inside the REPL:
     -   Renders TUI (`ratatui`).
     -   Handles GeoIP and logging.
 
- licence MIT
 
 ## ⚠️ Disclaimer
 This tool is intended for **defensive security research** and **system hardening**. The author is not responsible for any misuse.
