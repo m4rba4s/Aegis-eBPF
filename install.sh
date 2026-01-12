@@ -33,10 +33,10 @@ echo "📁 Creating directories..."
 mkdir -p /usr/local/share/aegis
 mkdir -p /usr/local/bin
 
-# Build eBPF
-echo "🔨 Building eBPF program..."
+# Build eBPF (XDP + TC)
+echo "🔨 Building eBPF programs..."
 cd "$SCRIPT_DIR"
-cargo run -p xtask -- build-ebpf --profile release
+cargo run -p xtask -- build-all --profile release
 
 # Build CLI
 echo "🔨 Building CLI..."
@@ -44,7 +44,13 @@ cargo build --release -p aegis-cli
 
 # Install
 echo "📦 Installing..."
+# BPF binaries are in workspace target (xtask builds from workspace root)
 cp "$SCRIPT_DIR/target/bpfel-unknown-none/release/aegis" /usr/local/share/aegis/aegis.o
+# Install TC program if built
+if [[ -f "$SCRIPT_DIR/target/bpfel-unknown-none/release/aegis-tc" ]]; then
+    cp "$SCRIPT_DIR/target/bpfel-unknown-none/release/aegis-tc" /usr/local/share/aegis/aegis-tc.o
+    echo "📦 TC Egress program installed"
+fi
 cp "$SCRIPT_DIR/target/release/aegis-cli" /usr/local/bin/aegis-cli
 chmod +x /usr/local/bin/aegis-cli
 

@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::fs::File;
 use std::io::BufReader;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+
+/// Maximum config file size (1 MB) to prevent YAML bomb attacks
+const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -29,6 +32,17 @@ fn default_action() -> String {
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("Failed to open config file: {}", path))?;
+
+        // SECURITY: Check file size to prevent YAML bomb attacks
+        let metadata = file.metadata().context("Failed to read file metadata")?;
+        if metadata.len() > MAX_CONFIG_SIZE {
+            bail!(
+                "Config file too large ({} bytes, max {} bytes). Possible YAML bomb attack.",
+                metadata.len(),
+                MAX_CONFIG_SIZE
+            );
+        }
+
         let reader = BufReader::new(file);
         let config: Config = serde_yaml::from_reader(reader).context("Failed to parse YAML config")?;
         Ok(config)

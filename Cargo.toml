@@ -3,6 +3,7 @@ members = [
     "aegis-cli",
     "aegis-common",
     "aegis-ebpf",
+    "aegis-tc",
     "xtask",
 ]
 default-members = ["aegis-cli", "xtask"]

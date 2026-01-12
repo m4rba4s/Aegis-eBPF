@@ -1,5 +1,5 @@
 [package]
-name = "aegis-ebpf"
+name = "aegis-tc"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,5 +8,5 @@ aya-ebpf = "0.1.1"
 aegis-common = { path = "../aegis-common", default-features = false }
 
 [[bin]]
-name = "aegis"
+name = "aegis-tc"
 path = "src/main.rs"
