@@ -1,4 +1,4 @@
-# 🛡️ Aegis: eBPF Security Matrix
+# Aegis: eBPF Security Matrix
 
 > **High-Performance XDP Firewall & Traffic Analyzer written in Rust.**
 > *Zero-overhead packet filtering, TUI dashboard, and heuristic intrusion detection.*
