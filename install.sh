@@ -42,6 +42,27 @@ cargo run -p xtask -- build-all --profile release
 echo "🔨 Building CLI..."
 cargo build --release -p aegis-cli
 
+# Helper: Detect active aegis services
+detect_services() {
+    systemctl list-units --full --all --no-legend "aegis@*" | awk '{print $1}'
+}
+
+# Stop running services
+SERVICES=$(detect_services)
+if [[ -n "$SERVICES" ]]; then
+    echo "🛑 Stopping active Aegis services..."
+    for svc in $SERVICES; do
+        echo "   - Stopping $svc"
+        systemctl stop "$svc"
+    done
+fi
+
+# Clean up old maps if they exist (prevents schematic mismatch errors)
+if [[ -d "/sys/fs/bpf/aegis" ]]; then
+    echo "🧹 Cleaning up pinned BPF maps..."
+    rm -rf /sys/fs/bpf/aegis
+fi
+
 # Install
 echo "📦 Installing..."
 # BPF binaries are in workspace target (xtask builds from workspace root)
@@ -53,6 +74,15 @@ if [[ -f "$SCRIPT_DIR/target/bpfel-unknown-none/release/aegis-tc" ]]; then
 fi
 cp "$SCRIPT_DIR/target/release/aegis-cli" /usr/local/bin/aegis-cli
 chmod +x /usr/local/bin/aegis-cli
+
+# Restart services
+if [[ -n "$SERVICES" ]]; then
+    echo "🚀 Restarting Aegis services..."
+    for svc in $SERVICES; do
+        echo "   - Starting $svc"
+        systemctl start "$svc"
+    done
+fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
