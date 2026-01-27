@@ -199,4 +199,4 @@ PRs welcome! Please ensure:
 This tool is intended for **defensive security research** and **system hardening**. The author is not responsible for any misuse.
 
 ---
-*Crafted with ⚡ by the Aegis Team*
+*Crafted with ⚡&❤️*
