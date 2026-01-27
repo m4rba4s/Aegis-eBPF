@@ -3,9 +3,11 @@ mod tui;
 mod feeds;
 
 use aya::Ebpf;
-use aya::programs::{Xdp, XdpFlags};
+use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
 use aya::maps::{HashMap, MapData};
 use aya::maps::perf::AsyncPerfEventArray;
+use std::path::Path;
+use std::fs;
 use clap::{Parser, Subcommand};
 use tokio::signal;
 use std::net::Ipv4Addr;
@@ -19,30 +21,35 @@ use std::collections::VecDeque;
 use chrono;
 use serde_json;
 
-// Import PacketLog from aegis-common (IDS/IPS extended structure)
-use aegis_common::PacketLog;
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct FlowKey {
-    pub src_ip: u32,
-    pub dst_port: u16,
-    pub proto: u8,
-    pub _pad: u8,
-}
-
-// Implement Pod for FlowKey to allow using it as a map key safely
-unsafe impl aya::Pod for FlowKey {}
+// Import from aegis-common (Single Source of Truth)
+use aegis_common::{
+    PacketLog, FlowKey,
+    REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
+    REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
+    REASON_IPV6_POLICY, REASON_MALFORMED, REASON_EGRESS_BLOCK,
+    THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
+    THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST, THREAT_INCOMING_SYN,
+    THREAT_EGRESS_BLOCKED,
+};
 
 #[derive(Parser)]
 struct Opt {
+    /// Network interface to attach to
     #[clap(short, long, default_value = "lo")]
     iface: String,
-    
-    /// Path to eBPF object file
+
+    /// Path to XDP eBPF object file
     #[clap(long, default_value = "/usr/local/share/aegis/aegis.o")]
     ebpf_path: String,
-    
+
+    /// Path to TC eBPF object file (for egress filtering)
+    #[clap(long, default_value = "/usr/local/share/aegis/aegis-tc.o")]
+    tc_path: String,
+
+    /// Disable TC egress program
+    #[clap(long)]
+    no_tc: bool,
+
     #[clap(subcommand)]
     command: Commands,
 }
@@ -220,7 +227,39 @@ async fn main() -> Result<(), anyhow::Error> {
             };
             let link_id = program.attach(&opt.iface, flags)?;
             println!("✅ XDP attached to {} (link_id: {:?})", opt.iface, link_id);
-            
+
+            // --- TC EGRESS PROGRAM ---
+            let mut tc_bpf: Option<Ebpf> = None;
+            if !opt.no_tc && Path::new(&opt.tc_path).exists() {
+                match Ebpf::load_file(&opt.tc_path) {
+                    Ok(mut tc) => {
+                        // Add clsact qdisc (required for TC)
+                        if let Err(e) = tc::qdisc_add_clsact(&opt.iface) {
+                            // Ignore "already exists" error
+                            if !e.to_string().contains("exists") {
+                                println!("⚠️  TC qdisc setup warning: {}", e);
+                            }
+                        }
+
+                        // Load and attach TC egress program
+                        let tc_prog: &mut SchedClassifier = tc.program_mut("tc_egress")
+                            .expect("tc_egress not found")
+                            .try_into()?;
+                        tc_prog.load()?;
+                        tc_prog.attach(&opt.iface, TcAttachType::Egress)?;
+                        println!("✅ TC Egress attached to {}", opt.iface);
+                        tc_bpf = Some(tc);
+                    }
+                    Err(e) => {
+                        println!("⚠️  TC program not loaded: {} (egress filtering disabled)", e);
+                    }
+                }
+            } else if opt.no_tc {
+                println!("ℹ️  TC egress program disabled (--no-tc)");
+            } else {
+                println!("ℹ️  TC program not found at {}, egress filtering disabled", opt.tc_path);
+            }
+
             // Take ownership of BLOCKLIST
             let blocklist_map = bpf.take_map("BLOCKLIST").expect("BLOCKLIST not found");
             let blocklist: HashMap<_, FlowKey, u32> = HashMap::try_from(blocklist_map)?;
@@ -299,30 +338,32 @@ async fn main() -> Result<(), anyhow::Error> {
                                     let src_ip = Ipv4Addr::from(u32::from_be(log.src_ip));
                                     let dst_ip = Ipv4Addr::from(u32::from_be(log.dst_ip));
                                     
-                                    // Format threat type
+                                    // Format threat type using constants from aegis_common
                                     let threat_str = match log.threat_type {
-                                        1 => "XMAS_SCAN",
-                                        2 => "NULL_SCAN",
-                                        3 => "SYNFIN_SCAN",
-                                        4 => "PORT_SCAN",
-                                        5 => "SYN_FLOOD",
-                                        6 => "BLOCKLIST",
-                                        7 => "INCOMING_SYN",
-                                        _ => "NONE",
+                                        THREAT_SCAN_XMAS => "XMAS_SCAN",
+                                        THREAT_SCAN_NULL => "NULL_SCAN",
+                                        THREAT_SCAN_SYNFIN => "SYNFIN_SCAN",
+                                        THREAT_SCAN_PORT => "PORT_SCAN",
+                                        THREAT_FLOOD_SYN => "SYN_FLOOD",
+                                        THREAT_BLOCKLIST => "BLOCKLIST",
+                                        THREAT_INCOMING_SYN => "INCOMING_SYN",
+                                        THREAT_EGRESS_BLOCKED => "EGRESS_BLOCKED",
+                                        THREAT_NONE | _ => "NONE",
                                     };
-                                    
+
                                     // Format reason (WHY this action)
                                     let reason_str = match log.reason {
-                                        0 => "DEFAULT",
-                                        1 => "WHITELIST",
-                                        2 => "CONNTRACK",
-                                        3 => "MANUAL_BLOCK",
-                                        4 => "CIDR_FEED",
-                                        5 => "PORTSCAN",
-                                        6 => "TCP_ANOMALY",
-                                        7 => "RATELIMIT",
-                                        8 => "IPV6_POLICY",
-                                        9 => "MALFORMED",
+                                        REASON_DEFAULT => "DEFAULT",
+                                        REASON_WHITELIST => "WHITELIST",
+                                        REASON_CONNTRACK => "CONNTRACK",
+                                        REASON_MANUAL_BLOCK => "MANUAL_BLOCK",
+                                        REASON_CIDR_FEED => "CIDR_FEED",
+                                        REASON_PORTSCAN => "PORTSCAN",
+                                        REASON_TCP_ANOMALY => "TCP_ANOMALY",
+                                        REASON_RATELIMIT => "RATELIMIT",
+                                        REASON_IPV6_POLICY => "IPV6_POLICY",
+                                        REASON_MALFORMED => "MALFORMED",
+                                        REASON_EGRESS_BLOCK => "EGRESS_BLOCK",
                                         _ => "UNKNOWN",
                                     };
                                     
@@ -332,14 +373,15 @@ async fn main() -> Result<(), anyhow::Error> {
                                     let action_icon = if log.action == 1 { "❌" } else { "✅" };
                                     
                                     let msg = match log.threat_type {
-                                        1 => format!("🎄 XMAS SCAN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
-                                        2 => format!("⚫ NULL SCAN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
-                                        3 => format!("💀 SYNFIN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
-                                        4 => format!("🔍 PORT SCAN: {} scanned port {}", src_ip, log.dst_port),
-                                        5 => format!("🔥 SYN FLOOD: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
-                                        6 => format!("🚫 BLOCKED: {} ({})", src_ip, reason_str),
-                                        7 => format!("🛡️ DROP SYN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
-                                        _ => format!("{} {} -> {}:{} [{}] reason={}", 
+                                        THREAT_SCAN_XMAS => format!("🎄 XMAS SCAN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
+                                        THREAT_SCAN_NULL => format!("⚫ NULL SCAN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        THREAT_SCAN_SYNFIN => format!("💀 SYNFIN: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, flags_str),
+                                        THREAT_SCAN_PORT => format!("🔍 PORT SCAN: {} scanned port {}", src_ip, log.dst_port),
+                                        THREAT_FLOOD_SYN => format!("🔥 SYN FLOOD: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        THREAT_BLOCKLIST => format!("🚫 BLOCKED: {} ({})", src_ip, reason_str),
+                                        THREAT_INCOMING_SYN => format!("🛡️ DROP SYN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        THREAT_EGRESS_BLOCKED => format!("🚫 EGRESS BLOCKED: {} -> {} ({})", src_ip, dst_ip, reason_str),
+                                        _ => format!("{} {} -> {}:{} [{}] reason={}",
                                             action_icon, src_ip, dst_ip, log.dst_port, flags_str, reason_str),
                                     };
 
@@ -371,7 +413,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
                                     // --- DYNAMIC AUTO-BAN (OODA Loop) ---
                                     // Auto-ban on SYN FLOOD or PORT SCAN
-                                    if log.threat_type == 5 || log.threat_type == 4 {
+                                    if log.threat_type == THREAT_FLOOD_SYN || log.threat_type == THREAT_SCAN_PORT {
                                         let mut blocklist = blocklist_inner.lock().unwrap();
                                         let key = FlowKey {
                                             src_ip: log.src_ip, // Already Network Byte Order from eBPF
@@ -421,10 +463,11 @@ async fn main() -> Result<(), anyhow::Error> {
                 });
 
                 tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone(), stats_arc.clone()).await?;
-                println!("\n🔌 Detaching XDP from {}...", opt.iface);
-                // Detach XDP by dropping the program (forces cleanup)
-                drop(bpf);
-                println!("✅ XDP detached. Exiting Aegis...");
+                println!("\n🔌 Detaching programs from {}...", opt.iface);
+                // Detach by dropping (forces cleanup)
+                drop(tc_bpf);  // TC first
+                drop(bpf);     // Then XDP
+                println!("✅ Programs detached. Exiting Aegis...");
                 return Ok(());
             } else if let Commands::Daemon = opt.command {
                 // Daemon mode: no REPL, just run until SIGTERM/SIGINT
@@ -454,9 +497,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     signal::ctrl_c().await?;
                 }
                 
-                println!("🔌 Detaching XDP from {}...", iface_for_shutdown);
-                drop(bpf);
-                println!("✅ XDP detached. Shutdown complete.");
+                println!("🔌 Detaching programs from {}...", iface_for_shutdown);
+                drop(tc_bpf);  // TC first
+                drop(bpf);     // Then XDP
+                println!("✅ Programs detached. Shutdown complete.");
                 return Ok(());
             } else {
                  // For Load command, we also need to poll events.
