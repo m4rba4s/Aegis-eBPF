@@ -9,7 +9,7 @@
 
 ## Screenshot
 
-![Preview](https://i.ibb.co/6Rr7FPHC/1111.png)
+![Preview](https://i.ibb.co/MxCSqHP5/20250801-112625.png)
 
 ## Overview
 
