@@ -15,22 +15,31 @@ use aya_ebpf::{
     maps::{HashMap, PerfEventArray, PerCpuArray, lpm_trie::{LpmTrie, Key}},
     programs::XdpContext,
 };
-use headers::{EthHdr, Ipv4Hdr, ETH_P_IP};
+use headers::{
+    EthHdr, Ipv4Hdr, ETH_P_IP, ETH_P_IPV6,
+    Ipv6Hdr, Ipv6ExtHdr, Ipv6FragHdr, Ipv6RoutingHdr,
+};
 use parsing::ptr_at;
 
 // ============================================================
 // IMPORTS FROM aegis-common (Single Source of Truth)
 // ============================================================
 use aegis_common::{
-    // Structures
+    // Structures - IPv4
     PacketLog, Stats, FlowKey, ConnTrackKey, ConnTrackState,
     LpmKeyIpv4, CidrBlockEntry, RateLimitState, PortScanState,
+    // Structures - IPv6
+    PacketLogIpv6, FlowKeyIpv6, ConnTrackKeyIpv6, LpmKeyIpv6,
     // Verdict reasons
     REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
     REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
-    // Threat types
+    REASON_IPV6_POLICY,
+    // Threat types - IPv4
     THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
     THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST,
+    // Threat types - IPv6
+    THREAT_IPV6_EXT_CHAIN, THREAT_IPV6_ROUTING_TYPE0, THREAT_IPV6_FRAGMENT,
+    THREAT_IPV6_HOP_BY_HOP,
     // Actions
     ACTION_PASS, ACTION_DROP,
     // Hook points
@@ -46,6 +55,10 @@ use aegis_common::{
     PORT_SCAN_THRESHOLD, PORT_SCAN_WINDOW_NS,
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS, CONN_TIMEOUT_OTHER_NS,
+    // IPv6 security constants
+    IPV6_MAX_EXT_HEADERS, ROUTING_TYPE_0,
+    NEXTHDR_HOP, NEXTHDR_TCP, NEXTHDR_UDP, NEXTHDR_ROUTING, NEXTHDR_FRAGMENT,
+    NEXTHDR_DEST, NEXTHDR_NONE, NEXTHDR_AUTH, NEXTHDR_ICMPV6,
 };
 
 // ============================================================
@@ -83,6 +96,26 @@ static PORT_SCAN: HashMap<u32, PortScanState> = HashMap::with_max_entries(4096, 
 /// Connection tracking map: 5-tuple -> state
 #[map]
 static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(65536, 0);
+
+// ============================================================
+// IPv6 BPF MAPS
+// ============================================================
+
+/// IPv6 exact match blocklist (manual blocks)
+#[map]
+static BLOCKLIST_IPV6: HashMap<FlowKeyIpv6, u32> = HashMap::with_max_entries(1024, 0);
+
+/// IPv6 CIDR prefix blocklist using LPM Trie
+#[map]
+static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> = LpmTrie::with_max_entries(16384, 0);
+
+/// IPv6 Connection tracking
+#[map]
+static CONN_TRACK_IPV6: HashMap<ConnTrackKeyIpv6, ConnTrackState> = HashMap::with_max_entries(32768, 0);
+
+/// IPv6 event log (separate due to larger struct size)
+#[map]
+static EVENTS_IPV6: PerfEventArray<PacketLogIpv6> = PerfEventArray::new(0);
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -167,6 +200,33 @@ fn stats_inc_block_cidr() {
     }
 }
 
+#[inline(always)]
+fn stats_inc_ipv6_seen() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).ipv6_seen = (*s).ipv6_seen.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_ipv6_pass() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).ipv6_pass = (*s).ipv6_pass.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_ipv6_drop() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).ipv6_drop = (*s).ipv6_drop.wrapping_add(1);
+        }
+    }
+}
+
 // ============================================================
 // XDP ENTRY POINT
 // ============================================================
@@ -188,18 +248,32 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1
     };
 
-    let (ip_offset, l4_base_offset) = if is_l3_mode {
-        // L3 interface (WireGuard/tun) - IP starts at offset 0
-        (0usize, 20usize)
+    // Determine IP version and offset
+    let (ip_offset, ether_type) = if is_l3_mode {
+        // L3 interface - check IP version from first byte
+        let version_ptr: *const u8 = ptr_at(&ctx, 0)?;
+        let version = (unsafe { *version_ptr } >> 4) & 0xF;
+        let etype = if version == 6 { ETH_P_IPV6 } else { ETH_P_IP };
+        (0usize, etype)
     } else {
-        // L2 interface (Ethernet) - check ether_type first
+        // L2 interface - check ether_type
         let eth_hdr: *const EthHdr = ptr_at(&ctx, 0)?;
-        let ether_type = unsafe { (*eth_hdr).ether_type };
-        if u16::from_be(ether_type) != ETH_P_IP {
-            return Ok(xdp_action::XDP_PASS);
-        }
-        (EthHdr::LEN, EthHdr::LEN + 20)
+        let etype = u16::from_be(unsafe { (*eth_hdr).ether_type });
+        (EthHdr::LEN, etype)
     };
+
+    // Route to IPv6 handler if needed
+    if ether_type == ETH_P_IPV6 {
+        return try_xdp_ipv6(&ctx, ip_offset);
+    }
+
+    // Not IPv4? Pass through
+    if ether_type != ETH_P_IP {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // --- IPv4 PROCESSING ---
+    let l4_base_offset = ip_offset + 20;
 
     let ipv4_hdr: *const Ipv4Hdr = ptr_at(&ctx, ip_offset)?;
     let src_addr = unsafe { (*ipv4_hdr).src_addr };
@@ -506,6 +580,351 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     }
 
     Ok(xdp_action::XDP_PASS)
+}
+
+// ============================================================
+// IPv6 PROCESSING (with security bypass protection)
+// ============================================================
+
+/// Process IPv6 packets with extension header chain protection
+fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
+    stats_inc_ipv6_seen();
+
+    // Parse IPv6 base header
+    let ipv6_hdr: *const Ipv6Hdr = ptr_at(ctx, ip_offset)?;
+    let src_addr = unsafe { (*ipv6_hdr).src_addr };
+    let dst_addr = unsafe { (*ipv6_hdr).dst_addr };
+    let payload_len = u16::from_be(unsafe { (*ipv6_hdr).payload_len });
+    let mut next_header = unsafe { (*ipv6_hdr).next_header };
+
+    // Validate version
+    let version = unsafe { (*ipv6_hdr).version() };
+    if version != 6 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // --- EXTENSION HEADER CHAIN PROCESSING ---
+    // This is where most IPv6 bypass attacks happen!
+    let mut offset = ip_offset + Ipv6Hdr::LEN;
+    let mut ext_hdr_count: u8 = 0;
+    let mut is_fragment = false;
+    let mut saw_hop_by_hop = false;
+
+    // Process extension headers with security checks
+    loop {
+        // SECURITY: Limit extension header chain length
+        if ext_hdr_count >= IPV6_MAX_EXT_HEADERS {
+            stats_inc_ipv6_drop();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
+                REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN, payload_len, ext_hdr_count);
+        }
+
+        match next_header {
+            // Hop-by-Hop Options - MUST be first extension header
+            NEXTHDR_HOP => {
+                if ext_hdr_count > 0 {
+                    // SECURITY: Hop-by-Hop after other headers = attack
+                    stats_inc_ipv6_drop();
+                    return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
+                        REASON_IPV6_POLICY, THREAT_IPV6_HOP_BY_HOP, payload_len, ext_hdr_count);
+                }
+                saw_hop_by_hop = true;
+                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
+                next_header = unsafe { (*ext).next_header };
+                offset += unsafe { (*ext).len() };
+                ext_hdr_count += 1;
+            }
+
+            // Routing Header - Type 0 is DEPRECATED (RFC 5095)
+            NEXTHDR_ROUTING => {
+                let rh: *const Ipv6RoutingHdr = ptr_at(ctx, offset)?;
+                let routing_type = unsafe { (*rh).routing_type };
+
+                // SECURITY: Drop Type 0 Routing Header (source routing attack)
+                if routing_type == ROUTING_TYPE_0 {
+                    stats_inc_ipv6_drop();
+                    return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
+                        REASON_IPV6_POLICY, THREAT_IPV6_ROUTING_TYPE0, payload_len, ext_hdr_count);
+                }
+
+                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
+                next_header = unsafe { (*ext).next_header };
+                offset += unsafe { (*ext).len() };
+                ext_hdr_count += 1;
+            }
+
+            // Fragment Header
+            NEXTHDR_FRAGMENT => {
+                let frag: *const Ipv6FragHdr = ptr_at(ctx, offset)?;
+                is_fragment = true;
+
+                // SECURITY: Check for fragment attacks
+                let frag_offset = unsafe { (*frag).offset() };
+                let more_frags = unsafe { (*frag).more_fragments() };
+
+                // Tiny first fragment = evasion attempt
+                if frag_offset == 0 && more_frags && payload_len < 64 {
+                    stats_inc_ipv6_drop();
+                    return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
+                        REASON_IPV6_POLICY, THREAT_IPV6_FRAGMENT, payload_len, ext_hdr_count);
+                }
+
+                next_header = unsafe { (*frag).next_header };
+                offset += Ipv6FragHdr::LEN;
+                ext_hdr_count += 1;
+            }
+
+            // Destination Options
+            NEXTHDR_DEST => {
+                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
+                next_header = unsafe { (*ext).next_header };
+                offset += unsafe { (*ext).len() };
+                ext_hdr_count += 1;
+            }
+
+            // Authentication Header
+            NEXTHDR_AUTH => {
+                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
+                // AH length is in 4-byte units + 2
+                let ah_len = ((unsafe { (*ext).hdr_ext_len } as usize) + 2) * 4;
+                next_header = unsafe { (*ext).next_header };
+                offset += ah_len;
+                ext_hdr_count += 1;
+            }
+
+            // No Next Header - stop processing
+            NEXTHDR_NONE => break,
+
+            // TCP, UDP, ICMPv6 - we've reached L4
+            NEXTHDR_TCP | NEXTHDR_UDP | NEXTHDR_ICMPV6 => break,
+
+            // Unknown extension header or final protocol
+            _ => break,
+        }
+    }
+
+    // For fragments (not first), we can't see L4 - pass with caution
+    if is_fragment {
+        stats_inc_ipv6_pass();
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // --- L4 PARSING ---
+    let l4_offset = offset;
+    let mut src_port = 0u16;
+    let mut dst_port = 0u16;
+    let mut tcp_flags = 0u8;
+
+    if next_header == NEXTHDR_TCP {
+        let sp: *const u16 = ptr_at(ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *sp });
+        let dp: *const u16 = ptr_at(ctx, l4_offset + 2)?;
+        dst_port = u16::from_be(unsafe { *dp });
+        let flags: *const u8 = ptr_at(ctx, l4_offset + 13)?;
+        tcp_flags = unsafe { *flags };
+    } else if next_header == NEXTHDR_UDP {
+        let sp: *const u16 = ptr_at(ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *sp });
+        let dp: *const u16 = ptr_at(ctx, l4_offset + 2)?;
+        dst_port = u16::from_be(unsafe { *dp });
+    }
+
+    // --- IPv6 WHITELIST (Link-local, Loopback, Multicast) ---
+    // Link-local: fe80::/10
+    // Loopback: ::1
+    // Multicast: ff00::/8
+    let is_whitelisted =
+        (src_addr[0] == 0xfe && (src_addr[1] & 0xc0) == 0x80) ||  // Link-local
+        (src_addr == [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]) ||        // ::1
+        (src_addr[0] == 0xff);                                     // Multicast
+
+    if is_whitelisted {
+        stats_inc_ipv6_pass();
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // --- IPv6 CONNECTION TRACKING ---
+    let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+    // Check reverse direction for established connections
+    let conn_key = ConnTrackKeyIpv6 {
+        src_ip: dst_addr,
+        dst_ip: src_addr,
+        src_port: dst_port,
+        dst_port: src_port,
+        proto: next_header,
+        _pad: [0u8; 3],
+    };
+
+    if is_module_enabled(CFG_CONN_TRACK) {
+        if let Some(state) = unsafe { CONN_TRACK_IPV6.get(&conn_key) } {
+            if state.state == CONN_ESTABLISHED {
+                let mut updated = *state;
+                updated.last_seen = now_ns;
+                updated.packets = updated.packets.saturating_add(1);
+                updated.bytes = updated.bytes.saturating_add(payload_len as u32);
+                let _ = CONN_TRACK_IPV6.insert(&conn_key, &updated, 0);
+                stats_inc_ipv6_pass();
+                stats_inc_conntrack();
+                return Ok(xdp_action::XDP_PASS);
+            }
+        }
+    }
+
+    // --- IPv6 CIDR BLOCKLIST ---
+    if is_module_enabled(CFG_THREAT_FEEDS) {
+        let cidr_key = Key::new(128, LpmKeyIpv6 {
+            prefix_len: 128,
+            addr: src_addr,
+        });
+
+        if let Some(_entry) = CIDR_BLOCKLIST_IPV6.get(&cidr_key) {
+            stats_inc_ipv6_drop();
+            stats_inc_block_cidr();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
+                next_header, tcp_flags, REASON_CIDR_FEED, THREAT_BLOCKLIST, payload_len, ext_hdr_count);
+        }
+    }
+
+    // --- IPv6 EXACT BLOCKLIST ---
+    let key_exact = FlowKeyIpv6 {
+        src_ip: src_addr,
+        dst_port,
+        proto: next_header,
+        _pad: 0,
+    };
+
+    if let Some(_) = unsafe { BLOCKLIST_IPV6.get(&key_exact) } {
+        stats_inc_ipv6_drop();
+        stats_inc_block_manual();
+        return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
+            next_header, tcp_flags, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, payload_len, ext_hdr_count);
+    }
+
+    // Wildcard lookup
+    let key_wild = FlowKeyIpv6 {
+        src_ip: src_addr,
+        dst_port: 0,
+        proto: 0,
+        _pad: 0,
+    };
+
+    if let Some(_) = unsafe { BLOCKLIST_IPV6.get(&key_wild) } {
+        stats_inc_ipv6_drop();
+        stats_inc_block_manual();
+        return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
+            next_header, tcp_flags, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, payload_len, ext_hdr_count);
+    }
+
+    // --- TCP SCAN DETECTION for IPv6 ---
+    if is_module_enabled(CFG_SCAN_DETECT) && next_header == NEXTHDR_TCP {
+        let fin = tcp_flags & 0x01 != 0;
+        let syn = tcp_flags & 0x02 != 0;
+        let psh = tcp_flags & 0x08 != 0;
+        let urg = tcp_flags & 0x20 != 0;
+
+        // Xmas Tree
+        if fin && urg && psh {
+            stats_inc_ipv6_drop();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
+                next_header, tcp_flags, REASON_TCP_ANOMALY, THREAT_SCAN_XMAS, payload_len, ext_hdr_count);
+        }
+
+        // Null Scan
+        if tcp_flags == 0 {
+            stats_inc_ipv6_drop();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
+                next_header, tcp_flags, REASON_TCP_ANOMALY, THREAT_SCAN_NULL, payload_len, ext_hdr_count);
+        }
+
+        // SYN+FIN
+        if syn && fin {
+            stats_inc_ipv6_drop();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
+                next_header, tcp_flags, REASON_TCP_ANOMALY, THREAT_SCAN_SYNFIN, payload_len, ext_hdr_count);
+        }
+    }
+
+    // --- UPDATE IPv6 CONNECTION TRACKING ---
+    if next_header == NEXTHDR_TCP {
+        let syn = tcp_flags & 0x02 != 0;
+        let ack = tcp_flags & 0x10 != 0;
+
+        if syn && ack {
+            let new_conn = ConnTrackState {
+                state: CONN_ESTABLISHED,
+                direction: 0,
+                _pad: [0u8; 2],
+                last_seen: now_ns,
+                packets: 1,
+                bytes: payload_len as u32,
+            };
+            let out_key = ConnTrackKeyIpv6 {
+                src_ip: dst_addr,
+                dst_ip: src_addr,
+                src_port: dst_port,
+                dst_port: src_port,
+                proto: next_header,
+                _pad: [0u8; 3],
+            };
+            let _ = CONN_TRACK_IPV6.insert(&out_key, &new_conn, 0);
+        }
+    } else if next_header == NEXTHDR_UDP {
+        let new_conn = ConnTrackState {
+            state: CONN_ESTABLISHED,
+            direction: 0,
+            _pad: [0u8; 2],
+            last_seen: now_ns,
+            packets: 1,
+            bytes: payload_len as u32,
+        };
+        let out_key = ConnTrackKeyIpv6 {
+            src_ip: dst_addr,
+            dst_ip: src_addr,
+            src_port: dst_port,
+            dst_port: src_port,
+            proto: next_header,
+            _pad: [0u8; 3],
+        };
+        let _ = CONN_TRACK_IPV6.insert(&out_key, &new_conn, 0);
+    }
+
+    stats_inc_ipv6_pass();
+    Ok(xdp_action::XDP_PASS)
+}
+
+/// Log IPv6 drop event and return XDP_DROP
+#[inline(always)]
+fn log_ipv6_drop(
+    ctx: &XdpContext,
+    src_ip: &[u8; 16],
+    dst_ip: &[u8; 16],
+    src_port: u16,
+    dst_port: u16,
+    proto: u8,
+    tcp_flags: u8,
+    reason: u8,
+    threat_type: u8,
+    packet_len: u16,
+    ext_hdr_count: u8,
+) -> Result<u32, ()> {
+    let log = PacketLogIpv6 {
+        src_ip: *src_ip,
+        dst_ip: *dst_ip,
+        src_port,
+        dst_port,
+        proto,
+        tcp_flags,
+        action: ACTION_DROP,
+        reason,
+        threat_type,
+        hook: HOOK_XDP,
+        packet_len,
+        ext_hdr_count,
+        _pad: [0u8; 3],
+    };
+    EVENTS_IPV6.output(ctx, &log, 0);
+    Ok(xdp_action::XDP_DROP)
 }
 
 // ============================================================

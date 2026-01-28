@@ -10,7 +10,7 @@ use std::path::Path;
 use std::fs;
 use clap::{Parser, Subcommand};
 use tokio::signal;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::convert::TryInto;
 use tokio::io::{self, AsyncBufReadExt};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -23,13 +23,16 @@ use serde_json;
 
 // Import from aegis-common (Single Source of Truth)
 use aegis_common::{
-    PacketLog, FlowKey,
+    PacketLog, FlowKey, PacketLogIpv6, FlowKeyIpv6,
     REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
     REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
     REASON_IPV6_POLICY, REASON_MALFORMED, REASON_EGRESS_BLOCK,
     THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
     THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST, THREAT_INCOMING_SYN,
     THREAT_EGRESS_BLOCKED,
+    // IPv6 threat types
+    THREAT_IPV6_EXT_CHAIN, THREAT_IPV6_ROUTING_TYPE0, THREAT_IPV6_FRAGMENT,
+    THREAT_IPV6_HOP_BY_HOP,
 };
 
 #[derive(Parser)]
@@ -49,6 +52,10 @@ struct Opt {
     /// Disable TC egress program
     #[clap(long)]
     no_tc: bool,
+
+    /// Load threat feeds on startup (Spamhaus, AbuseIPDB, Firehol)
+    #[clap(long)]
+    load_feeds: bool,
 
     #[clap(subcommand)]
     command: Commands,
@@ -299,7 +306,19 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             println!("🛡️  All defense modules ENABLED");
             let config_arc = Arc::new(Mutex::new(config));
-            
+
+            // Load threat feeds if requested
+            if opt.load_feeds {
+                println!("📡 Loading threat feeds into CIDR blocklist...");
+                let cidr_map = bpf.take_map("CIDR_BLOCKLIST").expect("CIDR_BLOCKLIST not found");
+                let mut cidr: aya::maps::LpmTrie<_, aegis_common::LpmKeyIpv4, aegis_common::CidrBlockEntry> =
+                    aya::maps::LpmTrie::try_from(cidr_map)?;
+                match feeds::load_feeds_to_map(&mut cidr) {
+                    Ok(count) => println!("✅ Loaded {} IPs from threat feeds", count),
+                    Err(e) => println!("⚠️  Feed loading error: {}", e),
+                }
+            }
+
             // Take ownership of STATS for health metrics
             let stats_map = bpf.take_map("STATS").expect("STATS map not found");
             let stats: aya::maps::PerCpuArray<_, aegis_common::Stats> = aya::maps::PerCpuArray::try_from(stats_map)?;
@@ -308,9 +327,13 @@ async fn main() -> Result<(), anyhow::Error> {
             // Shared Logs
             let logs_arc = Arc::new(Mutex::new(VecDeque::new()));
 
-            // Take ownership of EVENTS
+            // Take ownership of EVENTS (IPv4)
             let events_map = bpf.take_map("EVENTS").expect("EVENTS map not found");
             let mut events = AsyncPerfEventArray::try_from(events_map)?;
+
+            // Take ownership of EVENTS_IPV6
+            let events_ipv6_map = bpf.take_map("EVENTS_IPV6").expect("EVENTS_IPV6 map not found");
+            let mut events_ipv6 = AsyncPerfEventArray::try_from(events_ipv6_map)?;
 
             // Setup event logging futures
             let mut event_futures = FuturesUnordered::new();
@@ -437,6 +460,75 @@ async fn main() -> Result<(), anyhow::Error> {
                             Err(_e) => {
                                 break;
                             }
+                        }
+                    }
+                });
+            }
+
+            // --- IPv6 EVENT LOOP (separate spawn due to different async block type) ---
+            let logs_clone_v6 = logs_arc.clone();
+            let cpus_v6 = online_cpus().map_err(|(_, e)| e)?;
+
+            for cpu_id in cpus_v6 {
+                let mut buf = events_ipv6.open(cpu_id, None)?;
+                let logs_inner = logs_clone_v6.clone();
+
+                tokio::spawn(async move {
+                    let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
+                    loop {
+                        match buf.read_events(&mut buffers).await {
+                            Ok(events) => {
+                                for i in 0..events.read {
+                                    let buf = &mut buffers[i];
+                                    let ptr = buf.as_ptr() as *const PacketLogIpv6;
+                                    let log = unsafe { ptr.read_unaligned() };
+
+                                    // Convert IPv6 bytes to Ipv6Addr for display
+                                    let src_ip = Ipv6Addr::from(log.src_ip);
+                                    let dst_ip = Ipv6Addr::from(log.dst_ip);
+
+                                    // Format IPv6 threat type
+                                    let threat_str = match log.threat_type {
+                                        THREAT_IPV6_EXT_CHAIN => "IPv6_EXT_CHAIN",
+                                        THREAT_IPV6_ROUTING_TYPE0 => "IPv6_ROUTING_TYPE0",
+                                        THREAT_IPV6_FRAGMENT => "IPv6_FRAGMENT",
+                                        THREAT_IPV6_HOP_BY_HOP => "IPv6_HOP_BY_HOP",
+                                        THREAT_SCAN_XMAS => "XMAS_SCAN",
+                                        THREAT_SCAN_NULL => "NULL_SCAN",
+                                        THREAT_SCAN_SYNFIN => "SYNFIN_SCAN",
+                                        THREAT_BLOCKLIST => "BLOCKLIST",
+                                        _ => "NONE",
+                                    };
+
+                                    let msg = match log.threat_type {
+                                        THREAT_IPV6_EXT_CHAIN => format!(
+                                            "⛓️ IPv6 EXT CHAIN ATTACK: {} ({} hdrs)", src_ip, log.ext_hdr_count),
+                                        THREAT_IPV6_ROUTING_TYPE0 => format!(
+                                            "🚨 IPv6 TYPE0 ROUTING (deprecated): {}", src_ip),
+                                        THREAT_IPV6_FRAGMENT => format!(
+                                            "💥 IPv6 FRAGMENT ATTACK: {} -> {}", src_ip, dst_ip),
+                                        THREAT_IPV6_HOP_BY_HOP => format!(
+                                            "🔗 IPv6 HOP-BY-HOP MISUSE: {}", src_ip),
+                                        THREAT_SCAN_XMAS => format!(
+                                            "🎄 IPv6 XMAS SCAN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        THREAT_SCAN_NULL => format!(
+                                            "⚫ IPv6 NULL SCAN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        THREAT_SCAN_SYNFIN => format!(
+                                            "💀 IPv6 SYNFIN: {} -> {}:{}", src_ip, dst_ip, log.dst_port),
+                                        THREAT_BLOCKLIST => format!(
+                                            "🚫 IPv6 BLOCKED: {} ({})", src_ip, threat_str),
+                                        _ => format!(
+                                            "🌐 IPv6: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, threat_str),
+                                    };
+
+                                    {
+                                        let mut logs = logs_inner.lock().unwrap();
+                                        if logs.len() >= 100 { logs.pop_front(); }
+                                        logs.push_back(msg);
+                                    }
+                                }
+                            }
+                            Err(_) => break,
                         }
                     }
                 });

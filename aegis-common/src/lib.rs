@@ -291,3 +291,130 @@ pub const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
 
 pub const CONN_TIMEOUT_ESTABLISHED_NS: u64 = 300_000_000_000; // 5 min
 pub const CONN_TIMEOUT_OTHER_NS: u64 = 30_000_000_000;        // 30 sec
+
+// ============================================================
+// IPv6 SUPPORT STRUCTURES
+// ============================================================
+
+/// IPv6 address as 16 bytes (128 bits)
+pub type Ipv6Addr = [u8; 16];
+
+/// LPM key for IPv6 CIDR matching
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "user", derive(Debug))]
+#[repr(C)]
+pub struct LpmKeyIpv6 {
+    pub prefix_len: u32,       // Number of bits in prefix (0-128)
+    pub addr: Ipv6Addr,        // IPv6 address in network byte order
+}
+
+/// FlowKey for IPv6 manual blocklist
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "user", derive(Debug))]
+#[repr(C)]
+pub struct FlowKeyIpv6 {
+    pub src_ip: Ipv6Addr,      // Source IPv6 (network byte order)
+    pub dst_port: u16,         // Destination port (0 = wildcard)
+    pub proto: u8,             // Protocol (0 = wildcard)
+    pub _pad: u8,              // Padding for alignment
+}
+
+/// Connection tracking key for IPv6 (5-tuple)
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "user", derive(Debug))]
+#[repr(C)]
+pub struct ConnTrackKeyIpv6 {
+    pub src_ip: Ipv6Addr,      // Source IPv6
+    pub dst_ip: Ipv6Addr,      // Destination IPv6
+    pub src_port: u16,         // Source port
+    pub dst_port: u16,         // Destination port
+    pub proto: u8,             // Protocol (next header after ext headers)
+    pub _pad: [u8; 3],         // Padding
+}
+
+/// Extended packet log for IPv6 events (48 bytes)
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "user", derive(Debug, Serialize, Deserialize))]
+#[repr(C)]
+pub struct PacketLogIpv6 {
+    pub src_ip: Ipv6Addr,      // 16 Source IPv6
+    pub dst_ip: Ipv6Addr,      // 16 Destination IPv6
+    pub src_port: u16,         // 2
+    pub dst_port: u16,         // 2
+    pub proto: u8,             // 1  Final protocol after ext headers
+    pub tcp_flags: u8,         // 1
+    pub action: u8,            // 1
+    pub reason: u8,            // 1
+    pub threat_type: u8,       // 1
+    pub hook: u8,              // 1
+    pub packet_len: u16,       // 2
+    pub ext_hdr_count: u8,     // 1  Number of extension headers seen
+    pub _pad: [u8; 3],         // 3  Padding for alignment
+}                              // Total: 48 bytes
+
+// ============================================================
+// IPv6 NEXT HEADER (PROTOCOL) CONSTANTS
+// ============================================================
+
+pub const NEXTHDR_HOP: u8 = 0;         // Hop-by-Hop Options (DANGEROUS)
+pub const NEXTHDR_TCP: u8 = 6;         // TCP
+pub const NEXTHDR_UDP: u8 = 17;        // UDP
+pub const NEXTHDR_ROUTING: u8 = 43;    // Routing Header (Type 0 = DEPRECATED/ATTACK)
+pub const NEXTHDR_FRAGMENT: u8 = 44;   // Fragment Header (DANGEROUS)
+pub const NEXTHDR_AUTH: u8 = 51;       // Authentication Header (AH)
+pub const NEXTHDR_NONE: u8 = 59;       // No Next Header
+pub const NEXTHDR_DEST: u8 = 60;       // Destination Options
+pub const NEXTHDR_ICMPV6: u8 = 58;     // ICMPv6
+pub const NEXTHDR_ESP: u8 = 50;        // Encapsulating Security Payload
+
+// ============================================================
+// IPv6 SECURITY CONSTANTS
+// ============================================================
+
+/// Maximum extension headers allowed before DROP (anti-chain attack)
+/// RFC recommends processing all, but attackers abuse this
+pub const IPV6_MAX_EXT_HEADERS: u8 = 8;
+
+/// Maximum extension header chain length in bytes
+pub const IPV6_MAX_EXT_HDR_LEN: u16 = 256;
+
+/// Routing Header Type 0 is DEPRECATED (RFC 5095) - DROP!
+pub const ROUTING_TYPE_0: u8 = 0;
+
+/// ICMPv6 types that MUST be allowed for IPv6 to function
+pub const ICMPV6_DEST_UNREACHABLE: u8 = 1;
+pub const ICMPV6_PKT_TOO_BIG: u8 = 2;        // Required for PMTUD!
+pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
+pub const ICMPV6_PARAM_PROBLEM: u8 = 4;
+pub const ICMPV6_ECHO_REQUEST: u8 = 128;
+pub const ICMPV6_ECHO_REPLY: u8 = 129;
+pub const ICMPV6_ROUTER_SOLICITATION: u8 = 133;
+pub const ICMPV6_ROUTER_ADVERTISEMENT: u8 = 134;
+pub const ICMPV6_NEIGHBOR_SOLICITATION: u8 = 135;
+pub const ICMPV6_NEIGHBOR_ADVERTISEMENT: u8 = 136;
+
+// ============================================================
+// IPv6 THREAT TYPES (extension of THREAT_* constants)
+// ============================================================
+
+pub const THREAT_IPV6_EXT_CHAIN: u8 = 20;     // Too many extension headers
+pub const THREAT_IPV6_ROUTING_TYPE0: u8 = 21; // Deprecated routing header
+pub const THREAT_IPV6_FRAGMENT: u8 = 22;      // Fragment attack (tiny, overlap)
+pub const THREAT_IPV6_HOP_BY_HOP: u8 = 23;    // Hop-by-hop outside first
+pub const THREAT_IPV6_UNKNOWN_EXT: u8 = 24;   // Unknown extension header
+
+// ============================================================
+// IPv6 AYA POD IMPLEMENTATIONS (userspace only)
+// ============================================================
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LpmKeyIpv6 {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for FlowKeyIpv6 {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ConnTrackKeyIpv6 {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PacketLogIpv6 {}
