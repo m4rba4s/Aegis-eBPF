@@ -1,6 +1,6 @@
 [Unit]
 Description=Aegis eBPF XDP Firewall
-Documentation=https://github.com/mindlock/aegis
+Documentation=https://github.com/m4rba4s/Aegis-Portable-Demo
 After=network.target
 Wants=network.target
 
@@ -12,18 +12,60 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 
-# Security hardening
-NoNewPrivileges=false
+# ============================================================
+# SECURITY HARDENING
+# ============================================================
+
+# Capabilities - minimum required for eBPF/XDP
+# CAP_BPF: load BPF programs (kernel 5.8+)
+# CAP_NET_ADMIN: attach XDP/TC, manage network
+# CAP_PERFMON: perf events for logging
+# CAP_SYS_ADMIN: fallback for older kernels without CAP_BPF
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+
+# Filesystem protection
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-ReadWritePaths=/var/log/aegis /var/lib/aegis
+PrivateDevices=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
 
-# Resource limits
+# Process isolation
+NoNewPrivileges=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+PrivateUsers=false
+
+# Namespace restrictions (need network namespace access)
+RestrictNamespaces=cgroup ipc pid user uts
+
+# System call filtering
+# @system-service: basic service calls
+# @network-io: network operations
+# bpf: eBPF operations
+SystemCallFilter=@system-service @network-io bpf perf_event_open
+SystemCallErrorNumber=EPERM
+
+# Network (needs full access for XDP)
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# ============================================================
+# RESOURCE LIMITS
+# ============================================================
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 
-# Logging
+# ============================================================
+# LOGGING
+# ============================================================
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=aegis

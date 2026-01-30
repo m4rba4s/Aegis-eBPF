@@ -1,4 +1,4 @@
-# ⛨ Aegis: eBPF Security Matrix
+# Aegis: eBPF Security Matrix
 
 > **High-Performance XDP/TC Firewall & Traffic Analyzer written in Rust.**
 > *Zero-overhead packet filtering, stateful connection tracking, and heuristic intrusion detection.*
@@ -25,6 +25,7 @@
 | Connection tracking | Conntrack module | **Native eBPF** |
 | Real-time TUI | No | **Yes** |
 | Memory safety | C | **Rust** |
+| Deployment | Multiple packages | **Single binary** |
 
 ## Features
 
@@ -33,6 +34,7 @@
 - **TC Egress Filtering** — Block outbound connections to malicious destinations
 - **Stateful Connection Tracking** — Native eBPF conntrack (no kernel module)
 - **CIDR Blocklists** — LPM Trie for efficient prefix matching
+- **IPv4 + IPv6 Support** — Dual-stack filtering
 
 ### Detection
 - **Port Scan Detection** — Bitmap-based unique port tracking
@@ -50,55 +52,69 @@
 - **Module Hotkeys** — Toggle protection modules on-the-fly
 - **Space-to-Ban** — One-key IP blocking
 
+### Deployment
+- **Single Binary** — eBPF bytecode embedded, no external files needed
+- **Multi-Distro Support** — Fedora, Ubuntu, Debian, Arch, Alpine, and more
+- **Auto XDP Mode** — Automatic fallback from driver to SKB mode
+- **Systemd Integration** — Hardened service file included
+
 ## Installation
 
 ### Prerequisites
-- Linux Kernel **>= 5.8** with BTF support
-- Rust Toolchain (nightly for eBPF)
-- `bpf-linker` installed
+- Linux Kernel **>= 5.4** (5.8+ recommended for CAP_BPF)
+- Root privileges (for eBPF loading)
 
-### Quick Install
+### Quick Install (Recommended)
+
 ```bash
-# Clone
-git clone https://github.com/m4rba4s/Aegis-eBPF.git
-cd Aegis-eBPF
+# Clone and install
+git clone https://github.com/m4rba4s/Aegis-Portable-Demo.git
+cd Aegis-Portable-Demo
+sudo ./install.sh
+```
 
+The installer will:
+- Detect your distro and install dependencies
+- Build from source (or use pre-built if available)
+- Install systemd service
+- Create config directories
+
+### Run Without Installing
+
+```bash
 # Build
 cargo run -p xtask -- build-all --profile release
 cargo build --release -p aegis-cli
 
-# Install system-wide
-sudo ./install.sh
+# Run (eBPF is embedded in binary)
+sudo ./target/release/aegis-cli -i eth0 tui
 ```
 
-### Manual Build
+### Docker Build
+
 ```bash
-# Build eBPF programs (XDP + TC)
-cargo run -p xtask -- build-all --profile release
+# Build release binaries in Docker
+docker build --output=dist .
 
-# Build CLI
-cargo build --release -p aegis-cli
-
-# Run directly
-sudo ./target/release/aegis-cli \
-  --ebpf-path ./target/bpfel-unknown-none/release/aegis \
-  --tc-path ./target/bpfel-unknown-none/release/aegis-tc \
-  -i eth0 tui
+# Outputs:
+# dist/aegis-cli     - Main binary (eBPF embedded)
+# dist/aegis         - Standalone XDP object (optional)
+# dist/aegis-tc      - Standalone TC object (optional)
 ```
 
 ## Usage
 
 ### TUI Mode (Recommended)
 ```bash
-sudo aegis-cli -i wg0-mullvad tui
 sudo aegis-cli -i eth0 tui
+sudo aegis-cli -i wg0 tui           # VPN interface
 sudo aegis-cli -i eth0 --no-tc tui  # XDP only, no egress filtering
 ```
 
 **Controls:**
 | Key | Action |
 |-----|--------|
-| `Tab` | Switch tabs (Connections → Stats → Logs) |
+| `Tab` | Switch tabs (Connections / Stats / Logs) |
 | `↑/↓` or `j/k` | Navigate list |
 | `Space` | Block/Unblock selected IP |
 | `1-5` | Toggle modules (PortScan, RateLimit, Threats, ConnTrack, ScanDetect) |
@@ -108,84 +124,123 @@ sudo aegis-cli -i eth0 --no-tc tui  # XDP only, no egress filtering
 
 ### Daemon Mode
 ```bash
-# Run as systemd service
+# Start as background service
+sudo systemctl start aegis@eth0
+
+# Or run directly
 sudo aegis-cli -i eth0 daemon
 ```
 
 ### CLI Mode
 ```bash
 sudo aegis-cli -i eth0 load
-# Then use commands:
+# Interactive commands:
 # block 1.2.3.4
 # unblock 1.2.3.4
 # list
 # save / restore
 ```
 
+### Override Embedded eBPF (Advanced)
+```bash
+# Use custom eBPF objects instead of embedded
+sudo aegis-cli \
+  --ebpf-path /custom/path/aegis.o \
+  --tc-path /custom/path/aegis-tc.o \
+  -i eth0 tui
+```
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    KERNEL SPACE                         │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────┐     ┌─────────────┐                   │
-│  │  aegis-ebpf │     │  aegis-tc   │                   │
-│  │   (XDP)     │     │ (TC Egress) │                   │
-│  │  INGRESS    │     │  EGRESS     │                   │
-│  └──────┬──────┘     └──────┬──────┘                   │
-│         │                   │                           │
-│         └───────┬───────────┘                           │
-│                 ▼                                       │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │              SHARED BPF MAPS                     │   │
-│  │  BLOCKLIST | CONN_TRACK | CONFIG | STATS | ...   │   │
-│  └─────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼ PerfEventArray
-┌─────────────────────────────────────────────────────────┐
-│                    USER SPACE                           │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────┐   │
-│  │              aegis-cli (Rust/Tokio)              │   │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────────────┐  │   │
-│  │  │   TUI   │  │  Event  │  │  Map Management │  │   │
-│  │  │(ratatui)│  │  Loop   │  │  (aya)          │  │   │
-│  │  └─────────┘  └─────────┘  └─────────────────┘  │   │
-│  └─────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      KERNEL SPACE                            │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐           ┌─────────────┐                  │
+│  │  aegis-ebpf │           │  aegis-tc   │                  │
+│  │   (XDP)     │           │ (TC Egress) │                  │
+│  │  INGRESS    │           │  EGRESS     │                  │
+│  └──────┬──────┘           └──────┬──────┘                  │
+│         │                         │                          │
+│         └──────────┬──────────────┘                          │
+│                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │                SHARED BPF MAPS                       │    │
+│  │  BLOCKLIST | CONN_TRACK | CONFIG | STATS | FEEDS    │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼ PerfEventArray
+┌─────────────────────────────────────────────────────────────┐
+│                      USER SPACE                              │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │            aegis-cli (Rust/Tokio)                    │    │
+│  │  ┌──────────────────────────────────────────────┐   │    │
+│  │  │  EMBEDDED eBPF BYTECODE (XDP + TC objects)   │   │    │
+│  │  └──────────────────────────────────────────────┘   │    │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────────────┐     │    │
+│  │  │   TUI   │  │  Event  │  │  Map Management │     │    │
+│  │  │(ratatui)│  │  Loop   │  │  (aya)          │     │    │
+│  │  └─────────┘  └─────────┘  └─────────────────┘     │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
-
-## Roadmap
-
-### In Progress
-- [ ] **CO-RE (Compile Once, Run Everywhere)** — BTF-based portability across kernel versions
-- [ ] **Pinned Maps** — Shared state between XDP and TC via `/sys/fs/bpf/`
-- [ ] **IPv6 Support** — Full dual-stack filtering
-
-### Planned
-- [ ] **Threat Feed Integration** — Auto-update from Spamhaus, AbuseIPDB, etc.
-- [ ] **Web Dashboard** — Optional REST API + web UI
-- [ ] **Prometheus Metrics** — Export stats for Grafana
-- [ ] **eBPF-based DPI** — Deep packet inspection for protocol detection
-- [ ] **Kubernetes CNI Plugin** — Network policy enforcement
 
 ## Project Structure
 
 ```
 Aegis-eBPF/
-├── aegis-common/    # Shared types (Single Source of Truth)
-│   └── src/lib.rs   # PacketLog, Stats, FlowKey, ConnTrack*, etc.
-├── aegis-ebpf/      # XDP ingress program
-│   └── src/main.rs  # Packet filtering, rate limiting, scan detection
-├── aegis-tc/        # TC egress program
-│   └── src/main.rs  # Outbound connection blocking
-├── aegis-cli/       # Userspace controller
-│   ├── src/main.rs  # Program loader, event handler
-│   └── src/tui/     # Terminal UI (ratatui)
-├── xtask/           # Build automation
-└── deploy/          # Systemd service files
+├── aegis-common/       # Shared types (Single Source of Truth)
+│   └── src/lib.rs      # PacketLog, Stats, FlowKey, constants
+├── aegis-ebpf/         # XDP ingress program
+│   └── src/main.rs     # Packet filtering, rate limiting, scan detection
+├── aegis-tc/           # TC egress program
+│   └── src/main.rs     # Outbound connection blocking
+├── aegis-cli/          # Userspace controller
+│   ├── build.rs        # Embeds eBPF bytecode at compile time
+│   ├── src/main.rs     # Program loader, event handler
+│   ├── src/tui/        # Terminal UI (ratatui)
+│   ├── src/compat.rs   # Kernel capability detection
+│   └── src/feeds/      # Threat feed parser/downloader
+├── xtask/              # Build automation
+├── deploy/             # Systemd service files
+├── Dockerfile          # Reproducible builds
+└── install.sh          # Multi-distro installer
 ```
+
+## Supported Distributions
+
+| Distro | Package Manager | Init System | Status |
+|--------|-----------------|-------------|--------|
+| Fedora | dnf | systemd | Tested |
+| Ubuntu/Debian | apt | systemd | Tested |
+| Arch Linux | pacman | systemd | Tested |
+| Alpine | apk | openrc | Supported |
+| RHEL/CentOS | dnf/yum | systemd | Supported |
+| openSUSE | zypper | systemd | Supported |
+
+## Roadmap
+
+### Completed
+- [x] XDP ingress filtering
+- [x] TC egress filtering
+- [x] Connection tracking
+- [x] Port scan detection
+- [x] Rate limiting
+- [x] IPv6 support (basic)
+- [x] Single binary distribution
+- [x] Multi-distro installer
+
+### In Progress
+- [ ] IPv6 extension header security checks
+- [ ] Threat feed auto-update
+
+### Planned
+- [ ] Web Dashboard (REST API + web UI)
+- [ ] Prometheus metrics export
+- [ ] Kubernetes CNI plugin
+- [ ] eBPF-based DPI
 
 ## Contributing
 
@@ -198,5 +253,9 @@ PRs welcome! Please ensure:
 
 This tool is intended for **defensive security research** and **system hardening**. The author is not responsible for any misuse.
 
+## License
+
+MIT
+
 ---
-*Crafted with ⚡&❤️*
+*Crafted with Rust & eBPF*
