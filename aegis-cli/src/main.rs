@@ -1,13 +1,13 @@
 mod config;
 mod tui;
 mod feeds;
+mod compat;
 
-use aya::Ebpf;
+use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
 use aya::maps::{HashMap, MapData};
 use aya::maps::perf::AsyncPerfEventArray;
 use std::path::Path;
-use std::fs;
 use clap::{Parser, Subcommand};
 use tokio::signal;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -23,7 +23,7 @@ use serde_json;
 
 // Import from aegis-common (Single Source of Truth)
 use aegis_common::{
-    PacketLog, FlowKey, PacketLogIpv6, FlowKeyIpv6,
+    PacketLog, FlowKey, PacketLogIpv6,
     REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
     REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
     REASON_IPV6_POLICY, REASON_MALFORMED, REASON_EGRESS_BLOCK,
@@ -35,18 +35,34 @@ use aegis_common::{
     THREAT_IPV6_HOP_BY_HOP,
 };
 
+// ============================================================
+// EMBEDDED eBPF BYTECODE (Single Binary Distribution)
+// ============================================================
+// If compiled with eBPF objects present, they are embedded directly.
+// Use --ebpf-path / --tc-path to override with external files.
+
+#[cfg(embedded_xdp)]
+static EMBEDDED_XDP: &[u8] = include_bytes!(env!("AEGIS_XDP_OBJ"));
+
+#[cfg(embedded_tc)]
+static EMBEDDED_TC: &[u8] = include_bytes!(env!("AEGIS_TC_OBJ"));
+
+/// Default path for external eBPF objects
+const DEFAULT_XDP_PATH: &str = "/usr/local/share/aegis/aegis.o";
+const DEFAULT_TC_PATH: &str = "/usr/local/share/aegis/aegis-tc.o";
+
 #[derive(Parser)]
 struct Opt {
     /// Network interface to attach to
     #[clap(short, long, default_value = "lo")]
     iface: String,
 
-    /// Path to XDP eBPF object file
-    #[clap(long, default_value = "/usr/local/share/aegis/aegis.o")]
+    /// Path to XDP eBPF object file (uses embedded if not specified)
+    #[clap(long, default_value = DEFAULT_XDP_PATH)]
     ebpf_path: String,
 
-    /// Path to TC eBPF object file (for egress filtering)
-    #[clap(long, default_value = "/usr/local/share/aegis/aegis-tc.o")]
+    /// Path to TC eBPF object file (uses embedded if not specified)
+    #[clap(long, default_value = DEFAULT_TC_PATH)]
     tc_path: String,
 
     /// Disable TC egress program
@@ -109,6 +125,71 @@ fn format_tcp_flags(flags: u8) -> String {
     }
 }
 
+// ============================================================
+// eBPF LOADING (Embedded or File)
+// ============================================================
+
+/// Load XDP eBPF program - uses embedded bytecode if available and path is default
+fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
+    // If embedded and using default path, use embedded bytecode
+    #[cfg(embedded_xdp)]
+    if path == DEFAULT_XDP_PATH {
+        println!("📦 Loading embedded XDP program ({} bytes)", EMBEDDED_XDP.len());
+        // Debug: print first 32 bytes to verify ELF header
+        if EMBEDDED_XDP.len() >= 32 {
+            println!("   Header: {:02x?}", &EMBEDDED_XDP[0..32]);
+        }
+        // Try parsing with object crate first to isolate the issue
+        match object::read::File::parse(EMBEDDED_XDP) {
+            Ok(obj) => println!("   object crate: parsed OK, format={:?}", obj.format()),
+            Err(e) => println!("   object crate: FAILED - {}", e),
+        }
+        return Ok(EbpfLoader::new().load(EMBEDDED_XDP)?);
+    }
+
+    // Otherwise load from file
+    if Path::new(path).exists() {
+        println!("📁 Loading XDP program from: {}", path);
+        Ok(Ebpf::load_file(path)?)
+    } else {
+        #[cfg(embedded_xdp)]
+        {
+            println!("⚠️  File {} not found, using embedded XDP", path);
+            return Ok(EbpfLoader::new().load(EMBEDDED_XDP)?);
+        }
+        #[cfg(not(embedded_xdp))]
+        {
+            anyhow::bail!("XDP program not found at {} and no embedded bytecode available", path);
+        }
+    }
+}
+
+/// Load TC eBPF program - uses embedded bytecode if available and path is default
+fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
+    // If embedded and using default path, use embedded bytecode
+    #[cfg(embedded_tc)]
+    if path == DEFAULT_TC_PATH {
+        println!("📦 Loading embedded TC program ({} bytes)", EMBEDDED_TC.len());
+        return Ok(EbpfLoader::new().load(EMBEDDED_TC)?);
+    }
+
+    // Otherwise load from file
+    if Path::new(path).exists() {
+        println!("📁 Loading TC program from: {}", path);
+        Ok(Ebpf::load_file(path)?)
+    } else {
+        #[cfg(embedded_tc)]
+        {
+            println!("⚠️  File {} not found, using embedded TC", path);
+            return Ok(EbpfLoader::new().load(EMBEDDED_TC)?);
+        }
+        #[cfg(not(embedded_tc))]
+        {
+            anyhow::bail!("TC program not found at {} and no embedded bytecode available", path);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
@@ -134,7 +215,21 @@ async fn main() -> Result<(), anyhow::Error> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
-        println!("remove limit on locked memory failed, ret is: {}", ret);
+        eprintln!("⚠️  Failed to set memlock limit (error: {})", ret);
+    }
+
+    // Kernel compatibility check (for eBPF commands)
+    if matches!(opt.command, Commands::Load | Commands::Tui | Commands::Daemon) {
+        let caps = compat::KernelCaps::detect();
+        if !matches!(opt.command, Commands::Tui) {
+            caps.print_summary();
+        }
+        if let Err(e) = caps.validate() {
+            eprintln!("\n❌ KERNEL REQUIREMENTS NOT MET:\n{}", e);
+            eprintln!("\nAegis requires Linux kernel >= {}.{} with BPF support.",
+                compat::MIN_KERNEL_VERSION.0, compat::MIN_KERNEL_VERSION.1);
+            std::process::exit(1);
+        }
     }
 
     // Load Config
@@ -217,28 +312,45 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // Load eBPF (only for commands that need it)
-    let ebpf_path = &opt.ebpf_path;
-    let mut bpf = Ebpf::load_file(ebpf_path)?;
+    // Try embedded bytecode first, fallback to file
+    let mut bpf = load_xdp_program(&opt.ebpf_path)?;
     
     // Common setup for Load, Tui, and Daemon
     match opt.command {
         Commands::Load | Commands::Tui | Commands::Daemon => {
             let program: &mut Xdp = bpf.program_mut("xdp_firewall").unwrap().try_into()?;
             program.load()?;
-            
-            let flags = if opt.iface == "lo" || opt.iface.starts_with("wg") || opt.iface.starts_with("wl") {
-                println!("ℹ️  Using XDP Generic Mode (SKB) for virtual/wireless interface: {}", opt.iface);
-                XdpFlags::SKB_MODE
-            } else {
-                XdpFlags::default()
+
+            // XDP attach with automatic fallback: Driver Mode -> SKB Mode
+            let _link_id = match program.attach(&opt.iface, XdpFlags::default()) {
+                Ok(id) => {
+                    println!("✅ XDP attached to {} in DRIVER mode (link_id: {:?})", opt.iface, id);
+                    id
+                }
+                Err(driver_err) => {
+                    // Driver mode failed (common for virtual/wireless interfaces)
+                    // Fallback to SKB (generic) mode
+                    println!("ℹ️  Driver mode unavailable for {}, trying SKB mode...", opt.iface);
+                    match program.attach(&opt.iface, XdpFlags::SKB_MODE) {
+                        Ok(id) => {
+                            println!("✅ XDP attached to {} in SKB mode (link_id: {:?})", opt.iface, id);
+                            id
+                        }
+                        Err(skb_err) => {
+                            eprintln!("❌ XDP attach failed!");
+                            eprintln!("   Driver mode error: {}", driver_err);
+                            eprintln!("   SKB mode error: {}", skb_err);
+                            eprintln!("   Hint: Check if interface '{}' exists and supports XDP", opt.iface);
+                            return Err(skb_err.into());
+                        }
+                    }
+                }
             };
-            let link_id = program.attach(&opt.iface, flags)?;
-            println!("✅ XDP attached to {} (link_id: {:?})", opt.iface, link_id);
 
             // --- TC EGRESS PROGRAM ---
             let mut tc_bpf: Option<Ebpf> = None;
-            if !opt.no_tc && Path::new(&opt.tc_path).exists() {
-                match Ebpf::load_file(&opt.tc_path) {
+            if !opt.no_tc {
+                match load_tc_program(&opt.tc_path) {
                     Ok(mut tc) => {
                         // Add clsact qdisc (required for TC)
                         if let Err(e) = tc::qdisc_add_clsact(&opt.iface) {
@@ -261,10 +373,8 @@ async fn main() -> Result<(), anyhow::Error> {
                         println!("⚠️  TC program not loaded: {} (egress filtering disabled)", e);
                     }
                 }
-            } else if opt.no_tc {
-                println!("ℹ️  TC egress program disabled (--no-tc)");
             } else {
-                println!("ℹ️  TC program not found at {}, egress filtering disabled", opt.tc_path);
+                println!("ℹ️  TC egress program disabled (--no-tc)");
             }
 
             // Take ownership of BLOCKLIST
@@ -758,4 +868,62 @@ where T: std::borrow::BorrowMut<MapData>
         _ => println!("Unknown command"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(embedded_xdp)]
+    use super::EMBEDDED_XDP;
+
+    #[test]
+    #[cfg(embedded_xdp)]
+    fn test_embedded_xdp_elf_valid() {
+        // Verify ELF magic
+        assert!(EMBEDDED_XDP.len() >= 4, "Embedded XDP too small");
+        assert_eq!(&EMBEDDED_XDP[0..4], &[0x7f, b'E', b'L', b'F'], "Invalid ELF magic");
+
+        // Test parsing with object crate (same as aya uses internally)
+        let result = object::read::File::parse(EMBEDDED_XDP);
+        assert!(result.is_ok(), "Failed to parse embedded XDP: {:?}", result.err());
+
+        let obj = result.unwrap();
+        assert_eq!(obj.format(), object::BinaryFormat::Elf, "Not an ELF file");
+    }
+
+    #[test]
+    #[cfg(embedded_tc)]
+    fn test_embedded_tc_elf_valid() {
+        use super::EMBEDDED_TC;
+        // Verify ELF magic
+        assert!(EMBEDDED_TC.len() >= 4, "Embedded TC too small");
+        assert_eq!(&EMBEDDED_TC[0..4], &[0x7f, b'E', b'L', b'F'], "Invalid ELF magic");
+
+        // Test parsing with object crate
+        let result = object::read::File::parse(EMBEDDED_TC);
+        assert!(result.is_ok(), "Failed to parse embedded TC: {:?}", result.err());
+    }
+
+    /// Test that aya can parse the embedded XDP program
+    /// Note: This does NOT load into the kernel (no root needed)
+    #[test]
+    #[cfg(embedded_xdp)]
+    fn test_aya_parse_embedded_xdp() {
+        use aya::EbpfLoader;
+        // This will parse the ELF but NOT load into kernel
+        // It should fail gracefully if BTF is missing, but the parse should succeed
+        let result = EbpfLoader::new()
+            .btf(None)  // Skip BTF to avoid kernel access
+            .load(EMBEDDED_XDP);
+        // This may fail for other reasons (no kernel access in tests),
+        // but should NOT fail with "error parsing ELF data"
+        match &result {
+            Ok(_) => println!("Aya parse succeeded"),
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                assert!(!err_str.contains("error parsing ELF data"),
+                    "ELF parsing failed: {}", err_str);
+                println!("Aya load failed (expected in tests without root): {}", e);
+            }
+        }
+    }
 }

@@ -66,13 +66,16 @@ impl Ipv6Hdr {
 
 /// Generic IPv6 Extension Header
 /// Most extension headers start with next_header + hdr_ext_len
+/// NOTE: Currently unused - extension header parsing disabled due to verifier limits
 #[repr(C)]
+#[allow(dead_code)]
 pub struct Ipv6ExtHdr {
     pub next_header: u8,
     /// Length in 8-byte units, NOT including first 8 bytes
     pub hdr_ext_len: u8,
 }
 
+#[allow(dead_code)]
 impl Ipv6ExtHdr {
     pub const MIN_LEN: usize = 8;
 
@@ -84,7 +87,9 @@ impl Ipv6ExtHdr {
 }
 
 /// IPv6 Fragment Header (8 bytes)
+/// NOTE: Currently unused - extension header parsing disabled due to verifier limits
 #[repr(C)]
+#[allow(dead_code)]
 pub struct Ipv6FragHdr {
     pub next_header: u8,
     pub reserved: u8,
@@ -93,6 +98,7 @@ pub struct Ipv6FragHdr {
     pub identification: u32,
 }
 
+#[allow(dead_code)]
 impl Ipv6FragHdr {
     pub const LEN: usize = 8;
 
@@ -110,7 +116,9 @@ impl Ipv6FragHdr {
 }
 
 /// IPv6 Routing Header
+/// NOTE: Currently unused - extension header parsing disabled due to verifier limits
 #[repr(C)]
+#[allow(dead_code)]
 pub struct Ipv6RoutingHdr {
     pub next_header: u8,
     pub hdr_ext_len: u8,

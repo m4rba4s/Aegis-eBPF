@@ -17,7 +17,7 @@ use aya_ebpf::{
 };
 use headers::{
     EthHdr, Ipv4Hdr, ETH_P_IP, ETH_P_IPV6,
-    Ipv6Hdr, Ipv6ExtHdr, Ipv6FragHdr, Ipv6RoutingHdr,
+    Ipv6Hdr,
 };
 use parsing::ptr_at;
 
@@ -33,13 +33,9 @@ use aegis_common::{
     // Verdict reasons
     REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
     REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
-    REASON_IPV6_POLICY,
     // Threat types - IPv4
     THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
     THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST,
-    // Threat types - IPv6
-    THREAT_IPV6_EXT_CHAIN, THREAT_IPV6_ROUTING_TYPE0, THREAT_IPV6_FRAGMENT,
-    THREAT_IPV6_HOP_BY_HOP,
     // Actions
     ACTION_PASS, ACTION_DROP,
     // Hook points
@@ -55,8 +51,7 @@ use aegis_common::{
     PORT_SCAN_THRESHOLD, PORT_SCAN_WINDOW_NS,
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS, CONN_TIMEOUT_OTHER_NS,
-    // IPv6 security constants
-    IPV6_MAX_EXT_HEADERS, ROUTING_TYPE_0,
+    // IPv6 next header protocol constants
     NEXTHDR_HOP, NEXTHDR_TCP, NEXTHDR_UDP, NEXTHDR_ROUTING, NEXTHDR_FRAGMENT,
     NEXTHDR_DEST, NEXTHDR_NONE, NEXTHDR_AUTH, NEXTHDR_ICMPV6,
 };
@@ -251,8 +246,15 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // Determine IP version and offset
     let (ip_offset, ether_type) = if is_l3_mode {
         // L3 interface - check IP version from first byte
-        let version_ptr: *const u8 = ptr_at(&ctx, 0)?;
-        let version = (unsafe { *version_ptr } >> 4) & 0xF;
+        // Use black_box to prevent compiler from optimizing away the bounds check pattern
+        // The eBPF verifier REQUIRES seeing: if (pkt + N) > pkt_end
+        let data = ctx.data();
+        let data_end = ctx.data_end();
+        let check_end = core::hint::black_box(data + 1);
+        if check_end > data_end {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        let version = unsafe { (*(data as *const u8) >> 4) & 0xF };
         let etype = if version == 6 { ETH_P_IPV6 } else { ETH_P_IP };
         (0usize, etype)
     } else {
@@ -595,7 +597,7 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     let src_addr = unsafe { (*ipv6_hdr).src_addr };
     let dst_addr = unsafe { (*ipv6_hdr).dst_addr };
     let payload_len = u16::from_be(unsafe { (*ipv6_hdr).payload_len });
-    let mut next_header = unsafe { (*ipv6_hdr).next_header };
+    let next_header = unsafe { (*ipv6_hdr).next_header };
 
     // Validate version
     let version = unsafe { (*ipv6_hdr).version() };
@@ -603,114 +605,43 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // --- EXTENSION HEADER CHAIN PROCESSING ---
-    // This is where most IPv6 bypass attacks happen!
-    let mut offset = ip_offset + Ipv6Hdr::LEN;
-    let mut ext_hdr_count: u8 = 0;
-    let mut is_fragment = false;
-    let mut saw_hop_by_hop = false;
+    // --- EXTENSION HEADER HANDLING ---
+    // NOTE: Full extension header chain processing disabled due to eBPF verifier
+    // limitations with dynamic offset tracking across loop iterations.
+    // The verifier loses packet bounds tracking after loop unrolling.
+    //
+    // Current approach: If next_header is directly TCP/UDP/ICMPv6, parse L4.
+    // If it's an extension header, pass the packet without deep inspection.
+    // This is less secure but allows the program to load.
+    //
+    // TODO: Re-enable extension header parsing with explicit bounds checks
+    // or by restructuring the code to avoid dynamic offsets.
 
-    // Process extension headers with security checks
-    loop {
-        // SECURITY: Limit extension header chain length
-        if ext_hdr_count >= IPV6_MAX_EXT_HEADERS {
-            stats_inc_ipv6_drop();
-            return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
-                REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN, payload_len, ext_hdr_count);
+    let l4_offset = ip_offset + Ipv6Hdr::LEN;
+
+    // If next_header is an extension header, we can't safely parse further
+    // due to verifier limitations. Pass the packet.
+    match next_header {
+        NEXTHDR_TCP | NEXTHDR_UDP | NEXTHDR_ICMPV6 => {
+            // Direct L4 protocol - we can parse
         }
-
-        match next_header {
-            // Hop-by-Hop Options - MUST be first extension header
-            NEXTHDR_HOP => {
-                if ext_hdr_count > 0 {
-                    // SECURITY: Hop-by-Hop after other headers = attack
-                    stats_inc_ipv6_drop();
-                    return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
-                        REASON_IPV6_POLICY, THREAT_IPV6_HOP_BY_HOP, payload_len, ext_hdr_count);
-                }
-                saw_hop_by_hop = true;
-                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
-                next_header = unsafe { (*ext).next_header };
-                offset += unsafe { (*ext).len() };
-                ext_hdr_count += 1;
-            }
-
-            // Routing Header - Type 0 is DEPRECATED (RFC 5095)
-            NEXTHDR_ROUTING => {
-                let rh: *const Ipv6RoutingHdr = ptr_at(ctx, offset)?;
-                let routing_type = unsafe { (*rh).routing_type };
-
-                // SECURITY: Drop Type 0 Routing Header (source routing attack)
-                if routing_type == ROUTING_TYPE_0 {
-                    stats_inc_ipv6_drop();
-                    return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
-                        REASON_IPV6_POLICY, THREAT_IPV6_ROUTING_TYPE0, payload_len, ext_hdr_count);
-                }
-
-                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
-                next_header = unsafe { (*ext).next_header };
-                offset += unsafe { (*ext).len() };
-                ext_hdr_count += 1;
-            }
-
-            // Fragment Header
-            NEXTHDR_FRAGMENT => {
-                let frag: *const Ipv6FragHdr = ptr_at(ctx, offset)?;
-                is_fragment = true;
-
-                // SECURITY: Check for fragment attacks
-                let frag_offset = unsafe { (*frag).offset() };
-                let more_frags = unsafe { (*frag).more_fragments() };
-
-                // Tiny first fragment = evasion attempt
-                if frag_offset == 0 && more_frags && payload_len < 64 {
-                    stats_inc_ipv6_drop();
-                    return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0, next_header, 0,
-                        REASON_IPV6_POLICY, THREAT_IPV6_FRAGMENT, payload_len, ext_hdr_count);
-                }
-
-                next_header = unsafe { (*frag).next_header };
-                offset += Ipv6FragHdr::LEN;
-                ext_hdr_count += 1;
-            }
-
-            // Destination Options
-            NEXTHDR_DEST => {
-                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
-                next_header = unsafe { (*ext).next_header };
-                offset += unsafe { (*ext).len() };
-                ext_hdr_count += 1;
-            }
-
-            // Authentication Header
-            NEXTHDR_AUTH => {
-                let ext: *const Ipv6ExtHdr = ptr_at(ctx, offset)?;
-                // AH length is in 4-byte units + 2
-                let ah_len = ((unsafe { (*ext).hdr_ext_len } as usize) + 2) * 4;
-                next_header = unsafe { (*ext).next_header };
-                offset += ah_len;
-                ext_hdr_count += 1;
-            }
-
-            // No Next Header - stop processing
-            NEXTHDR_NONE => break,
-
-            // TCP, UDP, ICMPv6 - we've reached L4
-            NEXTHDR_TCP | NEXTHDR_UDP | NEXTHDR_ICMPV6 => break,
-
-            // Unknown extension header or final protocol
-            _ => break,
+        NEXTHDR_HOP | NEXTHDR_ROUTING | NEXTHDR_FRAGMENT | NEXTHDR_DEST | NEXTHDR_AUTH | NEXTHDR_NONE => {
+            // Extension header present - pass without deep inspection
+            // This loses security checks but avoids verifier issues
+            stats_inc_ipv6_pass();
+            return Ok(xdp_action::XDP_PASS);
         }
-    }
-
-    // For fragments (not first), we can't see L4 - pass with caution
-    if is_fragment {
-        stats_inc_ipv6_pass();
-        return Ok(xdp_action::XDP_PASS);
+        _ => {
+            // Unknown protocol - pass
+            stats_inc_ipv6_pass();
+            return Ok(xdp_action::XDP_PASS);
+        }
     }
 
     // --- L4 PARSING ---
-    let l4_offset = offset;
+    // Now l4_offset is a compile-time constant (ip_offset + 40)
+    // ext_hdr_count is always 0 since we skip extension headers
+    let ext_hdr_count: u8 = 0;
     let mut src_port = 0u16;
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;

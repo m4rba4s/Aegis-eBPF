@@ -24,6 +24,7 @@ pub struct Ipv4Hdr {
     pub dst_addr: u32,
 }
 
+#[allow(dead_code)]
 impl Ipv4Hdr {
     pub fn ihl(&self) -> u8 {
         self.version_ihl & 0x0F

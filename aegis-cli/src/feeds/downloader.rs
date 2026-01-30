@@ -1,12 +1,14 @@
 //! Async Feed Downloader
 
+#![allow(dead_code)]
+
 use reqwest::Client;
 use std::time::Duration;
 use std::path::PathBuf;
 use std::fs;
 
 use super::{FeedConfig, FeedCategory};
-use super::parser::{parse_feed_cidr, CidrEntry};
+use super::parser::parse_feed_cidr;
 
 /// CIDR entry ready for eBPF (network byte order)
 pub struct CidrEntryBpf {

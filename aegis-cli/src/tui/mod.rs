@@ -7,6 +7,8 @@
 //! - IP blocking/unblocking via SPACE
 //! - Tab switching between views
 
+#![allow(dead_code)]
+
 use std::{
     io,
     time::{Duration, Instant},
@@ -25,7 +27,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Gauge, Sparkline},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Sparkline},
     Terminal,
     Frame,
 };

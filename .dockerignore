@@ -1,0 +1,24 @@
+# Build artifacts
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (not needed for build)
+*.md
+!README.md
+
+# Local config
+aegis.yaml
+*.log

@@ -373,7 +373,10 @@ pub const NEXTHDR_ESP: u8 = 50;        // Encapsulating Security Payload
 
 /// Maximum extension headers allowed before DROP (anti-chain attack)
 /// RFC recommends processing all, but attackers abuse this
-pub const IPV6_MAX_EXT_HEADERS: u8 = 8;
+/// NOTE: Reduced to 2 to satisfy eBPF verifier state tracking limits
+/// Real-world IPv6 packets rarely have more than 1-2 extension headers
+/// (typically just Fragment or Hop-by-Hop if any)
+pub const IPV6_MAX_EXT_HEADERS: u8 = 2;
 
 /// Maximum extension header chain length in bytes
 pub const IPV6_MAX_EXT_HDR_LEN: u16 = 256;

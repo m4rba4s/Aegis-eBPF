@@ -1,5 +1,7 @@
 //! Feed Parser - parses IP lists from various formats
 
+#![allow(dead_code)]
+
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install nightly
+        run: rustup install nightly && rustup component add rust-src --toolchain nightly
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Build eBPF
+        run: cargo run -p xtask -- build-all --profile release
+
+      - name: Build CLI
+        run: cargo build --release -p aegis-cli
+
+      - name: Run tests
+        run: cargo test --workspace --exclude aegis-ebpf --exclude aegis-tc
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (userspace only)
+        run: cargo clippy -p aegis-cli -p aegis-common --features user -- -D warnings
