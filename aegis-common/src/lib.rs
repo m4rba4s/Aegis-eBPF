@@ -293,9 +293,11 @@ pub const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
 // ============================================================
 
 /// Sample size for entropy analysis (bytes)
-pub const ENTROPY_SAMPLE_SIZE: usize = 32;
-/// Threshold: >28 unique bytes in 32 = high entropy (likely encrypted)
-pub const ENTROPY_THRESHOLD: u8 = 28;
+/// NOTE: Must be small (4) to avoid BPF verifier state explosion
+/// Manually unrolled in eBPF code - do NOT use in loops!
+pub const ENTROPY_SAMPLE_SIZE: usize = 4;
+/// Threshold: 4 unique bytes in 4 = high entropy (all different = random)
+pub const ENTROPY_THRESHOLD: u8 = 4;
 
 // ============================================================
 // CONNECTION TIMEOUTS

@@ -50,8 +50,6 @@ use aegis_common::{
     TOKENS_PER_SEC, MAX_TOKENS,
     // Port scan constants
     PORT_SCAN_THRESHOLD, PORT_SCAN_WINDOW_NS,
-    // Entropy detection constants
-    ENTROPY_SAMPLE_SIZE, ENTROPY_THRESHOLD,
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS, CONN_TIMEOUT_OTHER_NS,
     // IPv6 next header protocol constants
@@ -536,7 +534,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     // --- ENTROPY DETECTION (encrypted C2/tunnels) ---
     // High entropy in payload suggests encrypted traffic (potential C2)
-    // Only check established connections to reduce false positives
+    // NOTE: Manually unrolled - NO LOOPS! Verifier explodes with loops.
     if is_module_enabled(CFG_ENTROPY) {
         // Calculate payload offset: TCP header min 20, UDP header 8
         let payload_offset = if proto == 6 {
@@ -548,35 +546,25 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         };
 
         if payload_offset > 0 {
-            // Check if we have enough payload to sample
-            let sample_end = payload_offset + ENTROPY_SAMPLE_SIZE;
+            // Check if we have enough payload to sample (4 bytes)
+            let sample_end = payload_offset + 4;
             let data = ctx.data();
             let data_end = ctx.data_end();
             let check_end = core::hint::black_box(data + sample_end);
 
             if check_end <= data_end {
-                // Count unique bytes using 256-bit bitmap (8 x u32)
-                let mut byte_seen: [u32; 8] = [0; 8];
-                let mut unique_count: u8 = 0;
+                // MANUALLY UNROLLED: Read 4 bytes
+                let b0 = unsafe { *((data + payload_offset) as *const u8) };
+                let b1 = unsafe { *((data + payload_offset + 1) as *const u8) };
+                let b2 = unsafe { *((data + payload_offset + 2) as *const u8) };
+                let b3 = unsafe { *((data + payload_offset + 3) as *const u8) };
 
-                // Sample ENTROPY_SAMPLE_SIZE bytes
-                for i in 0..ENTROPY_SAMPLE_SIZE {
-                    let byte_ptr = (data + payload_offset + i) as *const u8;
-                    let byte_val = unsafe { *byte_ptr };
-                    let bitmap_idx = (byte_val / 32) as usize;
-                    let bit_pos = byte_val % 32;
+                // High entropy heuristic: all 4 bytes different = likely random/encrypted
+                // This catches encrypted C2 while passing normal HTTP/text
+                let all_different = (b0 != b1) && (b0 != b2) && (b0 != b3) &&
+                                    (b1 != b2) && (b1 != b3) && (b2 != b3);
 
-                    if bitmap_idx < 8 {
-                        let mask = 1u32 << bit_pos;
-                        if byte_seen[bitmap_idx] & mask == 0 {
-                            byte_seen[bitmap_idx] |= mask;
-                            unique_count += 1;
-                        }
-                    }
-                }
-
-                // High entropy = likely encrypted
-                if unique_count > ENTROPY_THRESHOLD {
+                if all_different {
                     return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
                         proto, tcp_flags, ACTION_DROP, REASON_ENTROPY, THREAT_HIGH_ENTROPY, total_len);
                 }
