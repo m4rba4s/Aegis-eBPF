@@ -1,0 +1,34 @@
+[package]
+name = "aegis-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.3", features = ["derive"] }
+aegis-common = { path = "../../aegis-common", features = ["user"] }
+
+[[bin]]
+name = "fuzz_packet_parsing"
+path = "fuzz_targets/fuzz_packet_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_lpm_lookup"
+path = "fuzz_targets/fuzz_lpm_lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rate_limit"
+path = "fuzz_targets/fuzz_rate_limit.rs"
+test = false
+doc = false
+bench = false

@@ -52,3 +52,26 @@ jobs:
 
       - name: Clippy (userspace only)
         run: cargo clippy -p aegis-cli -p aegis-common --features user -- -D warnings
+
+  verify:
+    name: Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Run compile-time invariants
+        run: cargo build -p aegis-verification
+
+      - name: Run property-based tests
+        run: cargo test -p aegis-verification -- --nocapture
+
+      - name: Verification summary
+        run: |
+          echo "Verification passed:"
+          echo "  - Compile-time struct size assertions"
+          echo "  - Property-based tests (proptest)"
+          echo "  - Unit tests for invariants"

@@ -5,6 +5,7 @@ members = [
     "aegis-ebpf",
     "aegis-tc",
     "xtask",
+    "verification",
 ]
 default-members = ["aegis-cli", "xtask"]
 resolver = "2"
