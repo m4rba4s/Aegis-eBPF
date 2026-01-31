@@ -33,9 +33,10 @@ use aegis_common::{
     // Verdict reasons
     REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
     REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
+    REASON_ENTROPY,
     // Threat types - IPv4
     THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
-    THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST,
+    THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST, THREAT_HIGH_ENTROPY,
     // Actions
     ACTION_PASS, ACTION_DROP,
     // Hook points
@@ -44,11 +45,13 @@ use aegis_common::{
     CONN_ESTABLISHED,
     // Config keys
     CFG_INTERFACE_MODE, CFG_PORT_SCAN, CFG_RATE_LIMIT, CFG_THREAT_FEEDS,
-    CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE,
+    CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE, CFG_ENTROPY,
     // Rate limiting constants
     TOKENS_PER_SEC, MAX_TOKENS,
     // Port scan constants
     PORT_SCAN_THRESHOLD, PORT_SCAN_WINDOW_NS,
+    // Entropy detection constants
+    ENTROPY_SAMPLE_SIZE, ENTROPY_THRESHOLD,
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS, CONN_TIMEOUT_OTHER_NS,
     // IPv6 next header protocol constants
@@ -529,6 +532,56 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         stats_inc_block_manual();
         return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
             proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len);
+    }
+
+    // --- ENTROPY DETECTION (encrypted C2/tunnels) ---
+    // High entropy in payload suggests encrypted traffic (potential C2)
+    // Only check established connections to reduce false positives
+    if is_module_enabled(CFG_ENTROPY) {
+        // Calculate payload offset: TCP header min 20, UDP header 8
+        let payload_offset = if proto == 6 {
+            l4_offset + 20  // TCP minimum header
+        } else if proto == 17 {
+            l4_offset + 8   // UDP header
+        } else {
+            0
+        };
+
+        if payload_offset > 0 {
+            // Check if we have enough payload to sample
+            let sample_end = payload_offset + ENTROPY_SAMPLE_SIZE;
+            let data = ctx.data();
+            let data_end = ctx.data_end();
+            let check_end = core::hint::black_box(data + sample_end);
+
+            if check_end <= data_end {
+                // Count unique bytes using 256-bit bitmap (8 x u32)
+                let mut byte_seen: [u32; 8] = [0; 8];
+                let mut unique_count: u8 = 0;
+
+                // Sample ENTROPY_SAMPLE_SIZE bytes
+                for i in 0..ENTROPY_SAMPLE_SIZE {
+                    let byte_ptr = (data + payload_offset + i) as *const u8;
+                    let byte_val = unsafe { *byte_ptr };
+                    let bitmap_idx = (byte_val / 32) as usize;
+                    let bit_pos = byte_val % 32;
+
+                    if bitmap_idx < 8 {
+                        let mask = 1u32 << bit_pos;
+                        if byte_seen[bitmap_idx] & mask == 0 {
+                            byte_seen[bitmap_idx] |= mask;
+                            unique_count += 1;
+                        }
+                    }
+                }
+
+                // High entropy = likely encrypted
+                if unique_count > ENTROPY_THRESHOLD {
+                    return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
+                        proto, tcp_flags, ACTION_DROP, REASON_ENTROPY, THREAT_HIGH_ENTROPY, total_len);
+                }
+            }
+        }
     }
 
     // --- CREATE/UPDATE CONNECTION TRACKING ---

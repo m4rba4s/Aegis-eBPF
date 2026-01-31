@@ -189,6 +189,7 @@ pub const REASON_RATELIMIT: u8 = 7;      // Rate limiting triggered
 pub const REASON_IPV6_POLICY: u8 = 8;    // IPv6 policy decision
 pub const REASON_MALFORMED: u8 = 9;      // Malformed L2/L3/L4
 pub const REASON_EGRESS_BLOCK: u8 = 10;  // Egress blocklist match
+pub const REASON_ENTROPY: u8 = 11;       // High entropy payload detected
 
 // ============================================================
 // THREAT TYPE CONSTANTS (WHAT was detected)
@@ -203,6 +204,7 @@ pub const THREAT_FLOOD_SYN: u8 = 5;      // SYN flood rate exceeded
 pub const THREAT_BLOCKLIST: u8 = 6;      // IP on blocklist
 pub const THREAT_INCOMING_SYN: u8 = 7;   // Incoming SYN (server mode)
 pub const THREAT_EGRESS_BLOCKED: u8 = 8; // Egress to bad destination
+pub const THREAT_HIGH_ENTROPY: u8 = 9;   // High entropy payload (encrypted C2)
 
 // ============================================================
 // ACTION CONSTANTS
@@ -231,6 +233,7 @@ pub const CFG_THREAT_FEEDS: u32 = 3;    // Threat feeds toggle
 pub const CFG_CONN_TRACK: u32 = 4;      // Connection tracking toggle
 pub const CFG_SCAN_DETECT: u32 = 5;     // Scan detection toggle
 pub const CFG_VERBOSE: u32 = 6;         // Verbose logging toggle
+pub const CFG_ENTROPY: u32 = 7;         // Entropy analysis toggle
 
 // ============================================================
 // AYA POD IMPLEMENTATIONS (userspace only)
@@ -284,6 +287,15 @@ pub const MAX_TOKENS: u32 = 200;       // Burst capacity
 
 pub const PORT_SCAN_THRESHOLD: u16 = 50;          // Unique ports to trigger
 pub const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
+
+// ============================================================
+// ENTROPY DETECTION (encrypted C2/tunnels)
+// ============================================================
+
+/// Sample size for entropy analysis (bytes)
+pub const ENTROPY_SAMPLE_SIZE: usize = 32;
+/// Threshold: >28 unique bytes in 32 = high entropy (likely encrypted)
+pub const ENTROPY_THRESHOLD: u8 = 28;
 
 // ============================================================
 // CONNECTION TIMEOUTS
