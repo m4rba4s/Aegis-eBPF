@@ -107,8 +107,8 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             geo_cache: Arc::new(Mutex::new(HashMap::new())),
             blocklist,
             current_tab: Tab::Connections,
-            pkt_history: VecDeque::with_capacity(60),
-            drop_history: VecDeque::with_capacity(60),
+            pkt_history: VecDeque::from(vec![0u64; 60]),
+            drop_history: VecDeque::from(vec![0u64; 60]),
             last_stats: Stats::default(),
         }
     }
@@ -690,17 +690,21 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
 
     // Packet rate sparkline
     let pkt_data: Vec<u64> = app.pkt_history.iter().copied().collect();
+    let pkt_max = pkt_data.iter().copied().max().unwrap_or(1).max(10); // min scale 10
     let sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(" Packets/sec "))
+        .block(Block::default().borders(Borders::ALL).title(format!(" Packets/sec (max: {}) ", pkt_max)))
         .data(&pkt_data)
+        .max(pkt_max)
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(sparkline, chunks[0]);
 
     // Drop rate sparkline
     let drop_data: Vec<u64> = app.drop_history.iter().copied().collect();
+    let drop_max = drop_data.iter().copied().max().unwrap_or(1).max(5); // min scale 5
     let drop_sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(" Drops/sec "))
+        .block(Block::default().borders(Borders::ALL).title(format!(" Drops/sec (max: {}) ", drop_max)))
         .data(&drop_data)
+        .max(drop_max)
         .style(Style::default().fg(Color::Red));
     f.render_widget(drop_sparkline, chunks[1]);
 
