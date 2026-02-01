@@ -107,8 +107,8 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             geo_cache: Arc::new(Mutex::new(HashMap::new())),
             blocklist,
             current_tab: Tab::Connections,
-            pkt_history: VecDeque::from(vec![0u64; 60]),
-            drop_history: VecDeque::from(vec![0u64; 60]),
+            pkt_history: VecDeque::from(vec![0u64; 200]),
+            drop_history: VecDeque::from(vec![0u64; 200]),
             last_stats: Stats::default(),
         }
     }
@@ -297,11 +297,11 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
         self.pkt_history.push_back(delta_pkts);
         self.drop_history.push_back(delta_drops);
 
-        // Keep only last 60 samples
-        while self.pkt_history.len() > 60 {
+        // Keep only last 200 samples (wide terminals)
+        while self.pkt_history.len() > 200 {
             self.pkt_history.pop_front();
         }
-        while self.drop_history.len() > 60 {
+        while self.drop_history.len() > 200 {
             self.drop_history.pop_front();
         }
 
@@ -682,9 +682,9 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(35),  // Packet sparkline
-            Constraint::Percentage(35),  // Drop sparkline
-            Constraint::Min(8),          // Stats details
+            Constraint::Length(5),  // Packet sparkline
+            Constraint::Length(5),  // Drop sparkline
+            Constraint::Min(5),     // Stats details
         ])
         .split(area);
 
