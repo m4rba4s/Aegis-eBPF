@@ -107,8 +107,8 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             geo_cache: Arc::new(Mutex::new(HashMap::new())),
             blocklist,
             current_tab: Tab::Connections,
-            pkt_history: VecDeque::from(vec![0u64; 200]),
-            drop_history: VecDeque::from(vec![0u64; 200]),
+            pkt_history: VecDeque::with_capacity(200),
+            drop_history: VecDeque::with_capacity(200),
             last_stats: Stats::default(),
         }
     }
