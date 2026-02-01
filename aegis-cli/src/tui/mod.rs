@@ -682,9 +682,9 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Packet sparkline
-            Constraint::Length(5),  // Drop sparkline
-            Constraint::Min(5),     // Stats details
+            Constraint::Percentage(35),  // Packet sparkline
+            Constraint::Percentage(35),  // Drop sparkline
+            Constraint::Min(8),          // Stats details
         ])
         .split(area);
 
