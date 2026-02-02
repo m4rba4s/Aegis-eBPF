@@ -688,23 +688,25 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
         ])
         .split(area);
 
-    // Packet rate sparkline (ensure at least one data point)
-    let mut pkt_data: Vec<u64> = app.pkt_history.iter().copied().collect();
-    if pkt_data.is_empty() { pkt_data.push(0); }
-    let pkt_max = pkt_data.iter().copied().max().unwrap_or(10).max(10);
+    // Packet rate sparkline
+    let pkt_data: Vec<u64> = app.pkt_history.iter().copied().collect();
+    let pkt_len = pkt_data.len();
+    let pkt_sum: u64 = pkt_data.iter().sum();
+    let pkt_max = pkt_data.iter().copied().max().unwrap_or(1).max(1);
     let sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Pkts/s [{}] ", pkt_max)))
+        .block(Block::default().borders(Borders::ALL).title(format!(" Pkts/s n={} sum={} max={} ", pkt_len, pkt_sum, pkt_max)))
         .data(&pkt_data)
         .max(pkt_max)
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(sparkline, chunks[0]);
 
-    // Drop rate sparkline (ensure at least one data point)
-    let mut drop_data: Vec<u64> = app.drop_history.iter().copied().collect();
-    if drop_data.is_empty() { drop_data.push(0); }
-    let drop_max = drop_data.iter().copied().max().unwrap_or(5).max(5);
+    // Drop rate sparkline
+    let drop_data: Vec<u64> = app.drop_history.iter().copied().collect();
+    let drop_len = drop_data.len();
+    let drop_sum: u64 = drop_data.iter().sum();
+    let drop_max = drop_data.iter().copied().max().unwrap_or(1).max(1);
     let drop_sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Drops/s [{}] ", drop_max)))
+        .block(Block::default().borders(Borders::ALL).title(format!(" Drops/s n={} sum={} max={} ", drop_len, drop_sum, drop_max)))
         .data(&drop_data)
         .max(drop_max)
         .style(Style::default().fg(Color::Red));
