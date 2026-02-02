@@ -1,4 +1,9 @@
-# NEXT SESSION: Heavy Math Verification
+# NEXT SESSION: Heavy Math Verification + BUG FIX
+
+## BUG: TUI Stats/Sparkline disappears over time
+- Graphs disappear after running for a while
+- Need to check: overflow? memory? render area?
+- Debug info in title: n=, sum=, max=
 
 ## Priority Tasks:
 1. **TLA+** - temporal logic for connection state machine (conntrack)
