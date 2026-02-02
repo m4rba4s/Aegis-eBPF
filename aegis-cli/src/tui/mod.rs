@@ -688,21 +688,23 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
         ])
         .split(area);
 
-    // Packet rate sparkline
-    let pkt_data: Vec<u64> = app.pkt_history.iter().copied().collect();
-    let pkt_max = pkt_data.iter().copied().max().unwrap_or(1).max(10); // min scale 10
+    // Packet rate sparkline (ensure at least one data point)
+    let mut pkt_data: Vec<u64> = app.pkt_history.iter().copied().collect();
+    if pkt_data.is_empty() { pkt_data.push(0); }
+    let pkt_max = pkt_data.iter().copied().max().unwrap_or(10).max(10);
     let sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Packets/sec (max: {}) ", pkt_max)))
+        .block(Block::default().borders(Borders::ALL).title(format!(" Pkts/s [{}] ", pkt_max)))
         .data(&pkt_data)
         .max(pkt_max)
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(sparkline, chunks[0]);
 
-    // Drop rate sparkline
-    let drop_data: Vec<u64> = app.drop_history.iter().copied().collect();
-    let drop_max = drop_data.iter().copied().max().unwrap_or(1).max(5); // min scale 5
+    // Drop rate sparkline (ensure at least one data point)
+    let mut drop_data: Vec<u64> = app.drop_history.iter().copied().collect();
+    if drop_data.is_empty() { drop_data.push(0); }
+    let drop_max = drop_data.iter().copied().max().unwrap_or(5).max(5);
     let drop_sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Drops/sec (max: {}) ", drop_max)))
+        .block(Block::default().borders(Borders::ALL).title(format!(" Drops/s [{}] ", drop_max)))
         .data(&drop_data)
         .max(drop_max)
         .style(Style::default().fg(Color::Red));
