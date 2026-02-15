@@ -66,6 +66,12 @@
 
 ### Quick Install (Recommended)
 
+### One-Line Install (SSH/Remote)
+```bash
+curl -sSfL https://raw.githubusercontent.com/m4rba4s/Aegis-Portable-Demo/main/install.sh | sudo bash
+```
+
+### Manual Install
 ```bash
 # Clone and install
 git clone https://github.com/m4rba4s/Aegis-Portable-Demo.git
