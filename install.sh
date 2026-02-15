@@ -1,4 +1,4 @@
-#!/bin/bash
+    #!/bin/bash
 # Aegis XDP Firewall - Universal Installer
 # Supports: Ubuntu, Debian, Fedora, CentOS, RHEL, Arch, Alpine, OpenSUSE
 # Init systems: systemd, openrc, sysvinit
@@ -298,11 +298,100 @@ install_prebuilt() {
     fi
 }
 
+ensure_build_deps() {
+    # bpf-linker needs LLVM/clang to compile
+    if command -v clang &>/dev/null && command -v llvm-config &>/dev/null; then
+        return 0
+    fi
+
+    log_info "Installing LLVM/clang (needed for bpf-linker)..."
+    local distro=$(detect_distro)
+    case "$distro" in
+        fedora|rhel|centos|rocky|alma)
+            dnf install -y llvm clang llvm-devel elfutils-libelf-devel 2>/dev/null || \
+            yum install -y llvm clang llvm-devel elfutils-libelf-devel 2>/dev/null || true
+            ;;
+        ubuntu|debian|pop|linuxmint)
+            apt-get update -qq && apt-get install -y llvm clang libelf-dev 2>/dev/null || true
+            ;;
+        arch|manjaro|endeavouros)
+            pacman -S --noconfirm --needed llvm clang libelf 2>/dev/null || true
+            ;;
+        opensuse*|sles)
+            zypper install -y llvm clang libelf-devel 2>/dev/null || true
+            ;;
+        alpine)
+            apk add llvm clang libelf-dev 2>/dev/null || true
+            ;;
+        *)
+            log_warn "Unknown distro '$distro' — please install llvm and clang manually"
+            ;;
+    esac
+}
+
+ensure_rust_toolchain() {
+    # eBPF build uses: cargo +nightly -Zbuild-std=core
+    # This requires: nightly toolchain + rust-src component + bpf-linker
+    if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
+        log_info "Installing nightly toolchain..."
+        rustup toolchain install nightly || {
+            log_error "Failed to install nightly toolchain"
+            exit 1
+        }
+    fi
+
+    if ! rustup component list --toolchain nightly 2>/dev/null | grep -q 'rust-src (installed)'; then
+        log_info "Installing rust-src for nightly..."
+        rustup component add rust-src --toolchain nightly || {
+            log_error "Failed to install rust-src"
+            exit 1
+        }
+    fi
+
+    if ! command -v bpf-linker &>/dev/null; then
+        log_info "Installing bpf-linker (eBPF linker)..."
+        ensure_build_deps
+        cargo +nightly install bpf-linker || {
+            log_error "Failed to install bpf-linker"
+            log_info "Try manually: cargo +nightly install bpf-linker"
+            exit 1
+        }
+    fi
+
+    log_ok "Nightly toolchain + rust-src + bpf-linker ready"
+}
+
 build_and_install() {
     log_info "Building from source..."
 
-    # Source cargo env
-    [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+    # Find cargo — check multiple locations and explicitly add to PATH
+    # (sourcing .cargo/env alone is insufficient under sudo with secure_path)
+    local cargo_bin_dirs=(
+        "$HOME/.cargo/bin"
+    )
+    if [[ -n "$SUDO_USER" ]]; then
+        local _sudo_home
+        _sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6 2>/dev/null)
+        [[ -n "$_sudo_home" ]] && cargo_bin_dirs+=("$_sudo_home/.cargo/bin")
+    fi
+    # Scan all home directories as last resort
+    for d in /home/*/.cargo/bin; do
+        [[ -d "$d" ]] && cargo_bin_dirs+=("$d")
+    done
+
+    for cbd in "${cargo_bin_dirs[@]}"; do
+        if [[ -x "$cbd/cargo" ]]; then
+            log_info "Found cargo in: $cbd"
+            export PATH="$cbd:$PATH"
+            # Also set RUSTUP_HOME so rustup finds the correct toolchain
+            local rustup_dir="${cbd%/.cargo/bin}/.rustup"
+            if [[ -d "$rustup_dir" ]]; then
+                export RUSTUP_HOME="$rustup_dir"
+                log_info "Using RUSTUP_HOME: $rustup_dir"
+            fi
+            break
+        fi
+    done
 
     if ! command -v cargo &>/dev/null; then
         log_error "cargo not found!"
@@ -312,6 +401,9 @@ build_and_install() {
     fi
 
     cd "$SCRIPT_DIR"
+
+    # Ensure nightly toolchain + rust-src (required for -Zbuild-std=core)
+    ensure_rust_toolchain
 
     # Build eBPF programs
     log_info "Building eBPF programs..."
