@@ -134,16 +134,8 @@ fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
     // If embedded and using default path, use embedded bytecode
     #[cfg(embedded_xdp)]
     if path == DEFAULT_XDP_PATH {
-        println!("📦 Loading embedded XDP program ({} bytes)", EMBEDDED_XDP.len());
-        // Debug: print first 32 bytes to verify ELF header
-        if EMBEDDED_XDP.len() >= 32 {
-            println!("   Header: {:02x?}", &EMBEDDED_XDP[0..32]);
-        }
-        // Try parsing with object crate first to isolate the issue
-        match object::read::File::parse(EMBEDDED_XDP) {
-            Ok(obj) => println!("   object crate: parsed OK, format={:?}", obj.format()),
-            Err(e) => println!("   object crate: FAILED - {}", e),
-        }
+        log::debug!("Loading embedded XDP program ({} bytes)", EMBEDDED_XDP.len());
+        println!("📦 Loading embedded XDP program");
         return Ok(EbpfLoader::new().load(EMBEDDED_XDP)?);
     }
 
@@ -194,6 +186,15 @@ fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
     env_logger::init();
+
+    // Validate interface name (IFNAMSIZ = 16, including null terminator → max 15 chars)
+    if opt.iface.len() > 15
+        || opt.iface.is_empty()
+        || !opt.iface.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        eprintln!("❌ Invalid interface name: '{}' (max 15 chars, alphanumeric/-/_ only)", opt.iface);
+        std::process::exit(1);
+    }
 
     // Banner shown conditionally (not for TUI - it has its own header)
     if !matches!(opt.command, Commands::Tui) {
@@ -414,7 +415,11 @@ async fn main() -> Result<(), anyhow::Error> {
             for key in 1u32..=5u32 {
                 config.insert(key, 1u32, 0)?;
             }
-            println!("🛡️  All defense modules ENABLED");
+            // Key 6: Verbose logging — OFF by default (noisy)
+            config.insert(aegis_common::CFG_VERBOSE, 0u32, 0)?;
+            // Key 7: Entropy detection — OFF by default (breaks TLS/SSH/compressed traffic)
+            config.insert(aegis_common::CFG_ENTROPY, 0u32, 0)?;
+            println!("🛡️  Defense modules ENABLED (entropy: off, verbose: off)");
             let config_arc = Arc::new(Mutex::new(config));
 
             // Load threat feeds if requested
@@ -545,7 +550,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                     }
 
                                     // --- DYNAMIC AUTO-BAN (OODA Loop) ---
-                                    // Auto-ban on SYN FLOOD or PORT SCAN
+                                    // Auto-ban on SYN FLOOD or PORT SCAN (with cap + dedup)
                                     if log.threat_type == THREAT_FLOOD_SYN || log.threat_type == THREAT_SCAN_PORT {
                                         let mut blocklist = blocklist_inner.lock().unwrap();
                                         let key = FlowKey {
@@ -554,14 +559,23 @@ async fn main() -> Result<(), anyhow::Error> {
                                             proto: 0,              // Wildcard proto
                                             _pad: 0,
                                         };
-                                        // Insert into map with action 2 (DROP)
-                                        // Note: We use insert(key, 2, 0)
-                                        if let Err(e) = blocklist.insert(key, 2, 0) {
-                                            let mut logs = logs_inner.lock().unwrap();
-                                            logs.push_back(format!("❌ AUTO-BAN FAILED for {}: {}", src_ip, e));
+                                        // Skip if already banned (dedup)
+                                        if unsafe { blocklist.get(&key, 0) }.is_ok() {
+                                            // Already banned, skip
                                         } else {
-                                            let mut logs = logs_inner.lock().unwrap();
-                                            logs.push_back(format!("⛔ AUTO-BANNED {} (OODA Trigger)", src_ip));
+                                            // Cap: don't auto-ban beyond 512 entries to prevent map exhaustion
+                                            const AUTO_BAN_MAX: usize = 512;
+                                            let ban_count = blocklist.keys().count();
+                                            if ban_count >= AUTO_BAN_MAX {
+                                                let mut logs = logs_inner.lock().unwrap();
+                                                logs.push_back(format!("⚠️ AUTO-BAN LIMIT ({}) reached, skipping {}", AUTO_BAN_MAX, src_ip));
+                                            } else if let Err(e) = blocklist.insert(key, 2, 0) {
+                                                let mut logs = logs_inner.lock().unwrap();
+                                                logs.push_back(format!("❌ AUTO-BAN FAILED for {}: {}", src_ip, e));
+                                            } else {
+                                                let mut logs = logs_inner.lock().unwrap();
+                                                logs.push_back(format!("⛔ AUTO-BANNED {} (OODA Trigger)", src_ip));
+                                            }
                                         }
                                     }
                                     // ------------------------------------

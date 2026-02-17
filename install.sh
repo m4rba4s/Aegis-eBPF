@@ -97,6 +97,18 @@ PrivateTmp=true
 NoNewPrivileges=false
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
 
+# Capability restrictions (BPF requires SYS_ADMIN + NET_ADMIN + BPF + PERFMON)
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+
+# Additional hardening
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectClock=true
+ProtectKernelLogs=true
+
 [Install]
 WantedBy=multi-user.target
 EOF

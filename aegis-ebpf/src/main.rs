@@ -667,15 +667,18 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
             // Direct L4 protocol - we can parse
         }
         NEXTHDR_HOP | NEXTHDR_ROUTING | NEXTHDR_FRAGMENT | NEXTHDR_DEST | NEXTHDR_AUTH | NEXTHDR_NONE => {
-            // Extension header present - pass without deep inspection
-            // This loses security checks but avoids verifier issues
-            stats_inc_ipv6_pass();
-            return Ok(xdp_action::XDP_PASS);
+            // SECURITY: Fail-closed — we can't inspect past extension headers
+            // due to verifier limitations, so DROP rather than blindly passing.
+            // An attacker could prepend a Hop-by-Hop header to bypass all checks.
+            stats_inc_ipv6_drop();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0,
+                next_header, 0, REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN, payload_len, 1);
         }
         _ => {
-            // Unknown protocol - pass
-            stats_inc_ipv6_pass();
-            return Ok(xdp_action::XDP_PASS);
+            // Unknown next_header protocol — fail-closed
+            stats_inc_ipv6_drop();
+            return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0,
+                next_header, 0, REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN, payload_len, 0);
         }
     }
 

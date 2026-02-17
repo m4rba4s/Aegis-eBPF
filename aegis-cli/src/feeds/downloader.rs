@@ -10,6 +10,9 @@ use std::fs;
 use super::{FeedConfig, FeedCategory};
 use super::parser::parse_feed_cidr;
 
+/// Maximum feed download size (10 MB) — prevents OOM from malicious responses
+const MAX_FEED_SIZE: u64 = 10 * 1024 * 1024;
+
 /// CIDR entry ready for eBPF (network byte order)
 pub struct CidrEntryBpf {
     pub addr: u32,        // Network byte order
@@ -47,10 +50,21 @@ pub async fn download_feed(config: &FeedConfig) -> Result<DownloadResult, String
         return Err(format!("HTTP {}", response.status()));
     }
     
+    // Check Content-Length before reading body
+    if let Some(len) = response.content_length() {
+        if len > MAX_FEED_SIZE {
+            return Err(format!("Feed too large: {} bytes (limit: {} bytes)", len, MAX_FEED_SIZE));
+        }
+    }
+    
     let content = response
         .text()
         .await
         .map_err(|e| format!("Read error: {}", e))?;
+    
+    if content.len() as u64 > MAX_FEED_SIZE {
+        return Err(format!("Feed body exceeded limit: {} bytes", content.len()));
+    }
     
     // Parse CIDR entries with real prefix info
     let cidr_entries = parse_feed_cidr(&content);
@@ -88,9 +102,20 @@ pub fn download_feed_blocking(config: &FeedConfig) -> Result<DownloadResult, Str
         return Err(format!("HTTP {}", response.status()));
     }
     
+    // Check Content-Length before reading body
+    if let Some(len) = response.content_length() {
+        if len > MAX_FEED_SIZE {
+            return Err(format!("Feed too large: {} bytes (limit: {} bytes)", len, MAX_FEED_SIZE));
+        }
+    }
+    
     let content = response
         .text()
         .map_err(|e| format!("Read error: {}", e))?;
+    
+    if content.len() as u64 > MAX_FEED_SIZE {
+        return Err(format!("Feed body exceeded limit: {} bytes", content.len()));
+    }
     
     // Parse CIDR entries with real prefix info
     let cidr_entries = parse_feed_cidr(&content);

@@ -92,6 +92,7 @@ pub struct ConnectionInfo {
     pub process: String,
     pub status: String,
     pub geo: String,
+    pub isp: String,
     pub is_blocked: bool,
 }
 
@@ -151,6 +152,7 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                 };
             } else {
                 // Geo lookup for public IPs
+                // Cache format: "GEO|ISP" (pipe-separated) or "..." (pending) or "" (failed, retry)
                 {
                     let map = cache.lock().unwrap();
                     if let Some(g) = map.get(&ip) {
@@ -164,17 +166,18 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                         map.insert(ip, "...".to_string());
                         true
                     } else {
-                        false
+                        // Retry if previous lookup failed (empty string marker)
+                        map.get(&ip).map_or(false, |v| v.is_empty())
                     }
                 };
 
                 if should_fetch {
                     let cache_clone = cache.clone();
                     thread::spawn(move || {
-                        thread::sleep(Duration::from_millis(200));
-                        let url = format!("http://ip-api.com/json/{}", ip);
+                        thread::sleep(Duration::from_millis(300));
+                        let url = format!("http://ip-api.com/json/{}?fields=status,countryCode,city,isp,org", ip);
                         let client = reqwest::blocking::Client::builder()
-                            .timeout(Duration::from_secs(3))
+                            .timeout(Duration::from_secs(5))
                             .build();
 
                         let val: String = match client {
@@ -182,23 +185,27 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                                 Ok(resp) => {
                                     if let Ok(json) = resp.json::<Value>() {
                                         if json["status"].as_str() == Some("fail") {
-                                            "Private".to_string()
+                                            "Private|N/A".to_string()
                                         } else {
                                             let cc = json["countryCode"].as_str().unwrap_or("??");
                                             let city = json["city"].as_str().unwrap_or("");
-                                            if city.is_empty() {
+                                            let isp = json["isp"].as_str().unwrap_or("");
+                                            let org = json["org"].as_str().unwrap_or("");
+                                            let intel = if !isp.is_empty() { isp } else { org };
+                                            let geo_part = if city.is_empty() {
                                                 cc.to_string()
                                             } else {
                                                 format!("{} {}", cc, city)
-                                            }
+                                            };
+                                            format!("{}|{}", geo_part, intel)
                                         }
                                     } else {
-                                        "Error".to_string()
+                                        String::new() // empty = retry next tick
                                     }
                                 }
-                                Err(_) => "Offline".to_string(),
+                                Err(_) => String::new(), // empty = retry
                             },
-                            Err(_) => "Error".to_string(),
+                            Err(_) => String::new(), // empty = retry
                         };
                         let mut map = cache_clone.lock().unwrap();
                         map.insert(ip, val);
@@ -228,13 +235,26 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                 false
             };
 
+            // Parse geo|isp from cache value
+            let (geo_display, isp_display) = if geo.contains('|') {
+                let mut parts = geo.splitn(2, '|');
+                let g = parts.next().unwrap_or("").to_string();
+                let i = parts.next().unwrap_or("").to_string();
+                (g, i)
+            } else if geo.is_empty() {
+                ("Retry...".to_string(), String::new())
+            } else {
+                (geo, String::new())
+            };
+
             enriched_conns.push(ConnectionInfo {
                 ip: conn.ip,
                 port: conn.port,
                 proto: conn.proto,
                 process: conn.process,
                 status: conn.status,
-                geo,
+                geo: geo_display,
+                isp: isp_display,
                 is_blocked,
             });
         }
@@ -650,6 +670,7 @@ fn render_connections<T: std::borrow::BorrowMut<MapData> + 'static>(
             let status = if conn.is_blocked { "BLOCKED" } else { "ALLOWED" };
             let status_color = if conn.is_blocked { Color::Red } else { Color::Green };
 
+            let isp_display = if conn.isp.is_empty() { "N/A".to_string() } else { conn.isp.clone() };
             vec![
                 Line::from(Span::styled("Target Details", Style::default().add_modifier(Modifier::BOLD))),
                 Line::from(""),
@@ -657,6 +678,7 @@ fn render_connections<T: std::borrow::BorrowMut<MapData> + 'static>(
                 Line::from(vec![Span::raw("Port:    "), Span::styled(format!("{}", conn.port), Style::default().fg(Color::White))]),
                 Line::from(vec![Span::raw("Proto:   "), Span::styled(&conn.proto, Style::default().fg(Color::White))]),
                 Line::from(vec![Span::raw("Geo:     "), Span::styled(&conn.geo, Style::default().fg(Color::Magenta))]),
+                Line::from(vec![Span::raw("ISP:     "), Span::styled(&isp_display, Style::default().fg(Color::Yellow))]),
                 Line::from(vec![Span::raw("Status:  "), Span::styled(status, Style::default().fg(status_color).add_modifier(Modifier::BOLD))]),
                 Line::from(""),
                 Line::from(Span::styled("SPACE to toggle block", Style::default().fg(Color::DarkGray))),

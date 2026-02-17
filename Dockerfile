@@ -25,10 +25,13 @@ RUN rustup install nightly && \
 # Install bpf-linker
 RUN cargo install bpf-linker
 
-WORKDIR /build
+# Build as non-root user
+RUN useradd -m builder
+USER builder
+WORKDIR /home/builder/build
 
 # Copy source
-COPY . .
+COPY --chown=builder . .
 
 # Build eBPF programs first (XDP + TC)
 RUN cargo run -p xtask -- build-all --profile release
