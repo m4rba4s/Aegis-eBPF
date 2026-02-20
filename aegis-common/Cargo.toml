@@ -1,7 +1,9 @@
 [package]
 name = "aegis-common"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+license = "MIT"
+description = "Shared types for Aegis eBPF firewall"
 
 [features]
 user = ["dep:serde", "dep:aya"]

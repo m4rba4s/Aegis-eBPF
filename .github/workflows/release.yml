@@ -9,8 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: Build
+  build-release:
+    name: Build Release
     runs-on: ubuntu-latest
 
     steps:
@@ -24,58 +24,50 @@ jobs:
           docker build --output=dist .
           ls -la dist/
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum aegis-cli aegis.o aegis-tc.o > SHA256SUMS
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/aegis-cli
             dist/aegis.o
             dist/aegis-tc.o
-            dist/install.sh
+            dist/SHA256SUMS
           body: |
-            ## Aegis eBPF Firewall
+            ## Aegis eBPF Firewall ${{ github.ref_name }}
 
             ### Quick Install
-
             ```bash
-            # Download and run installer
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aegis-cli
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh
-            chmod +x aegis-cli install.sh
-            sudo ./install.sh --install-only
+            curl -sSfL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sudo bash
             ```
 
-            ### Files
-            - `aegis-cli` - Main binary (eBPF bytecode embedded)
-            - `aegis.o` - XDP eBPF object (optional, for advanced use)
-            - `aegis-tc.o` - TC eBPF object (optional, for advanced use)
-            - `install.sh` - Universal installer script
-
-            ### Usage
+            ### Pre-built Binary
             ```bash
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aegis-cli
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS
+            sha256sum -c SHA256SUMS
+            chmod +x aegis-cli
+            sudo install aegis-cli /usr/local/bin/
             sudo aegis-cli -i eth0 tui
             ```
+
+            ### Supported Platforms
+            - Fedora / RHEL / CentOS / Rocky
+            - Ubuntu / Debian / Pop!_OS
+            - Arch / Manjaro
+            - Alpine (OpenRC)
+            - openSUSE
+
+            ### Files
+            | File | Description |
+            |------|-------------|
+            | `aegis-cli` | Main binary (eBPF embedded) |
+            | `aegis.o` | XDP object (advanced) |
+            | `aegis-tc.o` | TC object (advanced) |
+            | `SHA256SUMS` | Integrity checksums |
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Build verification on multiple distros
-  test-matrix:
-    name: Test on ${{ matrix.os }}
-    runs-on: ubuntu-latest
-    needs: build
-    strategy:
-      matrix:
-        os: [ubuntu-22.04, ubuntu-20.04]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: release-assets
-        continue-on-error: true
-
-      - name: Test binary
-        run: |
-          chmod +x aegis-cli 2>/dev/null || echo "No binary to test"

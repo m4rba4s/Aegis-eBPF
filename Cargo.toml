@@ -6,6 +6,7 @@ members = [
     "aegis-tc",
     "xtask",
     "verification",
+    "aegis-cli/fuzz",
 ]
 default-members = ["aegis-cli", "xtask"]
 resolver = "2"
@@ -15,3 +16,8 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+lto = false           # Disabled LTO to prevent OOM during linking
+codegen-units = 16    # Cap codegen parallelization to prevent OOM
+opt-level = 3         # Maximize runtime performance
+strip = true          # Strip symbols to reduce binary size and memory mapping
+debug = false         # Disable debug symbols for release

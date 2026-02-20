@@ -235,19 +235,18 @@ Aegis-eBPF/
 - [x] Connection tracking
 - [x] Port scan detection
 - [x] Rate limiting
-- [x] IPv6 support (basic)
+- [x] IPv6 support (dual-stack)
+- [x] IPv6 extension header security (fail-closed)
 - [x] Single binary distribution
-- [x] Multi-distro installer
-
-### In Progress
-- [ ] IPv6 extension header security checks
-- [ ] Threat feed auto-update
+- [x] Multi-distro installer (Fedora, Ubuntu, Debian, Arch, Alpine)
+- [x] Security hardening (systemd, auto-ban cap, feed limits)
+- [x] CI pipeline (build, lint, audit, verify)
 
 ### Planned
+- [ ] Threat feed auto-update scheduler
 - [ ] Web Dashboard (REST API + web UI)
 - [ ] Prometheus metrics export
 - [ ] Kubernetes CNI plugin
-- [ ] eBPF-based DPI
 
 ## Contributing
 

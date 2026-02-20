@@ -2,15 +2,16 @@ mod config;
 mod tui;
 mod feeds;
 mod compat;
+mod geo;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
-use aya::maps::{HashMap, MapData};
+use aya::maps::{HashMap, MapData, Map};
 use aya::maps::perf::AsyncPerfEventArray;
 use std::path::Path;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
 use tokio::signal;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, IpAddr};
 use std::convert::TryInto;
 use tokio::io::{self, AsyncBufReadExt};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -23,7 +24,7 @@ use serde_json;
 
 // Import from aegis-common (Single Source of Truth)
 use aegis_common::{
-    PacketLog, FlowKey, PacketLogIpv6,
+    PacketLog, FlowKey, PacketLogIpv6, Stats,
     REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
     REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
     REASON_IPV6_POLICY, REASON_MALFORMED, REASON_EGRESS_BLOCK,
@@ -52,6 +53,15 @@ const DEFAULT_XDP_PATH: &str = "/usr/local/share/aegis/aegis.o";
 const DEFAULT_TC_PATH: &str = "/usr/local/share/aegis/aegis-tc.o";
 
 #[derive(Parser)]
+#[clap(
+    name = "aegis-cli",
+    about = "Aegis eBPF XDP/TC Firewall",
+    long_version = const_format::concatcp!(
+        env!("CARGO_PKG_VERSION"),
+        " (", env!("AEGIS_GIT_HASH"), " ", env!("AEGIS_BUILD_DATE"), ")",
+        "\nrustc: ", env!("AEGIS_RUSTC"),
+    ),
+)]
 struct Opt {
     /// Network interface to attach to
     #[clap(short, long, default_value = "lo")]
@@ -79,13 +89,20 @@ struct Opt {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Load eBPF and enter interactive CLI
     Load,
-    Tui, // TUI mode
-    Daemon, // Headless daemon mode (no REPL)
+    /// Interactive TUI dashboard
+    Tui,
+    /// Headless daemon mode
+    Daemon,
+    /// Save current blocklist
     Save {
         #[clap(short, long, default_value = "aegis.yaml")]
         file: String,
     },
+    /// Show firewall runtime status
+    Status,
+    /// Restore blocklist from file
     Restore {
         #[clap(short, long, default_value = "aegis.yaml")]
         file: String,
@@ -94,6 +111,17 @@ enum Commands {
     Feeds {
         #[clap(subcommand)]
         action: FeedsAction,
+    },
+    /// Manage Allowlist
+    Allow {
+        #[clap(subcommand)]
+        action: AllowAction,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Target shell: bash, zsh, fish, elvish
+        #[clap(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -107,6 +135,22 @@ enum FeedsAction {
     Stats,
     /// Load feeds into eBPF blocklist (requires sudo)
     Load,
+}
+
+#[derive(Subcommand)]
+enum AllowAction {
+    /// Add IP to allowlist
+    Add {
+        /// IP address to allow
+        ip: IpAddr,
+    },
+    /// Remove IP from allowlist
+    Remove {
+        /// IP address to remove
+        ip: IpAddr,
+    },
+    /// List allowed IPs
+    List,
 }
 
 /// Format TCP flags byte into human-readable string
@@ -185,7 +229,10 @@ fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
-    env_logger::init();
+    // Don't init env_logger in TUI mode — stderr is redirected to /dev/null
+    if !matches!(opt.command, Commands::Tui) {
+        env_logger::init();
+    }
 
     // Validate interface name (IFNAMSIZ = 16, including null terminator → max 15 chars)
     if opt.iface.len() > 15
@@ -233,9 +280,32 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     }
 
-    // Load Config
+    // Load rule config (YAML — blocklist rules)
     let config_path = "aegis.yaml";
     let cfg = config::Config::load(config_path).unwrap_or_else(|_| config::Config { rules: vec![], remote_log: None });
+
+    // Load system config (TOML — /etc/aegis/config.toml)
+    let sys_cfg = config::AegisConfig::load(None);
+
+    // Handle Completions command early (no eBPF needed)
+    if let Commands::Completions { shell } = &opt.command {
+        let mut cmd = Opt::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(*shell, &mut cmd, name, &mut std::io::stdout());
+        return Ok(());
+    }
+
+    // Handle Allow command early (no eBPF needed)
+    if let Commands::Allow { action } = &opt.command {
+        handle_allow_command(action)?;
+        return Ok(());
+    }
+
+    // Handle Status command early (needs pinned maps)
+    if let Commands::Status = &opt.command {
+        handle_status_command()?;
+        return Ok(());
+    }
 
     // Handle Feeds command early (no eBPF needed)
     if let Commands::Feeds { action } = &opt.command {
@@ -348,6 +418,23 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             };
 
+            // Pin maps for external tools (status, allow CLI)
+            let _ = std::fs::create_dir_all("/sys/fs/bpf/aegis");
+            let maps_to_pin = [
+                "BLOCKLIST", "ALLOWLIST", "STATS", "CONFIG", 
+                "BLOCKLIST_IPV6", "ALLOWLIST_IPV6", "CIDR_BLOCKLIST",
+                "CIDR_BLOCKLIST_IPV6", "CONN_TRACK", "CONN_TRACK_IPV6"
+            ];
+            for mark in maps_to_pin {
+                if let Some(map) = bpf.map_mut(mark) {
+                    let path = format!("/sys/fs/bpf/aegis/{}", mark);
+                    let _ = std::fs::remove_file(&path); // Force overwrite
+                    if let Err(e) = map.pin(&path) {
+                        println!("⚠️  Failed to pin map {}: {}", mark, e);
+                    }
+                }
+            }
+
             // --- TC EGRESS PROGRAM ---
             let mut tc_bpf: Option<Ebpf> = None;
             if !opt.no_tc {
@@ -410,17 +497,41 @@ async fn main() -> Result<(), anyhow::Error> {
             };
             config.insert(0u32, mode, 0)?;
             
-            // Keys 1-5: Defense modules (all enabled by default)
-            // 1=PortScan, 2=RateLimit, 3=ThreatFeeds, 4=ConnTrack, 5=ScanDetect
-            for key in 1u32..=5u32 {
-                config.insert(key, 1u32, 0)?;
-            }
-            // Key 6: Verbose logging — OFF by default (noisy)
-            config.insert(aegis_common::CFG_VERBOSE, 0u32, 0)?;
-            // Key 7: Entropy detection — OFF by default (breaks TLS/SSH/compressed traffic)
-            config.insert(aegis_common::CFG_ENTROPY, 0u32, 0)?;
-            println!("🛡️  Defense modules ENABLED (entropy: off, verbose: off)");
+            // Keys 1-7: Defense modules (from config.toml)
+            config.insert(aegis_common::CFG_PORT_SCAN, sys_cfg.modules.port_scan as u32, 0)?;
+            config.insert(aegis_common::CFG_RATE_LIMIT, sys_cfg.modules.rate_limit as u32, 0)?;
+            config.insert(aegis_common::CFG_THREAT_FEEDS, sys_cfg.modules.threat_feeds as u32, 0)?;
+            config.insert(aegis_common::CFG_CONN_TRACK, sys_cfg.modules.conn_track as u32, 0)?;
+            config.insert(aegis_common::CFG_SCAN_DETECT, sys_cfg.modules.scan_detect as u32, 0)?;
+            
+            // Logging and Entropy
+            config.insert(aegis_common::CFG_VERBOSE, sys_cfg.modules.verbose as u32, 0)?;
+            config.insert(aegis_common::CFG_ENTROPY, sys_cfg.modules.entropy as u32, 0)?;
+            
             let config_arc = Arc::new(Mutex::new(config));
+
+            // Populate Allowlist from config
+            if let Some(map) = bpf.take_map("ALLOWLIST") {
+                let mut allowlist: HashMap<_, u32, u32> = HashMap::try_from(map)?;
+                for ip_str in &sys_cfg.allowlist.ips {
+                    if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                        let key = u32::from(ip).to_be();
+                        let _ = allowlist.insert(key, 0, 0);
+                        println!("✅ Allowed IPv4: {}", ip);
+                    }
+                }
+            }
+
+            if let Some(map) = bpf.take_map("ALLOWLIST_IPV6") {
+                let mut allowlist6: HashMap<_, [u8; 16], u32> = HashMap::try_from(map)?;
+                for ip_str in &sys_cfg.allowlist.ips {
+                     if let Ok(ip) = ip_str.parse::<std::net::Ipv6Addr>() {
+                        let key = ip.octets();
+                        let _ = allowlist6.insert(key, 0, 0);
+                        println!("✅ Allowed IPv6: {}", ip);
+                     }
+                }
+            }
 
             // Load threat feeds if requested
             if opt.load_feeds {
@@ -456,12 +567,14 @@ async fn main() -> Result<(), anyhow::Error> {
             
             let logs_clone = logs_arc.clone();
             let remote_log_base = cfg.remote_log.clone();
+            let logging_cfg = sys_cfg.logging.clone(); // Pass logging config
             let blocklist_clone = blocklist_arc.clone(); // Clone for event loop
 
             for cpu_id in cpus {
                 let mut buf = events.open(cpu_id, None)?;
                 let logs_inner = logs_clone.clone();
                 let remote_log = remote_log_base.clone();
+                let logging_cfg_inner = logging_cfg.clone();
                 let blocklist_inner = blocklist_clone.clone(); // Clone for this CPU task
                 
                 event_futures.push(async move {
@@ -523,7 +636,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                             action_icon, src_ip, dst_ip, log.dst_port, flags_str, reason_str),
                                     };
 
-                                    // Remote Logging (JSON)
+                                    // Remote Logging (JSON) — UDP, not stdout
                                     if let Some(ref remote) = remote_log {
                                         let json_log = serde_json::json!({
                                             "src_ip": src_ip.to_string(),
@@ -543,10 +656,12 @@ async fn main() -> Result<(), anyhow::Error> {
                                             let _ = s.send_to(json_log.to_string().as_bytes(), remote);
                                         }
                                     }
+                                    // Push to shared log deque (TUI reads this, REPL printer prints this)
                                     {
                                         let mut logs = logs_inner.lock().unwrap();
                                         if logs.len() >= 100 { logs.pop_front(); }
-                                        logs.push_back(msg.clone());
+                                        let full_msg = format!("{} | Reason: {} | Action: {}", msg, reason_str, if log.action == 1 { "DROP" } else { "PASS" });
+                                        logs.push_back(full_msg);
                                     }
 
                                     // --- DYNAMIC AUTO-BAN (OODA Loop) ---
@@ -560,7 +675,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                             _pad: 0,
                                         };
                                         // Skip if already banned (dedup)
-                                        if unsafe { blocklist.get(&key, 0) }.is_ok() {
+                                        if blocklist.get(&key, 0).is_ok() {
                                             // Already banned, skip
                                         } else {
                                             // Cap: don't auto-ban beyond 512 entries to prevent map exhaustion
@@ -589,13 +704,15 @@ async fn main() -> Result<(), anyhow::Error> {
                 });
             }
 
-            // --- IPv6 EVENT LOOP (separate spawn due to different async block type) ---
+            // --- IPv6 EVENT LOOP ---
             let logs_clone_v6 = logs_arc.clone();
+            let logging_cfg_v6 = sys_cfg.logging.clone(); // Config for IPv6 loop
             let cpus_v6 = online_cpus().map_err(|(_, e)| e)?;
 
             for cpu_id in cpus_v6 {
                 let mut buf = events_ipv6.open(cpu_id, None)?;
                 let logs_inner = logs_clone_v6.clone();
+                let logging_cfg_inner = logging_cfg_v6.clone();
 
                 tokio::spawn(async move {
                     let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
@@ -645,6 +762,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                             "🌐 IPv6: {} -> {}:{} [{}]", src_ip, dst_ip, log.dst_port, threat_str),
                                     };
 
+                                    // Push to shared log deque only — no stdout
                                     {
                                         let mut logs = logs_inner.lock().unwrap();
                                         if logs.len() >= 100 { logs.pop_front(); }
@@ -657,6 +775,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 });
             }
+
+            // Initialize GeoIP database
+            let geo_db = geo::GeoLookup::open().map(Arc::new);
 
             if let Commands::Tui = opt.command {
                 // Run TUI (Blocking)
@@ -678,7 +799,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 });
 
-                tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone(), stats_arc.clone()).await?;
+                tui::run_tui(blocklist_arc.clone(), logs_arc.clone(), config_arc.clone(), stats_arc.clone(), geo_db.clone()).await?;
                 println!("\n🔌 Detaching programs from {}...", opt.iface);
                 // Detach by dropping (forces cleanup)
                 drop(tc_bpf);  // TC first
@@ -691,6 +812,22 @@ async fn main() -> Result<(), anyhow::Error> {
                 tokio::spawn(async move {
                     loop {
                         event_futures.next().await;
+                    }
+                });
+
+                // Stdout log printer for daemon mode
+                let logs_printer = logs_arc.clone();
+                tokio::spawn(async move {
+                    let mut last_len = 0;
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        let logs = logs_printer.lock().unwrap();
+                        if logs.len() > last_len {
+                            for i in last_len..logs.len() {
+                                println!("{}", logs[i]);
+                            }
+                            last_len = logs.len();
+                        }
                     }
                 });
                 
@@ -786,9 +923,12 @@ async fn main() -> Result<(), anyhow::Error> {
              println!("Please use the 'restore' command inside the running 'load' session.");
         }
         Commands::Feeds { .. } => {
-            // Handled before eBPF loading - should never reach here
             unreachable!("Feeds command should be handled before eBPF loading");
         }
+        Commands::Completions { .. } => {
+            unreachable!("Completions command should be handled before eBPF loading");
+        }
+        Commands::Status | Commands::Allow { .. } => {}
     }
 
     Ok(())
@@ -881,6 +1021,155 @@ where T: std::borrow::BorrowMut<MapData>
         }
         _ => println!("Unknown command"),
     }
+    Ok(())
+}
+
+fn handle_allow_command(action: &AllowAction) -> anyhow::Result<()> {
+    // 1. Update config file (Persistent)
+    let mut cfg = config::AegisConfig::load(None);
+    let mut updated = false;
+
+    match action {
+        AllowAction::Add { ip } => {
+            let ip_str = ip.to_string();
+            if !cfg.allowlist.ips.contains(&ip_str) {
+                cfg.allowlist.ips.push(ip_str.clone());
+                updated = true;
+                println!("✅ Added {} to config allowlist", ip);
+            } else {
+                println!("ℹ️  IP {} already in config allowlist", ip);
+            }
+        }
+        AllowAction::Remove { ip } => {
+            let ip_str = ip.to_string();
+            if let Some(pos) = cfg.allowlist.ips.iter().position(|x| x == &ip_str) {
+                cfg.allowlist.ips.remove(pos);
+                updated = true;
+                println!("✅ Removed {} from config allowlist", ip);
+            } else {
+                println!("ℹ️  IP {} not found in config allowlist", ip);
+            }
+        }
+        AllowAction::List => {
+            if cfg.allowlist.ips.is_empty() {
+                println!("Allowlist is empty.");
+            } else {
+                println!("Allowed IPs (Config):");
+                for ip in &cfg.allowlist.ips {
+                    println!("  - {}", ip);
+                }
+            }
+            return Ok(()); // List doesn't update map
+        }
+    }
+
+    if updated {
+        if let Err(e) = cfg.save(None) {
+            eprintln!("❌ Failed to save config: {}", e);
+        } else {
+            println!("💾 Config saved to /etc/aegis/config.toml");
+        }
+    }
+
+    // 2. Update runtime BPF Map (Dynamic)
+    // Try to open pinned maps
+    let map_path = "/sys/fs/bpf/aegis/ALLOWLIST";
+    let map_path_v6 = "/sys/fs/bpf/aegis/ALLOWLIST_IPV6";
+
+    // IPv4 Map Update
+    if let Ok(md) = MapData::from_pin(map_path) {
+        let map = Map::HashMap(md);
+        if let Ok(mut hash_map) = HashMap::try_from(map) {
+                if let AllowAction::Add { ip: IpAddr::V4(ipv4) } = action {
+                     let key = u32::from(*ipv4).to_be();
+                     let _ = hash_map.insert(key, 0, 0);
+                     println!("⚡ Runtime map updated (IPv4 allowed)");
+                } else if let AllowAction::Remove { ip: IpAddr::V4(ipv4) } = action {
+                     let key = u32::from(*ipv4).to_be();
+                     let _ = hash_map.remove(&key);
+                }
+            }
+        }
+
+
+    // IPv6 Map Update
+    if let Ok(md) = MapData::from_pin(map_path_v6) {
+        let map = Map::HashMap(md);
+        if let Ok(mut hash_map) = HashMap::try_from(map) {
+                if let AllowAction::Add { ip: IpAddr::V6(ipv6) } = action {
+                     let key = ipv6.octets();
+                     let _ = hash_map.insert(key, 0, 0);
+                     println!("⚡ Runtime map updated (IPv6 allowed)");
+                } else if let AllowAction::Remove { ip: IpAddr::V6(ipv6) } = action {
+                     let key = ipv6.octets();
+                     let _ = hash_map.remove(&key);
+                }
+            }
+        }
+
+
+    Ok(())
+}
+
+fn handle_status_command() -> anyhow::Result<()> {
+    // 1. Read STATS map (pinned)
+    let map_path = "/sys/fs/bpf/aegis/STATS";
+    use aya::maps::PerCpuArray;
+
+    // Load map from path
+    let map = match aya::maps::MapData::from_pin(map_path) {
+        Ok(md) => aya::maps::Map::PerCpuArray(md),
+        Err(_) => {
+            println!("❌ Aegis is not running (maps not found at {})", map_path);
+            return Ok(());
+        }
+    };
+    let array = PerCpuArray::<_, Stats>::try_from(map).map_err(|e| anyhow::anyhow!("Failed into PerCpuArray: {}", e))?;
+
+    // Aggregate stats
+    // Aggregate stats
+    let mut total = Stats::default();
+
+    // Get values at index 0 from the PERCPU_ARRAY. 
+    // This returns a collection of values, one for each CPU.
+    if let Ok(values) = array.get(&0, 0) {
+        for stat in values.iter() {
+           total.pkts_seen += stat.pkts_seen;
+           total.pkts_drop += stat.pkts_drop;
+           total.pkts_pass += stat.pkts_pass;
+           total.events_ok += stat.events_ok;
+           total.events_fail += stat.events_fail;
+           total.block_manual += stat.block_manual;
+           total.block_cidr += stat.block_cidr;
+           total.portscan_hits += stat.portscan_hits;
+           total.conntrack_hits += stat.conntrack_hits;
+        }
+    }
+
+
+    // 2. Read BLOCKLIST count
+    let block_path = "/sys/fs/bpf/aegis/BLOCKLIST";
+    let block_count = if let Ok(md) = aya::maps::MapData::from_pin(block_path) {
+         let map = aya::maps::Map::HashMap(md);
+         if let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) {
+                 hm.keys().count()
+             } else { 0 }
+    } else { 0 };
+
+
+    // 3. Display
+    println!("🔥 Aegis Firewall Status 🔥");
+    println!("---------------------------");
+    println!("Packets Seen:    {}", total.pkts_seen);
+    println!("Packets Dropped: {}", total.pkts_drop);
+    println!("Packets Passed:  {}", total.pkts_pass);
+    println!("Blocklist Size:  {}", block_count);
+    println!("Manual Blocks:   {}", total.block_manual);
+    println!("CIDR Blocks:     {}", total.block_cidr);
+    println!("Port Scans:      {}", total.portscan_hits);
+    println!("Conntrack Hits:  {}", total.conntrack_hits);
+    println!("Events (OK/Fail): {}/{}", total.events_ok, total.events_fail);
+
     Ok(())
 }
 

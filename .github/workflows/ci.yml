@@ -11,20 +11,35 @@ env:
 
 jobs:
   build:
-    name: Build
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y llvm clang libelf-dev pkg-config
 
-      - name: Install nightly
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly + rust-src
         run: rustup install nightly && rustup component add rust-src --toolchain nightly
 
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: cargo install bpf-linker || true
 
       - name: Build eBPF
         run: cargo run -p xtask -- build-all --profile release
@@ -35,6 +50,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --exclude aegis-ebpf --exclude aegis-tc
 
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-cli
+          path: target/release/aegis-cli
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -43,15 +64,28 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - name: Check format
         run: cargo fmt --all -- --check
 
-      - name: Clippy (userspace only)
-        run: cargo clippy -p aegis-cli -p aegis-common --features user -- -D warnings
+      - name: Clippy (userspace)
+        run: cargo clippy -p aegis-cli -p aegis-common -- -D warnings
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit || true
+
+      - name: Audit dependencies
+        run: cargo audit
 
   verify:
     name: Verification
@@ -61,17 +95,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Run compile-time invariants
-        run: cargo build -p aegis-verification
-
-      - name: Run property-based tests
-        run: cargo test -p aegis-verification -- --nocapture
-
-      - name: Verification summary
-        run: |
-          echo "Verification passed:"
-          echo "  - Compile-time struct size assertions"
-          echo "  - Property-based tests (proptest)"
-          echo "  - Unit tests for invariants"
+      - name: Run verification suite
+        run: cargo test -p verification -- --nocapture

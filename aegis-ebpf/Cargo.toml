@@ -1,7 +1,9 @@
 [package]
 name = "aegis-ebpf"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+license = "MIT"
+description = "Aegis eBPF XDP ingress firewall program"
 
 [dependencies]
 aya-ebpf = "0.1.1"

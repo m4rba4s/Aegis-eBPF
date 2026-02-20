@@ -65,6 +65,10 @@ use aegis_common::{
 #[map]
 static BLOCKLIST: HashMap<FlowKey, u32> = HashMap::with_max_entries(1024, 0);
 
+/// Dynamic Allowlist (IPs that bypass all checks)
+#[map]
+static ALLOWLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+
 /// CIDR prefix blocklist using LPM Trie (for threat feeds)
 #[map]
 static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(65536, 0);
@@ -100,6 +104,10 @@ static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_ent
 /// IPv6 exact match blocklist (manual blocks)
 #[map]
 static BLOCKLIST_IPV6: HashMap<FlowKeyIpv6, u32> = HashMap::with_max_entries(1024, 0);
+
+/// Dynamic Allowlist IPv6
+#[map]
+static ALLOWLIST_IPV6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(1024, 0);
 
 /// IPv6 CIDR prefix blocklist using LPM Trie
 #[map]
@@ -321,6 +329,14 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         (src_octets[0] == 192 && src_octets[1] == 168) ||  // 192.168.0.0/16
         (src_octets[0] == 100 && (src_octets[1] & 0xC0) == 64) ||  // 100.64.0.0/10 CGNAT/VPN
         src_octets[0] == 127;  // 127.0.0.0/8 localhost
+
+    // --- DYNAMIC ALLOWLIST ---
+    if unsafe { ALLOWLIST.get(&src_addr).is_some() } {
+        if is_module_enabled(CFG_VERBOSE) {
+            log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_WHITELIST, THREAT_NONE, total_len);
+        }
+        return Ok(xdp_action::XDP_PASS);
+    }
 
     if is_whitelisted {
         if is_module_enabled(CFG_VERBOSE) {
@@ -712,6 +728,12 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         (src_addr[0] == 0xfe && (src_addr[1] & 0xc0) == 0x80) ||  // Link-local
         (src_addr == [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]) ||        // ::1
         (src_addr[0] == 0xff);                                     // Multicast
+
+    // --- DYNAMIC ALLOWLIST ---
+    if unsafe { ALLOWLIST_IPV6.get(&src_addr).is_some() } {
+        stats_inc_ipv6_pass();
+        return Ok(xdp_action::XDP_PASS);
+    }
 
     if is_whitelisted {
         stats_inc_ipv6_pass();

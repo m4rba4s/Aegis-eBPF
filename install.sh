@@ -90,6 +90,10 @@ Restart=on-failure
 RestartSec=5
 LimitMEMLOCK=infinity
 
+# Logging
+StandardOutput=append:/var/log/aegis/aegis.log
+StandardError=append:/var/log/aegis/aegis.log
+
 # Security hardening
 ProtectSystem=strict
 ProtectHome=true
@@ -112,8 +116,32 @@ ProtectKernelLogs=true
 [Install]
 WantedBy=multi-user.target
 EOF
+    # Ensure log directory exists
+    mkdir -p /var/log/aegis
+    chmod 755 /var/log/aegis
+
     systemctl daemon-reload
     log_ok "Systemd service installed: aegis@<interface>.service"
+}
+
+install_logrotate() {
+    local config_file="/etc/logrotate.d/aegis"
+    
+    cat > "$config_file" << 'LOGRATEEOF'
+/var/log/aegis/aegis.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+    postrotate
+        systemctl try-restart aegis@*.service >/dev/null 2>&1 || true
+    endscript
+}
+LOGRATEEOF
+    chmod 644 "$config_file"
+    log_ok "Logrotate config installed: $config_file"
 }
 
 # =============================================================================
@@ -324,7 +352,7 @@ ensure_build_deps() {
             yum install -y llvm clang llvm-devel elfutils-libelf-devel 2>/dev/null || true
             ;;
         ubuntu|debian|pop|linuxmint)
-            apt-get update -qq && apt-get install -y llvm clang libelf-dev 2>/dev/null || true
+            apt-get update -qq && apt-get install -y llvm clang libelf-dev build-essential pkg-config 2>/dev/null || true
             ;;
         arch|manjaro|endeavouros)
             pacman -S --noconfirm --needed llvm clang libelf 2>/dev/null || true
@@ -333,7 +361,7 @@ ensure_build_deps() {
             zypper install -y llvm clang libelf-devel 2>/dev/null || true
             ;;
         alpine)
-            apk add llvm clang libelf-dev 2>/dev/null || true
+            apk add llvm clang libelf-dev linux-headers musl-dev build-base 2>/dev/null || true
             ;;
         *)
             log_warn "Unknown distro '$distro' — please install llvm and clang manually"
@@ -467,6 +495,186 @@ show_usage() {
 }
 
 # =============================================================================
+# CONFIG & COMPLETIONS
+# =============================================================================
+
+install_default_config() {
+    local config_dir="/etc/aegis"
+    local config_file="$config_dir/config.toml"
+
+    mkdir -p "$config_dir"
+
+    if [[ -f "$config_file" ]]; then
+        log_ok "Config exists: $config_file"
+        return 0
+    fi
+
+    cat > "$config_file" << 'CONFIGEOF'
+# Aegis eBPF Firewall Configuration
+# https://github.com/m4rba4s/Aegis-Portable-Demo
+
+interface = "eth0"
+
+[modules]
+port_scan = true
+rate_limit = true
+threat_feeds = true
+conn_track = true
+scan_detect = true
+verbose = false
+entropy = false     # WARNING: blocks TLS/SSH when enabled
+
+[autoban]
+enabled = true
+max_entries = 512
+
+[feeds]
+enabled = true
+max_download_bytes = 10485760
+
+[logging]
+level = "info"
+json = false
+
+[allowlist]
+ips = []
+CONFIGEOF
+
+    chmod 0640 "$config_file"
+    log_ok "Default config created: $config_file"
+}
+
+install_completions() {
+    local bin="$BIN_DIR/aegis-cli"
+
+    if [[ ! -x "$bin" ]]; then
+        return 0
+    fi
+
+    # Bash
+    if [[ -d /etc/bash_completion.d ]]; then
+        "$bin" completions bash > /etc/bash_completion.d/aegis-cli 2>/dev/null && \
+            log_ok "Bash completions installed"
+    fi
+
+    # Zsh
+    if [[ -d /usr/share/zsh/site-functions ]]; then
+        "$bin" completions zsh > /usr/share/zsh/site-functions/_aegis-cli 2>/dev/null && \
+            log_ok "Zsh completions installed"
+    fi
+
+    # Fish
+    if [[ -d /usr/share/fish/vendor_completions.d ]]; then
+        "$bin" completions fish > /usr/share/fish/vendor_completions.d/aegis-cli.fish 2>/dev/null && \
+            log_ok "Fish completions installed"
+    fi
+}
+
+install_geoip_db() {
+    local db_dir="/var/lib/aegis"
+    local db_file="$db_dir/GeoLite2-City.mmdb"
+
+    mkdir -p "$db_dir"
+
+    if [[ -f "$db_file" ]]; then
+        log_ok "GeoIP database exists: $db_file"
+        return 0
+    fi
+
+    log_info "Downloading GeoIP database..."
+    # Try to download from repo (demo DB)
+    if wget -q --show-progress "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb" -O "$db_file"; then
+        log_ok "GeoIP database installed"
+    else
+        log_warn "Failed to download GeoIP database."
+        log_warn "Please manually place GeoLite2-City.mmdb in $db_dir"
+    fi
+}
+
+# =============================================================================
+# UNINSTALL
+# =============================================================================
+
+uninstall_aegis() {
+    show_banner
+    log_info "Uninstalling Aegis..."
+
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root (sudo)"
+        exit 1
+    fi
+
+    # Stop services
+    stop_running_services
+
+    # Remove service files
+    local init_system=$(detect_init_system)
+    case "$init_system" in
+        systemd)
+            systemctl disable "aegis@*" 2>/dev/null || true
+            rm -f /etc/systemd/system/aegis@.service
+            systemctl daemon-reload 2>/dev/null || true
+            log_ok "Systemd service removed"
+            ;;
+        openrc)
+            rc-update del aegis 2>/dev/null || true
+            rm -f /etc/init.d/aegis /etc/conf.d/aegis
+            log_ok "OpenRC service removed"
+            ;;
+        sysvinit)
+            update-rc.d aegis remove 2>/dev/null || true
+            rm -f /etc/init.d/aegis
+            log_ok "SysVinit service removed"
+            ;;
+    esac
+
+    # Remove binary
+    rm -f "$BIN_DIR/aegis-cli"
+    log_ok "Binary removed"
+
+    # Remove shared data
+    rm -rf "$SHARE_DIR"
+    log_ok "Shared data removed"
+
+    # Clean BPF maps
+    if [[ -d /sys/fs/bpf/aegis ]]; then
+        rm -rf /sys/fs/bpf/aegis
+        log_ok "BPF maps cleaned"
+    fi
+
+    # Remove completions
+    rm -f /etc/bash_completion.d/aegis-cli 2>/dev/null
+    rm -f /usr/share/zsh/site-functions/_aegis-cli 2>/dev/null
+    rm -f /usr/share/fish/vendor_completions.d/aegis-cli.fish 2>/dev/null
+
+    # Remove logrotate
+    rm -f /etc/logrotate.d/aegis 2>/dev/null
+    rm -f /etc/periodic/weekly/aegis-logclean 2>/dev/null
+
+    # Interactive prompts for user data
+    if [[ -d /etc/aegis ]]; then
+        echo ""
+        read -rp "  Remove config (/etc/aegis)? [y/N] " ans
+        [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /etc/aegis && log_ok "Config removed"
+    fi
+
+    if [[ -d /var/log/aegis ]]; then
+        read -rp "  Remove logs (/var/log/aegis)? [y/N] " ans
+        [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /var/log/aegis && log_ok "Logs removed"
+    fi
+
+    if [[ -d /var/lib/aegis ]]; then
+        read -rp "  Remove GeoIP data (/var/lib/aegis)? [y/N] " ans
+        [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /var/lib/aegis && log_ok "GeoIP data removed"
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  ✅ AEGIS UNINSTALLED"
+    echo "═══════════════════════════════════════════════════════════"
+}
+
+# =============================================================================
 # ENTRY POINT
 # =============================================================================
 
@@ -479,12 +687,14 @@ main() {
         case "$1" in
             --install-only) install_only=true; shift ;;
             --skip-service) skip_service=true; shift ;;
+            --uninstall)    uninstall_aegis; exit 0 ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
                 echo "  --install-only   Install pre-built binaries (no cargo build)"
                 echo "  --skip-service   Don't install init system service"
+                echo "  --uninstall      Remove Aegis completely"
                 echo "  --help           Show this help"
                 exit 0
                 ;;
@@ -521,6 +731,12 @@ main() {
     else
         build_and_install
     fi
+
+    # Post-install tasks
+    install_default_config
+    install_completions
+    install_geoip_db
+    install_logrotate
 
     # Install init service
     if ! $skip_service; then

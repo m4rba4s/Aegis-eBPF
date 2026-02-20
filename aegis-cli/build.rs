@@ -38,4 +38,35 @@ fn main() {
     } else {
         eprintln!("build.rs: TC object not found at {:?}, embedding disabled", tc_path);
     }
+
+    // ── Build metadata for --version ──────────────────────────
+    let git_hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short=8", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=AEGIS_GIT_HASH={}", git_hash);
+
+    let build_date = std::process::Command::new("date")
+        .args(["+%Y-%m-%d"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=AEGIS_BUILD_DATE={}", build_date);
+
+    let rustc_ver = std::process::Command::new("rustc")
+        .args(["--version"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rustc-env=AEGIS_RUSTC={}", rustc_ver);
 }

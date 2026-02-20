@@ -34,7 +34,7 @@ use ratatui::{
 use sysinfo::System;
 use aya::maps::{HashMap as BpfHashMap, MapData};
 use aegis_common::{FlowKey, Stats};
-use serde_json::Value;
+use crate::geo::SharedGeoLookup;
 
 // ============================================================
 // TAB ENUM
@@ -75,7 +75,7 @@ pub struct App<T: std::borrow::BorrowMut<MapData> + 'static> {
     pub state: ListState,
     pub system: System,
     pub should_quit: bool,
-    pub geo_cache: Arc<Mutex<HashMap<IpAddr, String>>>,
+    pub geo_db: SharedGeoLookup,
     pub blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>,
     pub current_tab: Tab,
     // Stats history for sparklines
@@ -97,7 +97,7 @@ pub struct ConnectionInfo {
 }
 
 impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
-    pub fn new(blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>) -> Self {
+    pub fn new(blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>, geo_db: SharedGeoLookup) -> Self {
         let system = System::new_all();
         Self {
             connections: Vec::new(),
@@ -105,7 +105,7 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             state: ListState::default(),
             system,
             should_quit: false,
-            geo_cache: Arc::new(Mutex::new(HashMap::new())),
+            geo_db,
             blocklist,
             current_tab: Tab::Connections,
             pkt_history: VecDeque::with_capacity(200),
@@ -117,11 +117,11 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
     pub fn on_tick(&mut self) {
         let raw_conns = read_proc_net_tcp();
         let mut enriched_conns = Vec::new();
-        let cache = self.geo_cache.clone();
+        // cache variable removed as it was referring to non-existent field
 
         for conn in raw_conns {
             let ip = conn.ip;
-            let mut geo = "Locating...".to_string();
+            let geo;
 
             // Check if IP is private/internal
             let is_private = match ip {
@@ -151,73 +151,32 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                     _ => "Private".to_string(),
                 };
             } else {
-                // Geo lookup for public IPs
-                // Cache format: "GEO|ISP" (pipe-separated) or "..." (pending) or "" (failed, retry)
-                {
-                    let map = cache.lock().unwrap();
-                    if let Some(g) = map.get(&ip) {
-                        geo = g.clone();
+                // Geo lookup for public IPs — offline database
+                if let Some(ref db) = self.geo_db {
+                    match db.lookup(ip) {
+                        Some(result) => {
+                            let geo_str = if result.city.is_empty() {
+                                result.country_code
+                            } else {
+                                format!("{} {}", result.country_code, result.city)
+                            };
+                            let intel = if !result.isp.is_empty() {
+                                result.isp
+                            } else {
+                                String::new()
+                            };
+                            if intel.is_empty() {
+                                geo = geo_str;
+                            } else {
+                                geo = format!("{}|{}", geo_str, intel);
+                            }
+                        }
+                        None => {
+                             geo = "Unknown".to_string();
+                        }
                     }
-                }
-
-                let should_fetch = {
-                    let mut map = cache.lock().unwrap();
-                    if !map.contains_key(&ip) {
-                        map.insert(ip, "...".to_string());
-                        true
-                    } else {
-                        // Retry if previous lookup failed (empty string marker)
-                        map.get(&ip).map_or(false, |v| v.is_empty())
-                    }
-                };
-
-                if should_fetch {
-                    let cache_clone = cache.clone();
-                    thread::spawn(move || {
-                        thread::sleep(Duration::from_millis(300));
-                        let url = format!("http://ip-api.com/json/{}?fields=status,countryCode,city,isp,org", ip);
-                        let client = reqwest::blocking::Client::builder()
-                            .timeout(Duration::from_secs(5))
-                            .build();
-
-                        let val: String = match client {
-                            Ok(c) => match c.get(&url).send() {
-                                Ok(resp) => {
-                                    if let Ok(json) = resp.json::<Value>() {
-                                        if json["status"].as_str() == Some("fail") {
-                                            "Private|N/A".to_string()
-                                        } else {
-                                            let cc = json["countryCode"].as_str().unwrap_or("??");
-                                            let city = json["city"].as_str().unwrap_or("");
-                                            let isp = json["isp"].as_str().unwrap_or("");
-                                            let org = json["org"].as_str().unwrap_or("");
-                                            let intel = if !isp.is_empty() { isp } else { org };
-                                            let geo_part = if city.is_empty() {
-                                                cc.to_string()
-                                            } else {
-                                                format!("{} {}", cc, city)
-                                            };
-                                            format!("{}|{}", geo_part, intel)
-                                        }
-                                    } else {
-                                        String::new() // empty = retry next tick
-                                    }
-                                }
-                                Err(_) => String::new(), // empty = retry
-                            },
-                            Err(_) => String::new(), // empty = retry
-                        };
-                        let mut map = cache_clone.lock().unwrap();
-                        map.insert(ip, val);
-                    });
-                }
-
-                // Re-read
-                {
-                    let map = cache.lock().unwrap();
-                    if let Some(g) = map.get(&ip) {
-                        geo = g.clone();
-                    }
+                } else {
+                    geo = "No GeoDB".to_string();
                 }
             }
 
@@ -388,30 +347,56 @@ pub async fn run_tui<T, C, S>(
     logs: Arc<Mutex<VecDeque<String>>>,
     config: Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
     stats: Arc<Mutex<aya::maps::PerCpuArray<S, Stats>>>,
+    geo_db: SharedGeoLookup,
 ) -> Result<(), anyhow::Error>
 where
     T: std::borrow::BorrowMut<MapData> + 'static,
     C: std::borrow::BorrowMut<MapData> + 'static,
     S: std::borrow::BorrowMut<MapData> + 'static,
 {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
 
-    let mut app = App::new(blocklist);
+    // ── FD-LEVEL STDOUT ISOLATION ──────────────────────────────
+    // Save real TTY fd, then redirect stdout+stderr to /dev/null.
+    // Ratatui gets the ONLY handle to the real terminal.
+    // All println!/eprintln!/log::* from any thread → /dev/null.
+    let saved_stdout = unsafe { libc::dup(1) };
+    let saved_stderr = unsafe { libc::dup(2) };
+
+    let devnull = std::fs::OpenOptions::new()
+        .read(true).write(true)
+        .open("/dev/null")?;
+    unsafe {
+        libc::dup2(devnull.as_raw_fd(), 1); // stdout → /dev/null
+        libc::dup2(devnull.as_raw_fd(), 2); // stderr → /dev/null
+    }
+    drop(devnull); // fd is cloned, original can close
+
+    // Create a File from the saved real TTY fd — ratatui's exclusive handle
+    let tty_write = unsafe { std::fs::File::from_raw_fd(saved_stdout) };
+
+    enable_raw_mode()?;
+    // Use the private TTY fd for crossterm, NOT io::stdout()
+    let mut tty_for_setup = unsafe { std::fs::File::from_raw_fd(libc::dup(tty_write.as_raw_fd())) };
+    execute!(tty_for_setup, EnterAlternateScreen)?;
+    drop(tty_for_setup);
+
+    let backend = CrosstermBackend::new(tty_write);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    let mut app = App::new(blocklist, geo_db);
     let tick_rate = Duration::from_millis(1000);
     let mut last_tick = Instant::now();
 
     loop {
-        // Sync logs
+        // Sync logs from shared deque
         {
             let shared = logs.lock().unwrap();
             app.logs = shared.clone();
         }
 
-        // Read and aggregate stats
+        // Read and aggregate per-CPU stats
         {
             if let Ok(stats_map) = stats.lock() {
                 if let Ok(per_cpu) = stats_map.get(&0, 0) {
@@ -448,7 +433,6 @@ where
                         KeyCode::Char(' ') => app.toggle_block(),
                         KeyCode::Tab => app.current_tab = app.current_tab.next(),
                         KeyCode::BackTab => app.current_tab = app.current_tab.prev(),
-                        // Module toggles
                         KeyCode::Char(c @ '0'..='6') => {
                             handle_module_toggle(c, &config, &mut app.logs);
                         }
@@ -468,9 +452,31 @@ where
         }
     }
 
+    // ── CLEANUP: restore fds, leave alternate screen ───────────
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    // Restore stdout and stderr so post-TUI println! works
+    unsafe {
+        // terminal drop will close saved_stdout fd, so restore before that
+        libc::dup2(saved_stderr, 2);
+        libc::close(saved_stderr);
+    }
+
+    // Drop terminal explicitly to release the tty_write fd
+    drop(terminal);
+
+    // Restore stdout from /dev/null back to real TTY
+    unsafe {
+        // saved_stdout was consumed by from_raw_fd → tty_write → terminal
+        // We need a fresh dup of the TTY. Since we just did LeaveAlternateScreen
+        // through the backend, the TTY state is clean. Reopen /dev/tty.
+        if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+            libc::dup2(tty.as_raw_fd(), 1);
+        }
+    }
+
     Ok(())
 }
 
@@ -678,7 +684,7 @@ fn render_connections<T: std::borrow::BorrowMut<MapData> + 'static>(
                 Line::from(vec![Span::raw("Port:    "), Span::styled(format!("{}", conn.port), Style::default().fg(Color::White))]),
                 Line::from(vec![Span::raw("Proto:   "), Span::styled(&conn.proto, Style::default().fg(Color::White))]),
                 Line::from(vec![Span::raw("Geo:     "), Span::styled(&conn.geo, Style::default().fg(Color::Magenta))]),
-                Line::from(vec![Span::raw("ISP:     "), Span::styled(&isp_display, Style::default().fg(Color::Yellow))]),
+                Line::from(vec![Span::raw("ISP:     "), Span::styled(isp_display, Style::default().fg(Color::Yellow))]),
                 Line::from(vec![Span::raw("Status:  "), Span::styled(status, Style::default().fg(status_color).add_modifier(Modifier::BOLD))]),
                 Line::from(""),
                 Line::from(Span::styled("SPACE to toggle block", Style::default().fg(Color::DarkGray))),
