@@ -35,29 +35,36 @@
 - **TC Egress Filtering** — Block outbound connections to malicious destinations
 - **Stateful Connection Tracking** — Native eBPF conntrack (no kernel module)
 - **CIDR Blocklists** — LPM Trie for efficient prefix matching
-- **IPv4 + IPv6 Support** — Dual-stack filtering
+- **IPv4 + IPv6 Support** — Dual-stack filtering with extension header security
+- **IP Allowlist** — Trusted IPs bypass all checks (config-driven)
 
 ### Detection
-- **Port Scan Detection** — Bitmap-based unique port tracking
+- **Port Scan Detection** — Bitmap-based unique port tracking with auto-ban
 - **SYN Flood Protection** — Token bucket rate limiting
-- **TCP Anomaly Detection**:
-  - Xmas Tree Scans (FIN+URG+PSH)
-  - Null Scans (no flags)
-  - SYN+FIN (illegal combination)
+- **TCP Anomaly Detection** — Xmas, Null, SYN+FIN scans
+- **Dynamic Auto-Ban** — Flood/scan sources auto-blocked (capped at 512 entries)
 
 ### Interface
-- **Interactive TUI** — Real-time dashboard with tabs:
-  - Connections view with geo-location
-  - Live statistics with sparklines
+- **Interactive TUI** (fd-isolated — zero stdout pollution):
+  - Connections view with **offline GeoIP** lookup (MaxMind GeoLite2)
+  - Live statistics with sparklines (packets/sec, drops/sec)
   - Security event log
-- **Module Hotkeys** — Toggle protection modules on-the-fly
-- **Space-to-Ban** — One-key IP blocking
+  - ISP/Geo/Country display per connection
+- **Module Hotkeys** — Toggle PortScan, RateLimit, Threats, ConnTrack, ScanDetect, Verbose on-the-fly
+- **Space-to-Ban** — One-key IP blocking from connections list
+- **Daemon Mode** — Background operation with stdout log printer
+- **JSON Logging** — Machine-readable output for SIEM integration
+- **Shell Completions** — bash, zsh, fish, PowerShell, elvish
 
-### Deployment
-- **Single Binary** — eBPF bytecode embedded, no external files needed
-- **Multi-Distro Support** — Fedora, Ubuntu, Debian, Arch, Alpine, and more
+### Operations
+- **TOML Config File** — `/etc/aegis/config.toml` for persistent settings
+- **Threat Feeds** — Download and load CIDR blocklists from public sources
+- **Save/Restore** — Persist and reload block rules
+- **Status Command** — Query running daemon state via pinned BPF maps
+- **Single Binary** — eBPF bytecode embedded, no external files
+- **Multi-Distro Installer** — Fedora, Ubuntu, Debian, Arch, Alpine
 - **Auto XDP Mode** — Automatic fallback from driver to SKB mode
-- **Systemd Integration** — Hardened service file included
+- **Systemd Integration** — Hardened service file with `CAP_BPF` + `CAP_NET_ADMIN`
 
 ## Installation
 
@@ -197,20 +204,22 @@ sudo aegis-cli \
 ## Project Structure
 
 ```
-Aegis-eBPF/
+Aegis-Portable-Demo/
 ├── aegis-common/       # Shared types (Single Source of Truth)
-│   └── src/lib.rs      # PacketLog, Stats, FlowKey, constants
-├── aegis-ebpf/         # XDP ingress program
+│   └── src/lib.rs      # PacketLog, Stats, FlowKey, threat/reason constants
+├── aegis-ebpf/         # XDP ingress program (no_std, eBPF target)
 │   └── src/main.rs     # Packet filtering, rate limiting, scan detection
 ├── aegis-tc/           # TC egress program
 │   └── src/main.rs     # Outbound connection blocking
 ├── aegis-cli/          # Userspace controller
 │   ├── build.rs        # Embeds eBPF bytecode at compile time
-│   ├── src/main.rs     # Program loader, event handler
-│   ├── src/tui/        # Terminal UI (ratatui)
+│   ├── src/main.rs     # Program loader, event handler, REPL
+│   ├── src/tui/        # Terminal UI (ratatui, fd-isolated)
+│   ├── src/config.rs   # TOML config parser
+│   ├── src/geo.rs      # Offline GeoIP (MaxMind GeoLite2)
 │   ├── src/compat.rs   # Kernel capability detection
 │   └── src/feeds/      # Threat feed parser/downloader
-├── xtask/              # Build automation
+├── guide/              # Operational guides (10 documents)
 ├── deploy/             # Systemd service files
 ├── Dockerfile          # Reproducible builds
 └── install.sh          # Multi-distro installer
@@ -229,24 +238,43 @@ Aegis-eBPF/
 
 ## Roadmap
 
-### Completed
-- [x] XDP ingress filtering
+### ✅ Completed
+- [x] XDP ingress filtering (driver + SKB mode auto-fallback)
 - [x] TC egress filtering
-- [x] Connection tracking
-- [x] Port scan detection
-- [x] Rate limiting
-- [x] IPv6 support (dual-stack)
-- [x] IPv6 extension header security (fail-closed)
-- [x] Single binary distribution
+- [x] Stateful connection tracking (native eBPF)
+- [x] Port scan detection + SYN flood protection
+- [x] TCP anomaly detection (Xmas, Null, SYN+FIN)
+- [x] IPv4 + IPv6 dual-stack with extension header security
+- [x] Single binary distribution (embedded eBPF bytecode)
 - [x] Multi-distro installer (Fedora, Ubuntu, Debian, Arch, Alpine)
-- [x] Security hardening (systemd, auto-ban cap, feed limits)
+- [x] Interactive TUI with fd-level stdout isolation
+- [x] Offline GeoIP lookup (MaxMind GeoLite2)
+- [x] TOML config file (`/etc/aegis/config.toml`)
+- [x] IP allowlist (trusted IPs bypass all checks)
+- [x] CIDR-based threat feed loading
+- [x] JSON logging mode for SIEM integration
+- [x] Shell completions (bash, zsh, fish)
+- [x] Daemon mode with systemd hardening
+- [x] Save/restore block rules
+- [x] Status command via pinned BPF maps
 - [x] CI pipeline (build, lint, audit, verify)
+- [x] Dynamic auto-ban (flood/scan sources, capped at 512)
+- [x] Fuzz testing for config parser
 
-### Planned
-- [ ] Threat feed auto-update scheduler
-- [ ] Web Dashboard (REST API + web UI)
-- [ ] Prometheus metrics export
+### 🔜 Near-Term
+- [ ] `tracing` + `tracing-appender` async logging (replace println architecture)
+- [ ] Kernel-side event throttling (aggregate counters in eBPF, emit only threat events)
+- [ ] IPv6 extension header bounded loop (verifier-safe `for _ in 0..4` pattern)
+- [ ] Per-CPU array stats aggregation optimization
+- [ ] Threat feed auto-update scheduler (cron/timer)
+
+### 🗺️ Planned
+- [ ] Prometheus metrics export (`/metrics` endpoint)
+- [ ] Web Dashboard (REST API + lightweight web UI)
+- [ ] GeoIP-based country blocking policy
+- [ ] `XDP_REDIRECT` for deep packet analysis queue
 - [ ] Kubernetes CNI plugin
+- [ ] eBPF CO-RE (Compile Once — Run Everywhere)
 
 ## Contributing
 
