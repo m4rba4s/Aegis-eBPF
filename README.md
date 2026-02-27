@@ -1,6 +1,5 @@
 # Aegis: eBPF Security Matrix
 
-
 > **High-Performance XDP/TC Firewall & Traffic Analyzer written in Rust.**
 > *Zero-overhead packet filtering, stateful connection tracking, and heuristic intrusion detection.*
 
@@ -76,14 +75,14 @@
 
 ### One-Line Install (SSH/Remote)
 ```bash
-curl -sSfL https://raw.githubusercontent.com/m4rba4s/Aegis-Portable-Demo/main/install.sh | sudo bash
+curl -sSfL https://raw.githubusercontent.com/m4rba4s/Aegis-eBPF/main/install.sh | sudo bash
 ```
 
 ### Manual Install
 ```bash
 # Clone and install
-git clone https://github.com/m4rba4s/Aegis-Portable-Demo.git
-cd Aegis-Portable-Demo
+git clone https://github.com/m4rba4s/Aegis-eBPF.git
+cd Aegis-eBPF
 sudo ./install.sh
 ```
 
@@ -204,7 +203,7 @@ sudo aegis-cli \
 ## Project Structure
 
 ```
-Aegis-Portable-Demo/
+Aegis-eBPF/
 ├── aegis-common/       # Shared types (Single Source of Truth)
 │   └── src/lib.rs      # PacketLog, Stats, FlowKey, threat/reason constants
 ├── aegis-ebpf/         # XDP ingress program (no_std, eBPF target)
@@ -219,62 +218,11 @@ Aegis-Portable-Demo/
 │   ├── src/geo.rs      # Offline GeoIP (MaxMind GeoLite2)
 │   ├── src/compat.rs   # Kernel capability detection
 │   └── src/feeds/      # Threat feed parser/downloader
-├── guide/              # Operational guides (10 documents)
+├── guide/              # Operational guides
 ├── deploy/             # Systemd service files
 ├── Dockerfile          # Reproducible builds
 └── install.sh          # Multi-distro installer
 ```
-
-## Supported Distributions
-
-| Distro | Package Manager | Init System | Status |
-|--------|-----------------|-------------|--------|
-| Fedora | dnf | systemd | Tested |
-| Ubuntu/Debian | apt | systemd | Tested |
-| Arch Linux | pacman | systemd | Tested |
-| Alpine | apk | openrc | Supported |
-| RHEL/CentOS | dnf/yum | systemd | Supported |
-| openSUSE | zypper | systemd | Supported |
-
-## Roadmap
-
-### ✅ Completed
-- [x] XDP ingress filtering (driver + SKB mode auto-fallback)
-- [x] TC egress filtering
-- [x] Stateful connection tracking (native eBPF)
-- [x] Port scan detection + SYN flood protection
-- [x] TCP anomaly detection (Xmas, Null, SYN+FIN)
-- [x] IPv4 + IPv6 dual-stack with extension header security
-- [x] Single binary distribution (embedded eBPF bytecode)
-- [x] Multi-distro installer (Fedora, Ubuntu, Debian, Arch, Alpine)
-- [x] Interactive TUI with fd-level stdout isolation
-- [x] Offline GeoIP lookup (MaxMind GeoLite2)
-- [x] TOML config file (`/etc/aegis/config.toml`)
-- [x] IP allowlist (trusted IPs bypass all checks)
-- [x] CIDR-based threat feed loading
-- [x] JSON logging mode for SIEM integration
-- [x] Shell completions (bash, zsh, fish)
-- [x] Daemon mode with systemd hardening
-- [x] Save/restore block rules
-- [x] Status command via pinned BPF maps
-- [x] CI pipeline (build, lint, audit, verify)
-- [x] Dynamic auto-ban (flood/scan sources, capped at 512)
-- [x] Fuzz testing for config parser
-
-### 🔜 Near-Term
-- [ ] `tracing` + `tracing-appender` async logging (replace println architecture)
-- [ ] Kernel-side event throttling (aggregate counters in eBPF, emit only threat events)
-- [ ] IPv6 extension header bounded loop (verifier-safe `for _ in 0..4` pattern)
-- [ ] Per-CPU array stats aggregation optimization
-- [ ] Threat feed auto-update scheduler (cron/timer)
-
-### 🗺️ Planned
-- [ ] Prometheus metrics export (`/metrics` endpoint)
-- [ ] Web Dashboard (REST API + lightweight web UI)
-- [ ] GeoIP-based country blocking policy
-- [ ] `XDP_REDIRECT` for deep packet analysis queue
-- [ ] Kubernetes CNI plugin
-- [ ] eBPF CO-RE (Compile Once — Run Everywhere)
 
 ## Contributing
 
