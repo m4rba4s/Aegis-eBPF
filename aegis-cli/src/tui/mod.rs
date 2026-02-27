@@ -493,23 +493,25 @@ fn handle_module_toggle<C: std::borrow::BorrowMut<MapData>>(
 
     if let Ok(mut cfg) = config.lock() {
         if key == '0' {
-            // Toggle all
-            let any_on = (1u32..=5u32).any(|k| cfg.get(&k, 0).unwrap_or(1) == 1);
+            // Toggle all (1 through 6, including Verbose)
+            let any_on = (1u32..=6u32).any(|k| cfg.get(&k, 0).unwrap_or(if k == 6 { 0 } else { 1 }) == 1);
             let new_val = if any_on { 0u32 } else { 1u32 };
-            for k in 1u32..=5u32 {
+            for k in 1u32..=6u32 {
                 let _ = cfg.insert(k, new_val, 0);
             }
             let state = if new_val == 1 { "ON" } else { "OFF" };
             logs.push_back(format!("ALL MODULES: {}", state));
         } else if let Some(digit) = key.to_digit(10) {
             let k = digit as u32;
-            let default = if k == 6 { 0 } else { 1 }; // Verbose defaults OFF
-            let cur = cfg.get(&k, 0).unwrap_or(default);
-            let new_val = if cur == 1 { 0u32 } else { 1u32 };
-            let _ = cfg.insert(k, new_val, 0);
-            let name = module_names.get(k as usize).unwrap_or(&"?");
-            let state = if new_val == 1 { "ON" } else { "OFF" };
-            logs.push_back(format!("{}: {}", name, state));
+            if k >= 1 && k <= 6 {
+                let default = if k == 6 { 0 } else { 1 }; // Verbose defaults OFF
+                let cur = cfg.get(&k, 0).unwrap_or(default);
+                let new_val = if cur == 1 { 0u32 } else { 1u32 };
+                let _ = cfg.insert(k, new_val, 0);
+                let name = module_names.get(k as usize).unwrap_or(&"?");
+                let state = if new_val == 1 { "ON" } else { "OFF" };
+                logs.push_back(format!("{}: {}", name, state));
+            }
         }
     }
 }
@@ -559,7 +561,7 @@ where
 
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 50)))
-        .block(Block::default().borders(Borders::ALL).title(" AEGIS FIREWALL "));
+        .block(Block::default().borders(Borders::ALL).title(" AEGIS FIREWALL [FD-ISOLATED] "));
     f.render_widget(header, chunks[0]);
 
     // --- TAB BAR ---
