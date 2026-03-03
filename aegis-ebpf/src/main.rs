@@ -45,7 +45,7 @@ use aegis_common::{
     CONN_ESTABLISHED,
     // Config keys
     CFG_INTERFACE_MODE, CFG_PORT_SCAN, CFG_RATE_LIMIT, CFG_THREAT_FEEDS,
-    CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE, CFG_ENTROPY,
+    CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE, CFG_ENTROPY, CFG_SKIP_WHITELIST,
     // IPv6 constants
     REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN,
     // Rate limiting constants
@@ -349,7 +349,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    if is_whitelisted {
+    // Skip RFC1918/loopback whitelist when CFG_SKIP_WHITELIST is enabled (for testing on lo)
+    if is_whitelisted && !is_module_enabled(CFG_SKIP_WHITELIST) {
         if is_module_enabled(CFG_VERBOSE) {
             log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_WHITELIST, THREAT_NONE, total_len);
         }
@@ -409,7 +410,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             updated.bytes = updated.bytes.saturating_add(total_len as u32);
             let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
             stats_inc_conntrack();
-            stats_inc_pass();
             if is_module_enabled(CFG_VERBOSE) {
                 log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_CONNTRACK, THREAT_NONE, total_len);
             }
