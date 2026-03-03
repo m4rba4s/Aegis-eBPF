@@ -234,6 +234,7 @@ pub const CFG_CONN_TRACK: u32 = 4;      // Connection tracking toggle
 pub const CFG_SCAN_DETECT: u32 = 5;     // Scan detection toggle
 pub const CFG_VERBOSE: u32 = 6;         // Verbose logging toggle
 pub const CFG_ENTROPY: u32 = 7;         // Entropy analysis toggle
+pub const CFG_SKIP_WHITELIST: u32 = 8;  // Skip RFC1918/loopback whitelist (for testing)
 
 // ============================================================
 // AYA POD IMPLEMENTATIONS (userspace only)

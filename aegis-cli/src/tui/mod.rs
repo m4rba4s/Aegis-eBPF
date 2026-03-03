@@ -489,22 +489,25 @@ fn handle_module_toggle<C: std::borrow::BorrowMut<MapData>>(
     config: &Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
     logs: &mut VecDeque<String>,
 ) {
-    let module_names = ["ALL", "PortScan", "RateLimit", "Threats", "ConnTrack", "ScanDetect", "Verbose"];
+    let module_names = ["ALL", "PortScan", "RateLimit", "Threats", "ConnTrack", "ScanDetect", "Verbose", "Entropy", "SkipWList"];
 
     if let Ok(mut cfg) = config.lock() {
         if key == '0' {
-            // Toggle all (1 through 6, including Verbose)
-            let any_on = (1u32..=6u32).any(|k| cfg.get(&k, 0).unwrap_or(if k == 6 { 0 } else { 1 }) == 1);
+            // Toggle all (1 through 8, including Verbose, Entropy, SkipWList)
+            let any_on = (1u32..=8u32).any(|k| {
+                let default = match k { 6 | 7 | 8 => 0, _ => 1 };
+                cfg.get(&k, 0).unwrap_or(default) == 1
+            });
             let new_val = if any_on { 0u32 } else { 1u32 };
-            for k in 1u32..=6u32 {
+            for k in 1u32..=8u32 {
                 let _ = cfg.insert(k, new_val, 0);
             }
             let state = if new_val == 1 { "ON" } else { "OFF" };
             logs.push_back(format!("ALL MODULES: {}", state));
         } else if let Some(digit) = key.to_digit(10) {
             let k = digit as u32;
-            if k >= 1 && k <= 6 {
-                let default = if k == 6 { 0 } else { 1 }; // Verbose defaults OFF
+            if k >= 1 && k <= 8 {
+                let default = match k { 6 | 7 | 8 => 0, _ => 1 };
                 let cur = cfg.get(&k, 0).unwrap_or(default);
                 let new_val = if cur == 1 { 0u32 } else { 1u32 };
                 let _ = cfg.insert(k, new_val, 0);
@@ -590,7 +593,7 @@ where
     }
 
     // --- FOOTER ---
-    let (m1, m2, m3, m4, m5, m6) = if let Ok(cfg) = config.lock() {
+    let (m1, m2, m3, m4, m5, m6, m7, m8) = if let Ok(cfg) = config.lock() {
         (
             cfg.get(&1u32, 0).unwrap_or(1) == 1,
             cfg.get(&2u32, 0).unwrap_or(1) == 1,
@@ -598,9 +601,11 @@ where
             cfg.get(&4u32, 0).unwrap_or(1) == 1,
             cfg.get(&5u32, 0).unwrap_or(1) == 1,
             cfg.get(&6u32, 0).unwrap_or(0) == 1,
+            cfg.get(&7u32, 0).unwrap_or(0) == 1,
+            cfg.get(&8u32, 0).unwrap_or(0) == 1,
         )
     } else {
-        (true, true, true, true, true, false)
+        (true, true, true, true, true, false, false, false)
     };
 
     let on = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
@@ -625,6 +630,10 @@ where
         Span::raw(":Scan "),
         Span::styled("6", if m6 { on } else { off }),
         Span::raw(":Verb "),
+        Span::styled("7", if m7 { on } else { off }),
+        Span::raw(":Entr "),
+        Span::styled("8", if m8 { on } else { off }),
+        Span::raw(":WList "),
         Span::styled("0", Style::default().fg(Color::Magenta)),
         Span::raw(":ALL"),
     ]);
