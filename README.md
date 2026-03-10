@@ -1,5 +1,5 @@
 # Aegis: eBPF Security Matrix
-!(https://i.ibb.co/H0Fh02L/Gemini-Generated-Image-9gkn9n9gkn9n9gkn.png)
+![Logo](https://i.ibb.co/H0Fh02L/Gemini-Generated-Image-9gkn9n9gkn9n9gkn.png)
 > **High-Performance XDP/TC Firewall & Traffic Analyzer written in Rust.**
 > *Zero-overhead packet filtering, stateful connection tracking, and heuristic intrusion detection.*
 
