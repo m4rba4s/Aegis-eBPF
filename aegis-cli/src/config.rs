@@ -185,6 +185,17 @@ impl AegisConfig {
         let config_path = path.unwrap_or(DEFAULT_SYSTEM_CONFIG);
 
         if std::path::Path::new(config_path).exists() {
+            // SECURITY: Check file size to prevent TOML bomb attacks
+            if let Ok(metadata) = std::fs::metadata(config_path) {
+                if metadata.len() > MAX_CONFIG_SIZE {
+                    log::error!(
+                        "Config file too large ({} bytes, max {}). Possible attack — using defaults",
+                        metadata.len(), MAX_CONFIG_SIZE
+                    );
+                    return Self::default();
+                }
+            }
+
             match std::fs::read_to_string(config_path) {
                 Ok(content) => match toml::from_str(&content) {
                     Ok(cfg) => {
