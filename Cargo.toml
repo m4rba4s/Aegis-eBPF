@@ -5,8 +5,10 @@ members = [
     "aegis-ebpf",
     "aegis-tc",
     "xtask",
-    "verification",
+]
+exclude = [
     "aegis-cli/fuzz",
+    "verification",
 ]
 default-members = ["aegis-cli", "xtask"]
 resolver = "2"
