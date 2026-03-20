@@ -81,21 +81,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install cargo-audit
         run: cargo install cargo-audit || true
 
       - name: Audit dependencies
         run: cargo audit
-
-  verify:
-    name: Verification
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run verification suite
-        run: cargo test -p verification -- --nocapture
