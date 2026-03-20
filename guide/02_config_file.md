@@ -195,7 +195,7 @@ install_default_config() {
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" << 'CONFIGEOF'
 # Aegis eBPF Firewall Configuration
-# Docs: https://github.com/m4rba4s/Aegis-Portable-Demo
+# Docs: https://github.com/m4rba4s/Aegis-eBPF
 
 # Network interface to protect
 interface = "eth0"

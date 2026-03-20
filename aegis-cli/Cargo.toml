@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 license = "MIT"
 description = "Aegis eBPF XDP/TC firewall — userspace controller with TUI"
-repository = "https://github.com/m4rba4s/Aegis-Portable-Demo"
+repository = "https://github.com/m4rba4s/Aegis-eBPF"
 
 [dependencies]
 aya = { version = "0.13", features = ["async_tokio"] }

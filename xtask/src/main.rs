@@ -28,19 +28,19 @@ enum CommandOpts {
 
 #[derive(Parser)]
 pub struct BuildEbpfOpts {
-    #[clap(long, default_value = "debug")]
+    #[clap(long, default_value = "release")]
     pub profile: String,
 }
 
 #[derive(Parser)]
 pub struct BuildTcOpts {
-    #[clap(long, default_value = "debug")]
+    #[clap(long, default_value = "release")]
     pub profile: String,
 }
 
 #[derive(Parser)]
 pub struct BuildAllOpts {
-    #[clap(long, default_value = "debug")]
+    #[clap(long, default_value = "release")]
     pub profile: String,
 }
 

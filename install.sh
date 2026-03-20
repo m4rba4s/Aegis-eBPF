@@ -1,9 +1,15 @@
-    #!/bin/bash
+#!/bin/bash
 # Aegis XDP Firewall - Universal Installer
 # Supports: Ubuntu, Debian, Fedora, CentOS, RHEL, Arch, Alpine, OpenSUSE
 # Init systems: systemd, openrc, sysvinit
+#
+# Usage:
+#   sudo ./install.sh              # Full build + install
+#   sudo ./install.sh --check      # Dry-run: validate all prerequisites
+#   sudo ./install.sh --install-only  # Install pre-built binaries only
+#   sudo ./install.sh --uninstall  # Remove Aegis completely
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/usr/local"
@@ -15,12 +21,14 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+BOLD='\033[1m'
+NC='\033[0m'
 
 log_info()  { echo -e "${CYAN}ℹ️  $1${NC}"; }
 log_ok()    { echo -e "${GREEN}✅ $1${NC}"; }
 log_warn()  { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error() { echo -e "${RED}❌ $1${NC}"; }
+log_step()  { echo -e "${BOLD}▶  $1${NC}"; }
 
 # =============================================================================
 # DETECTION FUNCTIONS
@@ -52,24 +60,210 @@ detect_init_system() {
 }
 
 check_kernel_version() {
-    local ver=$(uname -r | cut -d. -f1-2)
-    local major=$(echo "$ver" | cut -d. -f1)
-    local minor=$(echo "$ver" | cut -d. -f2)
+    local ver major minor
+    ver=$(uname -r | cut -d. -f1-2)
+    major=$(echo "$ver" | cut -d. -f1)
+    minor=$(echo "$ver" | cut -d. -f2)
 
     if [[ "$major" -lt 5 ]] || { [[ "$major" -eq 5 ]] && [[ "$minor" -lt 4 ]]; }; then
         log_error "Kernel $ver is too old. Aegis requires >= 5.4"
-        exit 1
+        log_info "Upgrade your kernel or use a newer distro"
+        return 1
     fi
     log_ok "Kernel version: $(uname -r)"
 }
 
 check_bpf_fs() {
     if [[ ! -d /sys/fs/bpf ]]; then
-        log_error "BPF filesystem not mounted at /sys/fs/bpf"
-        log_info "Try: mount -t bpf bpf /sys/fs/bpf"
-        exit 1
+        log_warn "BPF filesystem not mounted at /sys/fs/bpf"
+        log_info "Attempting to mount..."
+        mount -t bpf bpf /sys/fs/bpf 2>/dev/null || {
+            log_error "Failed to mount BPF filesystem"
+            log_info "Try manually: mount -t bpf bpf /sys/fs/bpf"
+            return 1
+        }
     fi
     log_ok "BPF filesystem available"
+}
+
+# =============================================================================
+# SYSTEM DEPENDENCIES (runs BEFORE any Rust operations)
+# =============================================================================
+
+install_system_deps() {
+    log_step "Installing system dependencies..."
+    local distro
+    distro=$(detect_distro)
+
+    case "$distro" in
+        fedora|rhel|centos|rocky|alma)
+            dnf install -y \
+                gcc make pkg-config \
+                llvm clang llvm-devel \
+                elfutils-libelf-devel \
+                curl wget git \
+                2>/dev/null || \
+            yum install -y \
+                gcc make pkgconfig \
+                llvm clang llvm-devel \
+                elfutils-libelf-devel \
+                curl wget git \
+                2>/dev/null || true
+            ;;
+        ubuntu|debian|pop|linuxmint)
+            apt-get update -qq
+            apt-get install -y \
+                build-essential pkg-config \
+                llvm clang libelf-dev \
+                curl wget git \
+                2>/dev/null || true
+            ;;
+        arch|manjaro|endeavouros)
+            pacman -Sy --noconfirm --needed \
+                base-devel llvm clang libelf \
+                curl wget git \
+                2>/dev/null || true
+            ;;
+        opensuse*|sles)
+            zypper install -y \
+                gcc make pkg-config \
+                llvm clang libelf-devel \
+                curl wget git \
+                2>/dev/null || true
+            ;;
+        alpine)
+            apk add \
+                build-base musl-dev linux-headers \
+                llvm clang libelf-dev \
+                curl wget git \
+                2>/dev/null || true
+            ;;
+        *)
+            log_warn "Unknown distro '$distro' — install manually: gcc, llvm, clang, libelf-dev, curl, git"
+            ;;
+    esac
+
+    # Validate critical tools
+    local missing=()
+    command -v gcc &>/dev/null || missing+=("gcc")
+    command -v clang &>/dev/null || missing+=("clang")
+    command -v git &>/dev/null || missing+=("git")
+    command -v curl &>/dev/null || missing+=("curl")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing critical tools: ${missing[*]}"
+        log_info "Install them manually and re-run this script"
+        return 1
+    fi
+
+    log_ok "System dependencies installed ($distro)"
+}
+
+# =============================================================================
+# RUST TOOLCHAIN DETECTION & SETUP
+# =============================================================================
+
+find_cargo() {
+    # Already in PATH?
+    if command -v cargo &>/dev/null; then
+        return 0
+    fi
+
+    # Build a list of candidate directories
+    local candidates=()
+
+    # 1. SUDO_USER's home (most common case: user installed rustup, runs sudo)
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local sudo_home
+        sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
+        [[ -n "$sudo_home" ]] && candidates+=("$sudo_home/.cargo/bin")
+    fi
+
+    # 2. Current $HOME
+    [[ -d "$HOME/.cargo/bin" ]] && candidates+=("$HOME/.cargo/bin")
+
+    # 3. Scan /home/*
+    for d in /home/*/.cargo/bin; do
+        [[ -d "$d" ]] && candidates+=("$d")
+    done
+
+    # 4. Root's cargo
+    [[ -d /root/.cargo/bin ]] && candidates+=("/root/.cargo/bin")
+
+    # Try each candidate
+    for cbd in "${candidates[@]}"; do
+        if [[ -x "$cbd/cargo" ]]; then
+            log_info "Found cargo in: $cbd"
+            export PATH="$cbd:$PATH"
+
+            # Also set RUSTUP_HOME + CARGO_HOME so rustup works correctly
+            local home_dir
+            home_dir="${cbd%/.cargo/bin}"
+            if [[ -d "$home_dir/.rustup" ]]; then
+                export RUSTUP_HOME="$home_dir/.rustup"
+                export CARGO_HOME="$home_dir/.cargo"
+            fi
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+ensure_rust_installed() {
+    if ! find_cargo; then
+        log_info "Rust not found. Installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        # Source the new environment
+        if [[ -n "${SUDO_USER:-}" ]]; then
+            local sudo_home
+            sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
+            [[ -f "$sudo_home/.cargo/env" ]] && source "$sudo_home/.cargo/env"
+        fi
+        [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+
+        if ! find_cargo; then
+            log_error "Rust installation succeeded but cargo still not found"
+            log_info "Try: source ~/.cargo/env && sudo env PATH=\$PATH ./install.sh"
+            return 1
+        fi
+    fi
+    log_ok "cargo: $(cargo --version)"
+}
+
+ensure_rust_toolchain() {
+    log_step "Setting up Rust toolchain for eBPF..."
+
+    # Nightly toolchain
+    if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
+        log_info "Installing nightly toolchain..."
+        rustup toolchain install nightly || {
+            log_error "Failed to install nightly toolchain"
+            return 1
+        }
+    fi
+
+    # rust-src component (required for -Zbuild-std=core)
+    if ! rustup component list --toolchain nightly 2>/dev/null | grep -q 'rust-src (installed)'; then
+        log_info "Installing rust-src for nightly..."
+        rustup component add rust-src --toolchain nightly || {
+            log_error "Failed to install rust-src"
+            return 1
+        }
+    fi
+
+    # bpf-linker
+    if ! command -v bpf-linker &>/dev/null; then
+        log_info "Installing bpf-linker (this may take several minutes)..."
+        cargo install bpf-linker || {
+            log_error "Failed to install bpf-linker"
+            log_info "Common fix: ensure llvm and clang are installed"
+            log_info "Manual: cargo +nightly install bpf-linker"
+            return 1
+        }
+    fi
+
+    log_ok "Nightly + rust-src + bpf-linker ready"
 }
 
 # =============================================================================
@@ -101,7 +295,7 @@ PrivateTmp=true
 NoNewPrivileges=false
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
 
-# Capability restrictions (BPF requires SYS_ADMIN + NET_ADMIN + BPF + PERFMON)
+# Capability restrictions
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 
@@ -116,7 +310,6 @@ ProtectKernelLogs=true
 [Install]
 WantedBy=multi-user.target
 EOF
-    # Ensure log directory exists
     mkdir -p /var/log/aegis
     chmod 755 /var/log/aegis
 
@@ -126,7 +319,7 @@ EOF
 
 install_logrotate() {
     local config_file="/etc/logrotate.d/aegis"
-    
+
     cat > "$config_file" << 'LOGRATEEOF'
 /var/log/aegis/aegis.log {
     daily
@@ -174,15 +367,13 @@ start_pre() {
 INITEOF
     chmod +x /etc/init.d/aegis
 
-    # Config file
     cat > /etc/conf.d/aegis << 'CONFEOF'
 # Aegis configuration
 # Interface to protect
 AEGIS_INTERFACE=eth0
 CONFEOF
 
-    log_ok "OpenRC service installed: /etc/init.d/aegis"
-    log_info "Configure interface in /etc/conf.d/aegis"
+    log_ok "OpenRC service installed"
 }
 
 # =============================================================================
@@ -226,19 +417,21 @@ case "$1" in
 esac
 INITEOF
     chmod +x /etc/init.d/aegis
-    log_ok "SysVinit script installed: /etc/init.d/aegis"
+    log_ok "SysVinit script installed"
 }
 
 # =============================================================================
-# MANAGE RUNNING SERVICES
+# SERVICE MANAGEMENT
 # =============================================================================
 
 stop_running_services() {
-    local init_system=$(detect_init_system)
+    local init_system
+    init_system=$(detect_init_system)
 
     case "$init_system" in
         systemd)
-            local services=$(systemctl list-units --full --all --no-legend "aegis@*" 2>/dev/null | awk '{print $1}')
+            local services
+            services=$(systemctl list-units --full --all --no-legend "aegis@*" 2>/dev/null | awk '{print $1}') || true
             if [[ -n "$services" ]]; then
                 log_info "Stopping active Aegis services..."
                 for svc in $services; do
@@ -256,11 +449,13 @@ stop_running_services() {
 }
 
 restart_services() {
-    local init_system=$(detect_init_system)
+    local init_system
+    init_system=$(detect_init_system)
 
     case "$init_system" in
         systemd)
-            local services=$(systemctl list-units --full --all --no-legend "aegis@*" 2>/dev/null | awk '{print $1}')
+            local services
+            services=$(systemctl list-units --full --all --no-legend "aegis@*" 2>/dev/null | awk '{print $1}') || true
             if [[ -n "$services" ]]; then
                 log_info "Restarting Aegis services..."
                 for svc in $services; do
@@ -272,26 +467,26 @@ restart_services() {
 }
 
 # =============================================================================
-# MAIN INSTALLATION
+# INSTALLATION
 # =============================================================================
 
 show_banner() {
+    echo ""
     echo "═══════════════════════════════════════════════════════════"
-    echo "  🛡️  AEGIS eBPF FIREWALL - UNIVERSAL INSTALLER"
+    echo "  🛡️  AEGIS eBPF FIREWALL — UNIVERSAL INSTALLER"
     echo "═══════════════════════════════════════════════════════════"
+    echo ""
 }
 
 install_prebuilt() {
-    log_info "Installing pre-built binaries..."
+    log_step "Installing pre-built binaries..."
 
     mkdir -p "$BIN_DIR" "$SHARE_DIR"
 
-    # Check for pre-built binaries
     local cli_bin=""
     local xdp_obj=""
     local tc_obj=""
 
-    # Check local paths (from Docker or manual build)
     for path in \
         "$SCRIPT_DIR/aegis-cli" \
         "$SCRIPT_DIR/target/release/aegis-cli" \
@@ -318,15 +513,14 @@ install_prebuilt() {
 
     if [[ -z "$cli_bin" ]]; then
         log_error "aegis-cli binary not found!"
-        log_info "Build first: cargo build --release -p aegis-cli"
-        exit 1
+        log_info "Build first: cargo run -p xtask -- build-all && cargo build --release -p aegis-cli"
+        return 1
     fi
 
     cp "$cli_bin" "$BIN_DIR/aegis-cli"
     chmod +x "$BIN_DIR/aegis-cli"
     log_ok "Installed: $BIN_DIR/aegis-cli"
 
-    # XDP/TC objects are optional (embedded in binary)
     if [[ -n "$xdp_obj" ]]; then
         cp "$xdp_obj" "$SHARE_DIR/aegis.o"
         log_ok "Installed: $SHARE_DIR/aegis.o"
@@ -338,164 +532,38 @@ install_prebuilt() {
     fi
 }
 
-ensure_build_deps() {
-    # bpf-linker needs LLVM/clang to compile
-    if command -v clang &>/dev/null && command -v llvm-config &>/dev/null; then
-        return 0
-    fi
-
-    log_info "Installing LLVM/clang (needed for bpf-linker)..."
-    local distro=$(detect_distro)
-    case "$distro" in
-        fedora|rhel|centos|rocky|alma)
-            dnf install -y llvm clang llvm-devel elfutils-libelf-devel 2>/dev/null || \
-            yum install -y llvm clang llvm-devel elfutils-libelf-devel 2>/dev/null || true
-            ;;
-        ubuntu|debian|pop|linuxmint)
-            apt-get update -qq && apt-get install -y llvm clang libelf-dev build-essential pkg-config 2>/dev/null || true
-            ;;
-        arch|manjaro|endeavouros)
-            pacman -S --noconfirm --needed llvm clang libelf 2>/dev/null || true
-            ;;
-        opensuse*|sles)
-            zypper install -y llvm clang libelf-devel 2>/dev/null || true
-            ;;
-        alpine)
-            apk add llvm clang libelf-dev linux-headers musl-dev build-base 2>/dev/null || true
-            ;;
-        *)
-            log_warn "Unknown distro '$distro' — please install llvm and clang manually"
-            ;;
-    esac
-}
-
-ensure_rust_toolchain() {
-    # eBPF build uses: cargo +nightly -Zbuild-std=core
-    # This requires: nightly toolchain + rust-src component + bpf-linker
-    if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
-        log_info "Installing nightly toolchain..."
-        rustup toolchain install nightly || {
-            log_error "Failed to install nightly toolchain"
-            exit 1
-        }
-    fi
-
-    if ! rustup component list --toolchain nightly 2>/dev/null | grep -q 'rust-src (installed)'; then
-        log_info "Installing rust-src for nightly..."
-        rustup component add rust-src --toolchain nightly || {
-            log_error "Failed to install rust-src"
-            exit 1
-        }
-    fi
-
-    if ! command -v bpf-linker &>/dev/null; then
-        log_info "Installing bpf-linker (eBPF linker)..."
-        ensure_build_deps
-        cargo +nightly install bpf-linker || {
-            log_error "Failed to install bpf-linker"
-            log_info "Try manually: cargo +nightly install bpf-linker"
-            exit 1
-        }
-    fi
-
-    log_ok "Nightly toolchain + rust-src + bpf-linker ready"
-}
-
 build_and_install() {
-    log_info "Building from source..."
+    log_step "Building from source..."
 
-    # Find cargo — check multiple locations and explicitly add to PATH
-    # (sourcing .cargo/env alone is insufficient under sudo with secure_path)
-    local cargo_bin_dirs=(
-        "$HOME/.cargo/bin"
-    )
-    if [[ -n "$SUDO_USER" ]]; then
-        local _sudo_home
-        _sudo_home=$(getent passwd "$SUDO_USER" | cut -d: -f6 2>/dev/null)
-        [[ -n "$_sudo_home" ]] && cargo_bin_dirs+=("$_sudo_home/.cargo/bin")
-    fi
-    # Scan all home directories as last resort
-    for d in /home/*/.cargo/bin; do
-        [[ -d "$d" ]] && cargo_bin_dirs+=("$d")
-    done
+    # 1. Find/install Rust
+    ensure_rust_installed
 
-    for cbd in "${cargo_bin_dirs[@]}"; do
-        if [[ -x "$cbd/cargo" ]]; then
-            log_info "Found cargo in: $cbd"
-            export PATH="$cbd:$PATH"
-            # Also set RUSTUP_HOME so rustup finds the correct toolchain
-            local rustup_dir="${cbd%/.cargo/bin}/.rustup"
-            if [[ -d "$rustup_dir" ]]; then
-                export RUSTUP_HOME="$rustup_dir"
-                log_info "Using RUSTUP_HOME: $rustup_dir"
-            fi
-            break
-        fi
-    done
-
-    if ! command -v cargo &>/dev/null; then
-        log_error "cargo not found!"
-        log_info "Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        log_info "Or use --install-only with pre-built binaries"
-        exit 1
-    fi
+    # 2. Ensure nightly + bpf-linker
+    ensure_rust_toolchain
 
     cd "$SCRIPT_DIR"
 
-    # Ensure nightly toolchain + rust-src (required for -Zbuild-std=core)
-    ensure_rust_toolchain
-
-    # Build eBPF programs
-    log_info "Building eBPF programs..."
+    # 3. Build eBPF programs (release profile — debug panics bpf-linker)
+    log_info "Building eBPF programs (release)..."
     cargo run -p xtask -- build-all --profile release
 
-    # Build CLI
-    log_info "Building CLI..."
+    # 4. Build CLI (eBPF bytecode gets embedded by build.rs)
+    log_info "Building aegis-cli..."
     cargo build --release -p aegis-cli
 
-    # Now install
+    # 5. Install the built binary
     install_prebuilt
 }
 
 cleanup_old_install() {
-    # Clean BPF maps
     if [[ -d "/sys/fs/bpf/aegis" ]]; then
         log_info "Cleaning up pinned BPF maps..."
         rm -rf /sys/fs/bpf/aegis
     fi
 }
 
-show_usage() {
-    echo ""
-    echo "═══════════════════════════════════════════════════════════"
-    echo "  ✅ INSTALLATION COMPLETE"
-    echo "═══════════════════════════════════════════════════════════"
-    echo ""
-    echo "  Quick Start:"
-    echo "    sudo aegis-cli -i eth0 tui     # Interactive TUI"
-    echo "    sudo aegis-cli -i wg0 daemon   # Background daemon"
-    echo ""
-    echo "  Service Management ($(detect_init_system)):"
-
-    case "$(detect_init_system)" in
-        systemd)
-            echo "    sudo systemctl enable aegis@eth0"
-            echo "    sudo systemctl start aegis@eth0"
-            ;;
-        openrc)
-            echo "    sudo rc-update add aegis default"
-            echo "    sudo rc-service aegis start"
-            ;;
-        sysvinit)
-            echo "    sudo update-rc.d aegis defaults"
-            echo "    sudo /etc/init.d/aegis start"
-            ;;
-    esac
-    echo ""
-}
-
 # =============================================================================
-# CONFIG & COMPLETIONS
+# POST-INSTALL: CONFIG, COMPLETIONS, GEOIP
 # =============================================================================
 
 install_default_config() {
@@ -505,13 +573,13 @@ install_default_config() {
     mkdir -p "$config_dir"
 
     if [[ -f "$config_file" ]]; then
-        log_ok "Config exists: $config_file"
+        log_ok "Config exists: $config_file (preserved)"
         return 0
     fi
 
     cat > "$config_file" << 'CONFIGEOF'
 # Aegis eBPF Firewall Configuration
-# https://github.com/m4rba4s/Aegis-Portable-Demo
+# https://github.com/m4rba4s/Aegis-eBPF
 
 interface = "eth0"
 
@@ -541,15 +609,12 @@ ips = []
 CONFIGEOF
 
     chmod 0640 "$config_file"
-    log_ok "Default config created: $config_file"
+    log_ok "Default config: $config_file"
 }
 
 install_completions() {
     local bin="$BIN_DIR/aegis-cli"
-
-    if [[ ! -x "$bin" ]]; then
-        return 0
-    fi
+    [[ ! -x "$bin" ]] && return 0
 
     # Bash
     if [[ -d /etc/bash_completion.d ]]; then
@@ -582,13 +647,90 @@ install_geoip_db() {
     fi
 
     log_info "Downloading GeoIP database..."
-    # Try to download from repo (demo DB)
-    if wget -q --show-progress "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb" -O "$db_file"; then
-        log_ok "GeoIP database installed"
-    else
-        log_warn "Failed to download GeoIP database."
-        log_warn "Please manually place GeoLite2-City.mmdb in $db_dir"
+    local url="https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb"
+
+    # Try curl first (more universal), fall back to wget
+    if command -v curl &>/dev/null; then
+        if curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$db_file" 2>/dev/null; then
+            log_ok "GeoIP database installed"
+            return 0
+        fi
     fi
+
+    if command -v wget &>/dev/null; then
+        if wget -q --timeout=15 "$url" -O "$db_file" 2>/dev/null; then
+            log_ok "GeoIP database installed"
+            return 0
+        fi
+    fi
+
+    log_warn "Failed to download GeoIP database (non-fatal)"
+    log_warn "Place GeoLite2-City.mmdb in $db_dir manually"
+    rm -f "$db_file"  # clean partial download
+}
+
+# =============================================================================
+# CHECK MODE (dry-run prerequisite validation)
+# =============================================================================
+
+run_checks() {
+    show_banner
+    echo "  Running prerequisite checks..."
+    echo ""
+
+    local errors=0
+
+    # Kernel
+    check_kernel_version || ((errors++))
+
+    # BPF filesystem
+    check_bpf_fs || ((errors++))
+
+    # System tools
+    local tools=("gcc" "clang" "llvm-config" "curl" "git")
+    for tool in "${tools[@]}"; do
+        if command -v "$tool" &>/dev/null; then
+            log_ok "$tool: $(command -v "$tool")"
+        else
+            log_error "$tool: NOT FOUND"
+            ((errors++))
+        fi
+    done
+
+    # Rust
+    if find_cargo; then
+        log_ok "cargo: $(cargo --version)"
+
+        # Nightly
+        if rustup toolchain list 2>/dev/null | grep -q nightly; then
+            log_ok "nightly toolchain: installed"
+        else
+            log_warn "nightly toolchain: NOT installed (will be auto-installed)"
+        fi
+
+        # bpf-linker
+        if command -v bpf-linker &>/dev/null; then
+            log_ok "bpf-linker: installed"
+        else
+            log_warn "bpf-linker: NOT installed (will be auto-installed)"
+        fi
+    else
+        log_error "cargo: NOT FOUND"
+        log_info "Install: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        ((errors++))
+    fi
+
+    echo ""
+    if [[ $errors -eq 0 ]]; then
+        echo "═══════════════════════════════════════════════════════════"
+        echo "  ✅ ALL CHECKS PASSED — ready to install"
+        echo "═══════════════════════════════════════════════════════════"
+    else
+        echo "═══════════════════════════════════════════════════════════"
+        echo "  ❌ $errors CHECK(S) FAILED — fix issues above first"
+        echo "═══════════════════════════════════════════════════════════"
+    fi
+    return $errors
 }
 
 # =============================================================================
@@ -604,11 +746,10 @@ uninstall_aegis() {
         exit 1
     fi
 
-    # Stop services
     stop_running_services
 
-    # Remove service files
-    local init_system=$(detect_init_system)
+    local init_system
+    init_system=$(detect_init_system)
     case "$init_system" in
         systemd)
             systemctl disable "aegis@*" 2>/dev/null || true
@@ -628,30 +769,23 @@ uninstall_aegis() {
             ;;
     esac
 
-    # Remove binary
     rm -f "$BIN_DIR/aegis-cli"
     log_ok "Binary removed"
 
-    # Remove shared data
     rm -rf "$SHARE_DIR"
     log_ok "Shared data removed"
 
-    # Clean BPF maps
     if [[ -d /sys/fs/bpf/aegis ]]; then
         rm -rf /sys/fs/bpf/aegis
         log_ok "BPF maps cleaned"
     fi
 
-    # Remove completions
     rm -f /etc/bash_completion.d/aegis-cli 2>/dev/null
     rm -f /usr/share/zsh/site-functions/_aegis-cli 2>/dev/null
     rm -f /usr/share/fish/vendor_completions.d/aegis-cli.fish 2>/dev/null
-
-    # Remove logrotate
     rm -f /etc/logrotate.d/aegis 2>/dev/null
     rm -f /etc/periodic/weekly/aegis-logclean 2>/dev/null
 
-    # Interactive prompts for user data
     if [[ -d /etc/aegis ]]; then
         echo ""
         read -rp "  Remove config (/etc/aegis)? [y/N] " ans
@@ -675,25 +809,61 @@ uninstall_aegis() {
 }
 
 # =============================================================================
+# USAGE BANNER
+# =============================================================================
+
+show_usage() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  ✅ INSTALLATION COMPLETE"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Quick Start:"
+    echo "    sudo aegis-cli -i eth0 tui     # Interactive TUI"
+    echo "    sudo aegis-cli -i wg0 daemon   # Background daemon"
+    echo ""
+    echo "  Service Management ($(detect_init_system)):"
+
+    case "$(detect_init_system)" in
+        systemd)
+            echo "    sudo systemctl enable aegis@eth0"
+            echo "    sudo systemctl start aegis@eth0"
+            ;;
+        openrc)
+            echo "    sudo rc-update add aegis default"
+            echo "    sudo rc-service aegis start"
+            ;;
+        sysvinit)
+            echo "    sudo update-rc.d aegis defaults"
+            echo "    sudo /etc/init.d/aegis start"
+            ;;
+    esac
+    echo ""
+}
+
+# =============================================================================
 # ENTRY POINT
 # =============================================================================
 
 main() {
     local install_only=false
     local skip_service=false
+    local check_only=false
 
-    # Parse args
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --install-only) install_only=true; shift ;;
             --skip-service) skip_service=true; shift ;;
+            --check)        check_only=true; shift ;;
             --uninstall)    uninstall_aegis; exit 0 ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
-                echo "  --install-only   Install pre-built binaries (no cargo build)"
-                echo "  --skip-service   Don't install init system service"
+                echo "  (no args)        Full build from source + install"
+                echo "  --check          Dry-run: validate prerequisites"
+                echo "  --install-only   Install pre-built binaries only"
+                echo "  --skip-service   Don't install init service"
                 echo "  --uninstall      Remove Aegis completely"
                 echo "  --help           Show this help"
                 exit 0
@@ -707,52 +877,58 @@ main() {
     # Check root
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root (sudo)"
+        log_info "Usage: sudo $0"
         exit 1
     fi
 
     # Detect environment
-    local distro=$(detect_distro)
-    local init_system=$(detect_init_system)
+    local distro init_system
+    distro=$(detect_distro)
+    init_system=$(detect_init_system)
 
-    log_info "Detected distro: $distro"
-    log_info "Detected init: $init_system"
+    log_info "Distro: $distro | Init: $init_system | Kernel: $(uname -r)"
 
-    # Validate kernel
+    # Check-only mode
+    if $check_only; then
+        run_checks
+        exit $?
+    fi
+
+    # Validate kernel + BPF
     check_kernel_version
     check_bpf_fs
+
+    # Install system deps FIRST (gcc, clang, llvm, curl, etc.)
+    install_system_deps
 
     # Stop running services
     stop_running_services
     cleanup_old_install
 
-    # Install
+    # Build or install
     if $install_only; then
         install_prebuilt
     else
         build_and_install
     fi
 
-    # Post-install tasks
+    # Post-install
     install_default_config
     install_completions
     install_geoip_db
     install_logrotate
 
-    # Install init service
+    # Init service
     if ! $skip_service; then
         case "$init_system" in
-            systemd) install_systemd_service ;;
-            openrc)  install_openrc_service ;;
+            systemd)  install_systemd_service ;;
+            openrc)   install_openrc_service ;;
             sysvinit) install_sysvinit_service ;;
-            *)
-                log_warn "Unknown init system, skipping service installation"
-                ;;
+            *)        log_warn "Unknown init system, skipping service" ;;
         esac
     fi
 
-    # Restart services
     restart_services
-
     show_usage
 }
 
