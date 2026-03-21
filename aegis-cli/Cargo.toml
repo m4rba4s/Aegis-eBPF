@@ -37,6 +37,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-log = "0.2"
 tracing-appender = "0.2"
+clap_mangen = "0.2"
 
 [package.metadata.deb]
 maintainer = "Aegis Security Team <security@aegis.dev>"
