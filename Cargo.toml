@@ -23,3 +23,12 @@ codegen-units = 16    # Cap codegen parallelization to prevent OOM
 opt-level = 3         # Maximize runtime performance
 strip = true          # Strip symbols to reduce binary size and memory mapping
 debug = false         # Disable debug symbols for release
+
+# Preserve BTF debug info for eBPF CO-RE
+[profile.release.package.aegis-ebpf]
+debug = 2
+strip = false
+
+[profile.release.package.aegis-tc]
+debug = 2
+strip = false

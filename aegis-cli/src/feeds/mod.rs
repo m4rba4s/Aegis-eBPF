@@ -25,6 +25,7 @@ pub enum FeedCategory {
     Firehol = 3,
     Tracker = 4,
     Manual = 5,
+    CountryBlock = 6,
 }
 
 /// A blocked IP entry with metadata (for future use)
@@ -79,6 +80,27 @@ impl FeedConfig {
                 update_interval_secs: 86400,
             },
         ]
+    }
+
+    /// Build feed configs including dynamic country blocks
+    pub fn from_config(config: &crate::config::Config) -> Vec<FeedConfig> {
+        let mut feeds = Self::defaults();
+        
+        for country in &config.blocked_countries {
+            // Validate country code (e.g., "cn", "ru")
+            let code = country.to_lowercase();
+            if code.len() == 2 && code.chars().all(|c| c.is_ascii_alphabetic()) {
+                feeds.push(FeedConfig {
+                    name: format!("country_block_{}", code),
+                    url: format!("https://www.ipdeny.com/ipblocks/data/countries/{}.zone", code),
+                    category: FeedCategory::CountryBlock,
+                    enabled: true,
+                    update_interval_secs: 86400, // Daily
+                });
+            }
+        }
+        
+        feeds
     }
 }
 

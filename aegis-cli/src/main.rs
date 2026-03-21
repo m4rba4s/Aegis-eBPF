@@ -353,7 +353,7 @@ async fn main() -> Result<(), anyhow::Error> {
         match action {
             FeedsAction::Update => {
                 println!("🔄 Updating threat feeds...\n");
-                let configs = feeds::FeedConfig::defaults();
+                let configs = feeds::FeedConfig::from_config(&cfg);
                 let mut total_ips = 0usize;
                 
                 for config in configs.iter().filter(|c| c.enabled) {
@@ -373,7 +373,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             FeedsAction::List => {
                 println!("📋 Configured Threat Feeds:\n");
-                for config in feeds::FeedConfig::defaults() {
+                for config in feeds::FeedConfig::from_config(&cfg) {
                     let status = if config.enabled { "✅" } else { "❌" };
                     println!("  {} {} ({:?})", status, config.name, config.category);
                     println!("     URL: {}", config.url);
@@ -410,7 +410,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     };
                 
                 // Load feeds
-                match feeds::load_feeds_to_map(&mut cidr_map) {
+                let configs = feeds::FeedConfig::from_config(&cfg);
+                match feeds::load_feeds_to_map(&mut cidr_map, &configs) {
                     Ok(count) => {
                         println!("✅ Loaded {} IPs into CIDR blocklist", count);
                     }
@@ -577,7 +578,8 @@ async fn main() -> Result<(), anyhow::Error> {
                 let cidr_map = bpf.take_map("CIDR_BLOCKLIST").expect("CIDR_BLOCKLIST not found");
                 let mut cidr: aya::maps::LpmTrie<_, aegis_common::LpmKeyIpv4, aegis_common::CidrBlockEntry> =
                     aya::maps::LpmTrie::try_from(cidr_map)?;
-                match feeds::load_feeds_to_map(&mut cidr) {
+                let configs = feeds::FeedConfig::from_config(&cfg);
+                match feeds::load_feeds_to_map(&mut cidr, &configs) {
                     Ok(count) => println!("✅ Loaded {} IPs from threat feeds", count),
                     Err(e) => println!("⚠️  Feed loading error: {}", e),
                 }

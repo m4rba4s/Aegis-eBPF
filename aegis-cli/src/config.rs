@@ -12,6 +12,8 @@ pub struct Config {
     pub rules: Vec<Rule>,
     #[serde(default)]
     pub remote_log: Option<String>,
+    #[serde(default)]
+    pub blocked_countries: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
