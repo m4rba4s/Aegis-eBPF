@@ -310,7 +310,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Load rule config (YAML — blocklist rules)
     let config_path = "aegis.yaml";
-    let cfg = config::Config::load(config_path).unwrap_or_else(|_| config::Config { rules: vec![], remote_log: None });
+    let cfg = config::Config::load(config_path).unwrap_or_else(|_| config::Config { rules: vec![], remote_log: None, blocked_countries: vec![] });
 
     // Load system config (TOML — /etc/aegis/config.toml)
     let sys_cfg = config::AegisConfig::load(None);
@@ -1023,7 +1023,7 @@ where T: std::borrow::BorrowMut<MapData>
                     action: "drop".to_string(),
                 });
             }
-            let cfg = config::Config { rules, remote_log: None };
+            let cfg = config::Config { rules, remote_log: None, blocked_countries: vec![] };
             cfg.save(file)?;
             println!("Saved rules to {}", file);
         }
