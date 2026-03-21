@@ -10,12 +10,10 @@
 #![allow(dead_code)]
 
 use std::{
-    io,
     time::{Duration, Instant},
     sync::{Arc, Mutex},
-    collections::{VecDeque, HashMap},
+    collections::VecDeque,
     net::{IpAddr, Ipv4Addr},
-    thread,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
