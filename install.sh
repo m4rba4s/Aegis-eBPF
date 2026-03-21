@@ -317,6 +317,40 @@ EOF
     log_ok "Systemd service installed: aegis@<interface>.service"
 }
 
+install_systemd_timer() {
+    # Service to update feeds
+    cat > /etc/systemd/system/aegis-feeds.service << 'EOF'
+[Unit]
+Description=Aegis Threat Feed Auto-Refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aegis-cli feeds update
+ExecStart=/usr/local/bin/aegis-cli feeds load
+EOF
+
+    # Timer to trigger the service daily
+    cat > /etc/systemd/system/aegis-feeds.timer << 'EOF'
+[Unit]
+Description=Run Aegis Threat Feed Auto-Refresh daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable aegis-feeds.timer
+    systemctl start aegis-feeds.timer
+    log_ok "Systemd timer installed: aegis-feeds.timer (daily refresh)"
+}
+
 install_logrotate() {
     local config_file="/etc/logrotate.d/aegis"
 
@@ -784,6 +818,8 @@ uninstall_aegis() {
     rm -f /usr/share/zsh/site-functions/_aegis-cli 2>/dev/null
     rm -f /usr/share/fish/vendor_completions.d/aegis-cli.fish 2>/dev/null
     rm -f /etc/logrotate.d/aegis 2>/dev/null
+    rm -f /etc/systemd/system/aegis-feeds.service 2>/dev/null
+    rm -f /etc/systemd/system/aegis-feeds.timer 2>/dev/null
     rm -f /etc/periodic/weekly/aegis-logclean 2>/dev/null
 
     if [[ -d /etc/aegis ]]; then
@@ -916,6 +952,7 @@ main() {
     install_default_config
     install_completions
     install_geoip_db
+    install_systemd_timer
     install_logrotate
 
     # Init service

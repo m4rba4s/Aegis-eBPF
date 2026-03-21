@@ -3,6 +3,7 @@ mod tui;
 mod feeds;
 mod compat;
 mod geo;
+mod metrics;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
@@ -123,6 +124,12 @@ enum Commands {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Generate man page
+    Manpage {
+        /// Output directory for man page
+        #[clap(default_value = ".")]
+        dir: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -229,9 +236,30 @@ fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
-    // Don't init env_logger in TUI mode — stderr is redirected to /dev/null
+
+    // Initialize tracing subscriber (skip in TUI mode — stderr is redirected)
     if !matches!(opt.command, Commands::Tui) {
-        env_logger::init();
+        use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+
+        if matches!(opt.command, Commands::Daemon) {
+            // Daemon mode: structured JSON output for SIEM/log aggregation
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().json().with_target(true).with_thread_ids(true))
+                .with(tracing_log::LogTracer::init().ok().and(None::<fmt::Layer<_>>))
+                .init();
+        } else {
+            // CLI mode: human-readable compact output
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().compact().with_target(false))
+                .init();
+        }
+        // Bridge aya-log (uses `log` crate) into tracing
+        let _ = tracing_log::LogTracer::init();
     }
 
     // Validate interface name (IFNAMSIZ = 16, including null terminator → max 15 chars)
@@ -263,7 +291,7 @@ async fn main() -> Result<(), anyhow::Error> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
-        eprintln!("⚠️  Failed to set memlock limit (error: {})", ret);
+        tracing::warn!(error = ret, "failed to set memlock limit");
     }
 
     // Kernel compatibility check (for eBPF commands)
@@ -292,6 +320,19 @@ async fn main() -> Result<(), anyhow::Error> {
         let mut cmd = Opt::command();
         let name = cmd.get_name().to_string();
         clap_complete::generate(*shell, &mut cmd, name, &mut std::io::stdout());
+        return Ok(());
+    }
+
+    // Handle Manpage command early (no eBPF needed)
+    if let Commands::Manpage { dir } = &opt.command {
+        let cmd = Opt::command();
+        let name = cmd.get_name().to_string();
+        let man = clap_mangen::Man::new(cmd);
+        let mut buffer: Vec<u8> = Default::default();
+        man.render(&mut buffer)?;
+        let out_path = std::path::Path::new(dir).join(format!("{}.1", name));
+        std::fs::write(&out_path, buffer)?;
+        println!("✅ Man page generated at {}", out_path.display());
         return Ok(());
     }
 
@@ -395,23 +436,20 @@ async fn main() -> Result<(), anyhow::Error> {
             // XDP attach with automatic fallback: Driver Mode -> SKB Mode
             let _link_id = match program.attach(&opt.iface, XdpFlags::default()) {
                 Ok(id) => {
-                    println!("✅ XDP attached to {} in DRIVER mode (link_id: {:?})", opt.iface, id);
+                    tracing::info!(iface = %opt.iface, link_id = ?id, mode = "driver", "XDP attached");
                     id
                 }
                 Err(driver_err) => {
                     // Driver mode failed (common for virtual/wireless interfaces)
                     // Fallback to SKB (generic) mode
-                    println!("ℹ️  Driver mode unavailable for {}, trying SKB mode...", opt.iface);
+                    tracing::info!(iface = %opt.iface, "driver mode unavailable, falling back to SKB");
                     match program.attach(&opt.iface, XdpFlags::SKB_MODE) {
                         Ok(id) => {
-                            println!("✅ XDP attached to {} in SKB mode (link_id: {:?})", opt.iface, id);
+                            tracing::info!(iface = %opt.iface, link_id = ?id, mode = "skb", "XDP attached");
                             id
                         }
                         Err(skb_err) => {
-                            eprintln!("❌ XDP attach failed!");
-                            eprintln!("   Driver mode error: {}", driver_err);
-                            eprintln!("   SKB mode error: {}", skb_err);
-                            eprintln!("   Hint: Check if interface '{}' exists and supports XDP", opt.iface);
+                            tracing::error!(iface = %opt.iface, driver_err = %driver_err, skb_err = %skb_err, "XDP attach failed on both modes");
                             return Err(skb_err.into());
                         }
                     }
@@ -430,7 +468,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     let path = format!("/sys/fs/bpf/aegis/{}", mark);
                     let _ = std::fs::remove_file(&path); // Force overwrite
                     if let Err(e) = map.pin(&path) {
-                        println!("⚠️  Failed to pin map {}: {}", mark, e);
+                        tracing::warn!(map = mark, error = %e, "failed to pin BPF map");
                     }
                 }
             }
@@ -444,7 +482,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         if let Err(e) = tc::qdisc_add_clsact(&opt.iface) {
                             // Ignore "already exists" error
                             if !e.to_string().contains("exists") {
-                                println!("⚠️  TC qdisc setup warning: {}", e);
+                                tracing::warn!(error = %e, "TC qdisc setup warning");
                             }
                         }
 
@@ -454,15 +492,15 @@ async fn main() -> Result<(), anyhow::Error> {
                             .try_into()?;
                         tc_prog.load()?;
                         tc_prog.attach(&opt.iface, TcAttachType::Egress)?;
-                        println!("✅ TC Egress attached to {}", opt.iface);
+                        tracing::info!(iface = %opt.iface, "TC egress attached");
                         tc_bpf = Some(tc);
                     }
                     Err(e) => {
-                        println!("⚠️  TC program not loaded: {} (egress filtering disabled)", e);
+                        tracing::warn!(error = %e, "TC program not loaded, egress filtering disabled");
                     }
                 }
             } else {
-                println!("ℹ️  TC egress program disabled (--no-tc)");
+                tracing::info!("TC egress program disabled (--no-tc)");
             }
 
             // Take ownership of BLOCKLIST
@@ -574,7 +612,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 let mut buf = events.open(cpu_id, None)?;
                 let logs_inner = logs_clone.clone();
                 let remote_log = remote_log_base.clone();
-                let logging_cfg_inner = logging_cfg.clone();
+                let _logging_cfg_inner = logging_cfg.clone();
                 let blocklist_inner = blocklist_clone.clone(); // Clone for this CPU task
                 
                 event_futures.push(async move {
@@ -712,7 +750,7 @@ async fn main() -> Result<(), anyhow::Error> {
             for cpu_id in cpus_v6 {
                 let mut buf = events_ipv6.open(cpu_id, None)?;
                 let logs_inner = logs_clone_v6.clone();
-                let logging_cfg_inner = logging_cfg_v6.clone();
+                let _logging_cfg_inner = logging_cfg_v6.clone();
 
                 tokio::spawn(async move {
                     let mut buffers = (0..10).map(|_| BytesMut::with_capacity(1024)).collect::<Vec<_>>();
@@ -831,7 +869,13 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 });
                 
-                println!("🔥 Daemon mode active on {}. Send SIGTERM or SIGINT to stop.", opt.iface);
+                tracing::info!(iface = %opt.iface, "daemon mode active, send SIGTERM or SIGINT to stop");
+
+                // Spawn Prometheus metrics endpoint
+                match metrics::spawn_metrics_server(None).await {
+                    Ok(addr) => tracing::info!(%addr, "prometheus /metrics endpoint started"),
+                    Err(e) => tracing::warn!(error = %e, "failed to start metrics endpoint (non-fatal)"),
+                }
                 
                 // Handle both SIGTERM (systemd) and SIGINT (Ctrl+C)
                 #[cfg(unix)]
@@ -841,8 +885,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     let mut sigint = signal(SignalKind::interrupt()).expect("Failed to create SIGINT handler");
                     
                     tokio::select! {
-                        _ = sigterm.recv() => println!("\n📥 Received SIGTERM"),
-                        _ = sigint.recv() => println!("\n📥 Received SIGINT (Ctrl+C)"),
+                        _ = sigterm.recv() => tracing::info!("received SIGTERM"),
+                        _ = sigint.recv() => tracing::info!("received SIGINT"),
                     }
                 }
                 #[cfg(not(unix))]
@@ -850,10 +894,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     signal::ctrl_c().await?;
                 }
                 
-                println!("🔌 Detaching programs from {}...", iface_for_shutdown);
+                tracing::info!(iface = %iface_for_shutdown, "detaching programs");
                 drop(tc_bpf);  // TC first
                 drop(bpf);     // Then XDP
-                println!("✅ Programs detached. Shutdown complete.");
+                tracing::info!("shutdown complete");
                 return Ok(());
             } else {
                  // For Load command, we also need to poll events.

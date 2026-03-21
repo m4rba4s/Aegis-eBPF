@@ -13,7 +13,6 @@ aegis-common = { path = "../aegis-common", features = ["user"] }
 clap = { version = "4.0", features = ["derive"] }
 tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "io-util", "io-std", "time"] }
 anyhow = "1.0"
-env_logger = "0.10"
 log = "0.4"
 libc = "0.2"
 bytes = "1.0"
@@ -32,3 +31,27 @@ const_format = "0.2"
 clap_complete = "4.5"
 toml = "0.8"
 maxminddb = "0.23"
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-log = "0.2"
+tracing-appender = "0.2"
+
+[package.metadata.deb]
+maintainer = "Aegis Security Team <security@aegis.dev>"
+copyright = "2024 Aegis Project"
+license-file = ["../LICENSE", "4"]
+extended-description = "Aegis eBPF XDP/TC firewall userspace controller and daemon"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/aegis-cli", "usr/local/bin/", "755"],
+    ["../install.sh", "usr/local/share/aegis/install.sh", "755"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/aegis-cli", dest = "/usr/local/bin/aegis-cli", mode = "755" },
+    { source = "../install.sh", dest = "/usr/local/share/aegis/install.sh", mode = "755" },
+]
