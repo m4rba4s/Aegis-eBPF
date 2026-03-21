@@ -10,8 +10,8 @@ use super::{FeedConfig, FeedCategory, download_feed_blocking};
 /// Now preserves real CIDR prefix lengths for proper LPM matching
 pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
     cidr_map: &mut LpmTrie<T, LpmKeyIpv4, CidrBlockEntry>,
+    configs: &[FeedConfig],
 ) -> Result<usize, String> {
-    let configs = FeedConfig::defaults();
     let mut total_loaded = 0usize;
     let mut errors = 0usize;
     
@@ -22,6 +22,7 @@ pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
                     FeedCategory::Spamhaus => CAT_SPAMHAUS,
                     FeedCategory::AbuseCh => CAT_ABUSE_CH,
                     FeedCategory::Firehol => CAT_FIREHOL,
+                    FeedCategory::CountryBlock => 6, // Dedicated category ID
                     _ => 0,
                 };
                 
