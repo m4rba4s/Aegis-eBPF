@@ -1,0 +1,11 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "aegis-xdp",
+  "plugins": [
+    {
+      "type": "aegis-cni",
+      "xdpProgram": "/opt/aegis/aegis-ebpf",
+      "policyPath": "/etc/aegis/aegis.yaml"
+    }
+  ]
+}
