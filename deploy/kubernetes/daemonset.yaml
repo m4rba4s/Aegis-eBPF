@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aegis-firewall
+  namespace: aegis-system
+  labels:
+    app.kubernetes.io/name: aegis
+    app.kubernetes.io/component: firewall
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aegis
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aegis
+    spec:
+      hostNetwork: true
+      hostPID: true
+      serviceAccountName: aegis
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: aegis
+          image: ghcr.io/m4rba4s/aegis-ebpf:latest
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - BPF
+                - PERFMON
+          volumeMounts:
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+            - name: cni-bin
+              mountPath: /opt/cni/bin
+            - name: cni-conf
+              mountPath: /etc/cni/net.d
+            - name: aegis-config
+              mountPath: /etc/aegis
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Install CNI binary
+              cp /usr/local/bin/aegis-cni /opt/cni/bin/aegis-cni
+              chmod +x /opt/cni/bin/aegis-cni
+              # Run daemon
+              exec aegis-cli --iface eth0 --daemon
+          ports:
+            - containerPort: 9100
+              name: metrics
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: cni-bin
+          hostPath:
+            path: /opt/cni/bin
+            type: DirectoryOrCreate
+        - name: cni-conf
+          hostPath:
+            path: /etc/cni/net.d
+            type: DirectoryOrCreate
+        - name: aegis-config
+          configMap:
+            name: aegis-config
+            optional: true

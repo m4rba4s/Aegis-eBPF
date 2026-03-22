@@ -4,13 +4,14 @@ members = [
     "aegis-common",
     "aegis-ebpf",
     "aegis-tc",
+    "aegis-cni",
     "xtask",
 ]
 exclude = [
     "aegis-cli/fuzz",
     "verification",
 ]
-default-members = ["aegis-cli", "xtask"]
+default-members = ["aegis-cli", "aegis-cni", "xtask"]
 resolver = "2"
 
 [profile.dev]
