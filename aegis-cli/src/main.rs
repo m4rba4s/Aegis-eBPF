@@ -6,6 +6,8 @@ mod geo;
 mod metrics;
 mod dashboard;
 mod dpi;
+mod alerts;
+mod hot_reload;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
@@ -886,6 +888,12 @@ async fn main() -> Result<(), anyhow::Error> {
                     Ok(()) => tracing::info!("DPI suspect queue worker active"),
                     Err(e) => tracing::warn!(error = %e, "DPI worker not started (non-fatal)"),
                 }
+
+                // Spawn config hot-reload watcher
+                hot_reload::spawn_config_watcher(
+                    "/etc/aegis/config.toml",
+                    &format!("/etc/aegis/aegis.yaml"),
+                );
                 
                 // Handle both SIGTERM (systemd) and SIGINT (Ctrl+C)
                 #[cfg(unix)]

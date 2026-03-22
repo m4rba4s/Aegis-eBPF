@@ -90,6 +90,8 @@ pub struct AegisConfig {
     pub feeds: FeedsConfig,
     pub logging: LoggingConfig,
     pub allowlist: AllowlistConfig,
+    pub webhooks: WebhooksConfig,
+    pub dpi: DpiModuleConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -140,6 +142,8 @@ impl Default for AegisConfig {
             feeds: FeedsConfig::default(),
             logging: LoggingConfig::default(),
             allowlist: AllowlistConfig::default(),
+            webhooks: WebhooksConfig::default(),
+            dpi: DpiModuleConfig::default(),
         }
     }
 }
@@ -179,6 +183,45 @@ impl Default for LoggingConfig {
 impl Default for AllowlistConfig {
     fn default() -> Self {
         Self { ips: Vec::new() }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct WebhooksConfig {
+    pub enabled: bool,
+    pub slack_url: String,
+    pub pagerduty_key: String,
+    pub generic_url: String,
+    /// Minimum severity to trigger alert: "low", "medium", "high", "critical"
+    pub min_severity: String,
+}
+
+impl Default for WebhooksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            slack_url: String::new(),
+            pagerduty_key: String::new(),
+            generic_url: String::new(),
+            min_severity: "high".into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct DpiModuleConfig {
+    pub enabled: bool,
+    pub auto_block_threshold: u8,
+}
+
+impl Default for DpiModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_block_threshold: 80,
+        }
     }
 }
 
