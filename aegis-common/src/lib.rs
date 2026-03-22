@@ -41,6 +41,31 @@ pub struct PacketLog {
 }                          // Total: 32 bytes
 
 // ============================================================
+// DPI EVENT (Deep Packet Inspection suspect queue)
+// ============================================================
+
+/// Suspect packet metadata sent to userspace DPI worker.
+/// Includes a 16-byte payload snippet for pattern matching.
+/// Size: 48 bytes (aligned for perf buffer)
+#[derive(Clone, Copy)]
+#[cfg_attr(feature = "user", derive(Debug))]
+#[repr(C)]
+pub struct DpiEvent {
+    pub src_ip: u32,           // 4  Source IP (network byte order)
+    pub dst_ip: u32,           // 4  Destination IP (network byte order)
+    pub src_port: u16,         // 2  Source port
+    pub dst_port: u16,         // 2  Destination port
+    pub proto: u8,             // 1  Protocol
+    pub dpi_reason: u8,        // 1  Why this packet was flagged (DPI_REASON_*)
+    pub payload_len: u16,      // 2  Actual payload length available
+    pub timestamp: u64,        // 8  Kernel timestamp (nanoseconds)
+    pub payload_snippet: [u8; 16], // 16  First 16 bytes of L4 payload
+    pub packet_len: u16,       // 2  Total packet length
+    pub entropy_score: u8,     // 1  Computed entropy (0-255 scaled)
+    pub _pad: [u8; 5],        // 5  Padding to 48 bytes
+}
+
+// ============================================================
 // STATISTICS (Per-CPU counters)
 // ============================================================
 
@@ -213,6 +238,7 @@ pub const THREAT_HIGH_ENTROPY: u8 = 9;   // High entropy payload (encrypted C2)
 pub const ACTION_PASS: u8 = 0;
 pub const ACTION_DROP: u8 = 1;
 pub const ACTION_ALERT: u8 = 2;  // Log but don't drop
+pub const ACTION_DPI: u8 = 3;    // Send to DPI suspect queue
 
 // ============================================================
 // HOOK POINT CONSTANTS
@@ -235,6 +261,17 @@ pub const CFG_SCAN_DETECT: u32 = 5;     // Scan detection toggle
 pub const CFG_VERBOSE: u32 = 6;         // Verbose logging toggle
 pub const CFG_ENTROPY: u32 = 7;         // Entropy analysis toggle
 pub const CFG_SKIP_WHITELIST: u32 = 8;  // Skip RFC1918/loopback whitelist (for testing)
+pub const CFG_DPI_ENABLED: u32 = 9;     // Deep Packet Inspection queue toggle
+
+// ============================================================
+// DPI REASON CONSTANTS (why a packet was sent to DPI queue)
+// ============================================================
+
+pub const DPI_REASON_ENTROPY: u8 = 1;     // High entropy payload
+pub const DPI_REASON_RARE_PORT: u8 = 2;   // Unusual destination port
+pub const DPI_REASON_DNS_TUNNEL: u8 = 3;  // Possible DNS tunneling (long query)
+pub const DPI_REASON_UNKNOWN_PROTO: u8 = 4; // Unknown L4 protocol
+pub const DPI_REASON_C2_PATTERN: u8 = 5;  // Short periodic beaconing pattern
 
 // ============================================================
 // AYA POD IMPLEMENTATIONS (userspace only)
@@ -257,6 +294,9 @@ unsafe impl aya::Pod for ConnTrackState {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for LpmKeyIpv4 {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for DpiEvent {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for CidrBlockEntry {}
