@@ -8,6 +8,8 @@ mod dashboard;
 mod dpi;
 mod alerts;
 mod hot_reload;
+mod pcap;
+mod reputation;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
