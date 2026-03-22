@@ -4,6 +4,7 @@ mod feeds;
 mod compat;
 mod geo;
 mod metrics;
+mod dashboard;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
