@@ -38,7 +38,7 @@ use aegis_common::{
     THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
     THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST, THREAT_HIGH_ENTROPY,
     // Actions
-    ACTION_PASS, ACTION_DROP,
+    ACTION_PASS, ACTION_DROP, ACTION_DPI,
     // Hook points
     HOOK_XDP,
     // Connection states
@@ -46,6 +46,9 @@ use aegis_common::{
     // Config keys
     CFG_INTERFACE_MODE, CFG_PORT_SCAN, CFG_RATE_LIMIT, CFG_THREAT_FEEDS,
     CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE, CFG_ENTROPY, CFG_SKIP_WHITELIST,
+    CFG_DPI_ENABLED,
+    // DPI
+    DpiEvent, DPI_REASON_ENTROPY, DPI_REASON_RARE_PORT, DPI_REASON_UNKNOWN_PROTO,
     // IPv6 constants
     REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN,
     // Rate limiting constants
@@ -82,6 +85,10 @@ static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
 /// Per-CPU health statistics
 #[map]
 static STATS: PerCpuArray<Stats> = PerCpuArray::with_max_entries(1, 0);
+
+/// DPI suspect queue — packets flagged for deep inspection
+#[map]
+static DPI_EVENTS: PerfEventArray<DpiEvent> = PerfEventArray::new(0);
 
 /// Rate limit map: IP -> RateLimitState
 #[map]
@@ -596,6 +603,85 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                         proto, tcp_flags, ACTION_DROP, REASON_ENTROPY, THREAT_HIGH_ENTROPY, total_len);
                 }
             }
+        }
+    }
+
+    // --- DPI SUSPECT QUEUE (non-blocking deep inspection) ---
+    // Packets that passed all DROP checks but look suspicious go to DPI queue
+    // for userspace analysis. The packet is still PASSED — this is observe-only.
+    if is_module_enabled(CFG_DPI_ENABLED) && (proto == 6 || proto == 17) {
+        let mut dpi_reason: u8 = 0;
+
+        // Heuristic 1: Rare destination port (not common services)
+        let is_common_port = dst_port == 22 || dst_port == 53 || dst_port == 80 ||
+            dst_port == 443 || dst_port == 8080 || dst_port == 8443 ||
+            dst_port == 25 || dst_port == 110 || dst_port == 143 ||
+            dst_port == 993 || dst_port == 995 || dst_port == 587 ||
+            dst_port == 3306 || dst_port == 5432 || dst_port == 6379;
+        if !is_common_port && dst_port > 0 {
+            dpi_reason = DPI_REASON_RARE_PORT;
+        }
+
+        // Heuristic 2: DNS on non-standard port (possible DNS tunnel)
+        if proto == 17 && src_port == 53 && total_len > 200 {
+            dpi_reason = DPI_REASON_DNS_TUNNEL;
+        }
+
+        if dpi_reason > 0 {
+            // Collect payload snippet (first 16 bytes of L4 payload)
+            let payload_off = if proto == 6 { l4_offset + 20 } else { l4_offset + 8 };
+            let mut snippet = [0u8; 16];
+            let mut snippet_len: u16 = 0;
+
+            let data = ctx.data();
+            let data_end = ctx.data_end();
+
+            // Copy up to 16 bytes of payload — manually unrolled for verifier
+            let avail = if data_end > data + payload_off {
+                data_end - (data + payload_off)
+            } else {
+                0
+            };
+            let copy_len = if avail > 16 { 16 } else { avail };
+            snippet_len = copy_len as u16;
+
+            // Bounds-checked copy (unrolled for eBPF verifier)
+            let check_end = core::hint::black_box(data + payload_off + copy_len);
+            if copy_len > 0 && check_end <= data_end {
+                let p = (data + payload_off) as *const u8;
+                if copy_len >= 1 { snippet[0] = unsafe { *p }; }
+                if copy_len >= 2 { snippet[1] = unsafe { *p.add(1) }; }
+                if copy_len >= 3 { snippet[2] = unsafe { *p.add(2) }; }
+                if copy_len >= 4 { snippet[3] = unsafe { *p.add(3) }; }
+                if copy_len >= 5 { snippet[4] = unsafe { *p.add(4) }; }
+                if copy_len >= 6 { snippet[5] = unsafe { *p.add(5) }; }
+                if copy_len >= 7 { snippet[6] = unsafe { *p.add(6) }; }
+                if copy_len >= 8 { snippet[7] = unsafe { *p.add(7) }; }
+                if copy_len >= 9 { snippet[8] = unsafe { *p.add(8) }; }
+                if copy_len >= 10 { snippet[9] = unsafe { *p.add(9) }; }
+                if copy_len >= 11 { snippet[10] = unsafe { *p.add(10) }; }
+                if copy_len >= 12 { snippet[11] = unsafe { *p.add(11) }; }
+                if copy_len >= 13 { snippet[12] = unsafe { *p.add(12) }; }
+                if copy_len >= 14 { snippet[13] = unsafe { *p.add(13) }; }
+                if copy_len >= 15 { snippet[14] = unsafe { *p.add(14) }; }
+                if copy_len >= 16 { snippet[15] = unsafe { *p.add(15) }; }
+            }
+
+            let evt = DpiEvent {
+                src_ip: src_addr,
+                dst_ip: dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                dpi_reason,
+                payload_len: snippet_len,
+                timestamp: now_ns,
+                payload_snippet: snippet,
+                packet_len: total_len,
+                entropy_score: 0,
+                _pad: [0u8; 5],
+            };
+            let _ = DPI_EVENTS.output(&ctx, &evt, 0);
         }
     }
 

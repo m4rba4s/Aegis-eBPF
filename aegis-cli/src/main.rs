@@ -5,6 +5,7 @@ mod compat;
 mod geo;
 mod metrics;
 mod dashboard;
+mod dpi;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
@@ -878,6 +879,12 @@ async fn main() -> Result<(), anyhow::Error> {
                 match metrics::spawn_metrics_server(None).await {
                     Ok(addr) => tracing::info!(%addr, "prometheus /metrics endpoint started"),
                     Err(e) => tracing::warn!(error = %e, "failed to start metrics endpoint (non-fatal)"),
+                }
+
+                // Spawn DPI worker (reads DPI_EVENTS perf buffer)
+                match dpi::spawn_dpi_worker(&mut bpf) {
+                    Ok(()) => tracing::info!("DPI suspect queue worker active"),
+                    Err(e) => tracing::warn!(error = %e, "DPI worker not started (non-fatal)"),
                 }
                 
                 // Handle both SIGTERM (systemd) and SIGINT (Ctrl+C)
