@@ -12,6 +12,8 @@ mod pcap;
 mod reputation;
 mod stats_history;
 mod tls_fingerprint;
+mod cef_export;
+mod api_ratelimit;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
