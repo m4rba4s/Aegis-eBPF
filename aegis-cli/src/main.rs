@@ -10,6 +10,8 @@ mod alerts;
 mod hot_reload;
 mod pcap;
 mod reputation;
+mod stats_history;
+mod tls_fingerprint;
 
 use aya::{Ebpf, EbpfLoader};
 use aya::programs::{Xdp, XdpFlags, tc, SchedClassifier, TcAttachType};
@@ -896,6 +898,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     "/etc/aegis/config.toml",
                     &format!("/etc/aegis/aegis.yaml"),
                 );
+
+                // Spawn historical stats collector
+                stats_history::spawn_collector();
                 
                 // Handle both SIGTERM (systemd) and SIGINT (Ctrl+C)
                 #[cfg(unix)]
