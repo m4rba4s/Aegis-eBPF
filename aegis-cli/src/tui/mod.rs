@@ -394,26 +394,7 @@ where
             app.logs = shared.clone();
         }
 
-        // Read and aggregate per-CPU stats
-        {
-            if let Ok(stats_map) = stats.lock() {
-                if let Ok(per_cpu) = stats_map.get(&0, 0) {
-                    let mut total = Stats::default();
-                    for cpu_stats in per_cpu.iter() {
-                        total.pkts_seen += cpu_stats.pkts_seen;
-                        total.pkts_pass += cpu_stats.pkts_pass;
-                        total.pkts_drop += cpu_stats.pkts_drop;
-                        total.events_ok += cpu_stats.events_ok;
-                        total.events_fail += cpu_stats.events_fail;
-                        total.block_manual += cpu_stats.block_manual;
-                        total.block_cidr += cpu_stats.block_cidr;
-                        total.portscan_hits += cpu_stats.portscan_hits;
-                        total.conntrack_hits += cpu_stats.conntrack_hits;
-                    }
-                    app.update_stats(&total);
-                }
-            }
-        }
+        // Read and aggregate per-CPU stats on tick (moved to the tick block)
 
         terminal.draw(|f| ui(f, &mut app, &config))?;
 
@@ -442,6 +423,26 @@ where
 
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();
+
+            // Read and aggregate per-CPU stats
+            if let Ok(stats_map) = stats.lock() {
+                if let Ok(per_cpu) = stats_map.get(&0, 0) {
+                    let mut total = Stats::default();
+                    for cpu_stats in per_cpu.iter() {
+                        total.pkts_seen += cpu_stats.pkts_seen;
+                        total.pkts_pass += cpu_stats.pkts_pass;
+                        total.pkts_drop += cpu_stats.pkts_drop;
+                        total.events_ok += cpu_stats.events_ok;
+                        total.events_fail += cpu_stats.events_fail;
+                        total.block_manual += cpu_stats.block_manual;
+                        total.block_cidr += cpu_stats.block_cidr;
+                        total.portscan_hits += cpu_stats.portscan_hits;
+                        total.conntrack_hits += cpu_stats.conntrack_hits;
+                    }
+                    app.update_stats(&total);
+                }
+            }
+
             last_tick = Instant::now();
         }
 
