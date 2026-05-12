@@ -41,11 +41,13 @@
 - **IPv4 + IPv6 Support** — Dual-stack filtering with extension header security
 - **IP Allowlist** — Trusted IPs bypass all checks (config-driven)
 
-### Detection
+### Detection & Mitigation
 - **Port Scan Detection** — Bitmap-based unique port tracking with auto-ban
-- **SYN Flood Protection** — Token bucket rate limiting
+- **SYN Flood Protection** — Token bucket rate limiting (XDP layer)
 - **TCP Anomaly Detection** — Xmas, Null, SYN+FIN scans
-- **Dynamic Auto-Ban** — Flood/scan sources auto-blocked (capped at 512 entries)
+- **TLS ClientHello Fingerprinting** — Native eBPF TLS payload extraction for JA3 scoring
+- **Dynamic Auto-Ban (OODA Loop)** — O(1) lock-free userspace threat mitigation
+- **ConnTrack Garbage Collection** — Clock-synced map cleanup preventing state exhaustion
 
 ### Interface
 - **Interactive TUI** (fd-isolated — zero stdout pollution):
@@ -211,18 +213,22 @@ Aegis-eBPF/
 ├── aegis-common/       # Shared types (Single Source of Truth)
 │   └── src/lib.rs      # PacketLog, Stats, FlowKey, threat/reason constants
 ├── aegis-ebpf/         # XDP ingress program (no_std, eBPF target)
-│   └── src/main.rs     # Packet filtering, rate limiting, scan detection
+│   └── src/main.rs     # Packet filtering, rate limiting, scan detection, TLS parsing
 ├── aegis-tc/           # TC egress program
 │   └── src/main.rs     # Outbound connection blocking
 ├── aegis-cli/          # Userspace controller
 │   ├── build.rs        # Embeds eBPF bytecode at compile time
-│   ├── src/main.rs     # Program loader, event handler, REPL
+│   ├── src/main.rs     # Application bootstrapper
+│   ├── src/event_loop.rs # MPSC Lock-Free Perf Event consumers
+│   ├── src/loader.rs   # eBPF/TC program lifecycles
+│   ├── src/map_manager.rs # Map pinning, sizing, and threat feeds
+│   ├── src/conntrack_gc.rs # Ktime-synced map garbage collection
 │   ├── src/tui/        # Terminal UI (ratatui, fd-isolated)
 │   ├── src/config.rs   # TOML config parser
 │   ├── src/geo.rs      # Offline GeoIP (MaxMind GeoLite2)
 │   ├── src/compat.rs   # Kernel capability detection
 │   └── src/feeds/      # Threat feed parser/downloader
-├── guide/              # Operational guides
+├── guide/              # Operational & Architectural Engineering Guides
 ├── deploy/             # Systemd service files
 ├── Dockerfile          # Reproducible builds
 └── install.sh          # Multi-distro installer
@@ -245,3 +251,4 @@ MIT
 
 ---
 *Crafted with Rust & eBPF*
+
