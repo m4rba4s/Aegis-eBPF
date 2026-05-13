@@ -55,6 +55,17 @@ pub fn setup_config_map(
     config.insert(aegis_common::CFG_VERBOSE, sys_cfg.modules.verbose as u32, 0)?;
     config.insert(aegis_common::CFG_ENTROPY, sys_cfg.modules.entropy as u32, 0)?;
 
+    // DPI (Deep Packet Inspection) — TLS fingerprinting, YARA, entropy analysis
+    config.insert(
+        aegis_common::CFG_DPI_ENABLED,
+        sys_cfg.dpi.enabled as u32,
+        0,
+    )?;
+
+    // Skip RFC1918/loopback whitelist when running on lo/tun (for testing/VPN)
+    let skip_wl: u32 = if iface == "lo" || iface.starts_with("tun") { 1 } else { 0 };
+    config.insert(aegis_common::CFG_SKIP_WHITELIST, skip_wl, 0)?;
+
     Ok(Arc::new(Mutex::new(config)))
 }
 
