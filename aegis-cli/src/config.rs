@@ -1,8 +1,8 @@
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
 use std::fs::File;
 use std::io::BufReader;
-use anyhow::{Context, Result, bail};
+use std::net::Ipv4Addr;
 
 /// Maximum config file size (1 MB) to prevent YAML bomb attacks
 const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
@@ -23,6 +23,10 @@ pub struct Rule {
     pub port: u16,
     #[serde(default)]
     pub proto: String, // "tcp", "udp", "icmp" or numeric
+    #[serde(default)]
+    pub advanced: AdvancedConfig,
+    #[serde(default)]
+    pub webhooks: WebhooksConfig,
     #[serde(default = "default_action")]
     pub action: String,
 }
@@ -33,7 +37,8 @@ fn default_action() -> String {
 
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("Failed to open config file: {}", path))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open config file: {}", path))?;
 
         // SECURITY: Check file size to prevent YAML bomb attacks
         let metadata = file.metadata().context("Failed to read file metadata")?;
@@ -46,12 +51,14 @@ impl Config {
         }
 
         let reader = BufReader::new(file);
-        let config: Config = serde_yaml::from_reader(reader).context("Failed to parse YAML config")?;
+        let config: Config =
+            serde_yaml::from_reader(reader).context("Failed to parse YAML config")?;
         Ok(config)
     }
 
     pub fn save(&self, path: &str) -> Result<()> {
-        let file = File::create(path).with_context(|| format!("Failed to create config file: {}", path))?;
+        let file = File::create(path)
+            .with_context(|| format!("Failed to create config file: {}", path))?;
         serde_yaml::to_writer(file, self).context("Failed to write YAML config")?;
         Ok(())
     }
@@ -92,6 +99,8 @@ pub struct AegisConfig {
     pub allowlist: AllowlistConfig,
     pub webhooks: WebhooksConfig,
     pub dpi: DpiModuleConfig,
+    pub fleet: FleetControllerConfig,
+    pub pcap: PcapConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -125,10 +134,13 @@ pub struct FeedsConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub json: bool,
+    /// Syslog destination for CEF export (e.g. "10.0.0.5:514")
+    pub syslog_dest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AllowlistConfig {
     pub ips: Vec<String>,
 }
@@ -144,6 +156,8 @@ impl Default for AegisConfig {
             allowlist: AllowlistConfig::default(),
             webhooks: WebhooksConfig::default(),
             dpi: DpiModuleConfig::default(),
+            fleet: FleetControllerConfig::default(),
+            pcap: PcapConfig::default(),
         }
     }
 }
@@ -164,26 +178,37 @@ impl Default for ModulesConfig {
 
 impl Default for AutoBanConfig {
     fn default() -> Self {
-        Self { enabled: true, max_entries: 512 }
+        Self {
+            enabled: true,
+            max_entries: 512,
+        }
     }
 }
 
 impl Default for FeedsConfig {
     fn default() -> Self {
-        Self { enabled: true, max_download_bytes: 10 * 1024 * 1024 }
+        Self {
+            enabled: true,
+            max_download_bytes: 10 * 1024 * 1024,
+        }
     }
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        Self { level: "info".into(), json: false }
+        Self {
+            level: "info".into(),
+            json: false,
+            syslog_dest: None,
+        }
     }
 }
 
-impl Default for AllowlistConfig {
-    fn default() -> Self {
-        Self { ips: Vec::new() }
-    }
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+#[derive(Default)]
+pub struct PcapConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -214,6 +239,12 @@ impl Default for WebhooksConfig {
 pub struct DpiModuleConfig {
     pub enabled: bool,
     pub auto_block_threshold: u8,
+    #[serde(default = "default_yara_rules_path")]
+    pub rules_path: String,
+}
+
+fn default_yara_rules_path() -> String {
+    "/etc/aegis/rules".to_string()
 }
 
 impl Default for DpiModuleConfig {
@@ -221,6 +252,7 @@ impl Default for DpiModuleConfig {
         Self {
             enabled: false,
             auto_block_threshold: 80,
+            rules_path: default_yara_rules_path(),
         }
     }
 }
@@ -248,7 +280,11 @@ impl AegisConfig {
                         return cfg;
                     }
                     Err(e) => {
-                        log::error!("Config parse error in {}: {} — using defaults", config_path, e);
+                        log::error!(
+                            "Config parse error in {}: {} — using defaults",
+                            config_path,
+                            e
+                        );
                     }
                 },
                 Err(e) => {
@@ -265,5 +301,135 @@ impl AegisConfig {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(config_path, content)?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+#[derive(Default)]
+pub struct AdvancedConfig {
+    pub allow_all: bool,
+    pub rate_limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct FleetControllerConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub token: String,
+}
+
+impl Default for FleetControllerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "http://127.0.0.1:50051".to_string(),
+            token: "secret-tower-token-auth".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proto() {
+        assert_eq!(parse_proto("tcp"), 6);
+        assert_eq!(parse_proto("udp"), 17);
+        assert_eq!(parse_proto(""), 0);
+        assert_eq!(parse_proto("TCP"), 6);
+    }
+
+    #[test]
+    fn test_proto_to_str() {
+        assert_eq!(proto_to_str(6), "tcp");
+        assert_eq!(proto_to_str(17), "udp");
+        assert_eq!(proto_to_str(0), "0");
+    }
+
+    fn write_temp_file(content: &[u8], name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("{}_{}", name, std::process::id()));
+        let path_str = path.to_str().unwrap().to_string();
+        std::fs::write(&path_str, content).unwrap();
+        path_str
+    }
+
+    #[test]
+    fn test_config_load_valid_yaml() {
+        let yaml = r#"
+rules:
+  - ip: 192.168.1.1
+    port: 80
+    proto: tcp
+    action: drop
+remote_log: "http://10.0.0.1:8080"
+blocked_countries: ["RU", "CN"]
+"#;
+        let path = write_temp_file(yaml.as_bytes(), "test_valid_yaml.yaml");
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.rules.len(), 1);
+        assert_eq!(
+            config.rules[0].ip,
+            "192.168.1.1".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(config.remote_log.unwrap(), "http://10.0.0.1:8080");
+        assert_eq!(config.blocked_countries.len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_invalid_yaml() {
+        let yaml = r#"
+rules:
+  - ip: "not an ip"
+"#;
+        let path = write_temp_file(yaml.as_bytes(), "test_invalid_yaml.yaml");
+        let res = Config::load(&path);
+        assert!(res.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_aegis_config_valid_toml() {
+        let toml = r#"
+interface = "eth1"
+
+[modules]
+port_scan = false
+
+[logging]
+level = "debug"
+"#;
+        let path = write_temp_file(toml.as_bytes(), "test_valid_toml.toml");
+        let config = AegisConfig::load(Some(&path));
+        assert_eq!(config.interface, "eth1");
+        assert_eq!(config.modules.port_scan, false);
+        assert_eq!(config.logging.level, "debug");
+        assert_eq!(config.modules.rate_limit, true); // default
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_aegis_config_missing_file() {
+        let config = AegisConfig::load(Some("/tmp/definitely_does_not_exist_config.toml"));
+        assert_eq!(config.interface, "eth0"); // default
+    }
+
+    #[test]
+    fn test_config_size_limit() {
+        let large_content = vec![b' '; (MAX_CONFIG_SIZE + 10) as usize];
+        let path = write_temp_file(&large_content, "test_large.yaml");
+
+        let res = Config::load(&path);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("too large"));
+
+        let aegis_res = AegisConfig::load(Some(&path));
+        // AegisConfig::load returns default on error
+        assert_eq!(aegis_res.interface, "eth0");
+
+        std::fs::remove_file(path).unwrap();
     }
 }

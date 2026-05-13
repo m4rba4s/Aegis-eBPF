@@ -9,12 +9,9 @@
 
 #![allow(dead_code)]
 
-use std::{
-    time::{Duration, Instant},
-    sync::{Arc, Mutex},
-    collections::VecDeque,
-    net::{IpAddr, Ipv4Addr},
-};
+use crate::geo::SharedGeoLookup;
+use aegis_common::{FlowKey, Stats};
+use aya::maps::{HashMap as BpfHashMap, MapData};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -25,14 +22,16 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Sparkline},
-    Terminal,
-    Frame,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Sparkline, Wrap},
+    Frame, Terminal,
+};
+use std::{
+    collections::VecDeque,
+    net::{IpAddr, Ipv4Addr},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use sysinfo::System;
-use aya::maps::{HashMap as BpfHashMap, MapData};
-use aegis_common::{FlowKey, Stats};
-use crate::geo::SharedGeoLookup;
 
 // ============================================================
 // TAB ENUM
@@ -95,7 +94,10 @@ pub struct ConnectionInfo {
 }
 
 impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
-    pub fn new(blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>, geo_db: SharedGeoLookup) -> Self {
+    pub fn new(
+        blocklist: Arc<Mutex<BpfHashMap<T, FlowKey, u32>>>,
+        geo_db: SharedGeoLookup,
+    ) -> Self {
         let system = System::new_all();
         Self {
             connections: Vec::new(),
@@ -125,11 +127,11 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             let is_private = match ip {
                 IpAddr::V4(ipv4) => {
                     let octets = ipv4.octets();
-                    octets[0] == 10 ||
-                    (octets[0] == 172 && (octets[1] & 0xF0) == 16) ||
-                    (octets[0] == 192 && octets[1] == 168) ||
-                    (octets[0] == 100 && (octets[1] & 0xC0) == 64) ||
-                    octets[0] == 127
+                    octets[0] == 10
+                        || (octets[0] == 172 && (octets[1] & 0xF0) == 16)
+                        || (octets[0] == 192 && octets[1] == 168)
+                        || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+                        || octets[0] == 127
                 }
                 IpAddr::V6(ipv6) => ipv6.is_loopback(),
             };
@@ -170,7 +172,7 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
                             }
                         }
                         None => {
-                             geo = "Unknown".to_string();
+                            geo = "Unknown".to_string();
                         }
                     }
                 } else {
@@ -220,9 +222,17 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
 
     pub fn next(&mut self) {
         let len = self.connections.len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let i = match self.state.selected() {
-            Some(i) => if i >= len - 1 { 0 } else { i + 1 },
+            Some(i) => {
+                if i >= len - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
             None => 0,
         };
         self.state.select(Some(i));
@@ -230,9 +240,17 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
 
     pub fn previous(&mut self) {
         let len = self.connections.len();
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
         let i = match self.state.selected() {
-            Some(i) => if i == 0 { len - 1 } else { i - 1 },
+            Some(i) => {
+                if i == 0 {
+                    len - 1
+                } else {
+                    i - 1
+                }
+            }
             None => 0,
         };
         self.state.select(Some(i));
@@ -282,7 +300,7 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             self.drop_history.pop_front();
         }
 
-        self.last_stats = stats.clone();
+        self.last_stats = *stats;
     }
 }
 
@@ -306,20 +324,26 @@ fn read_proc_net_tcp() -> Vec<RawConnection> {
         if let Ok(content) = read_to_string(file) {
             for line in content.lines().skip(1) {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 4 { continue; }
+                if parts.len() < 4 {
+                    continue;
+                }
 
                 let remote_parts: Vec<&str> = parts[2].split(':').collect();
-                if remote_parts.len() != 2 { continue; }
+                if remote_parts.len() != 2 {
+                    continue;
+                }
 
                 let remote_ip_hex = remote_parts[0];
                 let remote_port_hex = remote_parts[1];
 
                 if let (Ok(ip_u32), Ok(port)) = (
                     u32::from_str_radix(remote_ip_hex, 16),
-                    u16::from_str_radix(remote_port_hex, 16)
+                    u16::from_str_radix(remote_port_hex, 16),
                 ) {
                     let ip = Ipv4Addr::from(u32::from_be(ip_u32));
-                    if ip.is_loopback() || ip.is_unspecified() { continue; }
+                    if ip.is_loopback() || ip.is_unspecified() {
+                        continue;
+                    }
 
                     let proto = if file.contains("tcp") { "TCP" } else { "UDP" };
                     conns.push(RawConnection {
@@ -362,7 +386,8 @@ where
     let saved_stderr = unsafe { libc::dup(2) };
 
     let devnull = std::fs::OpenOptions::new()
-        .read(true).write(true)
+        .read(true)
+        .write(true)
         .open("/dev/null")?;
     unsafe {
         libc::dup2(devnull.as_raw_fd(), 1); // stdout → /dev/null
@@ -471,7 +496,11 @@ where
         // saved_stdout was consumed by from_raw_fd → tty_write → terminal
         // We need a fresh dup of the TTY. Since we just did LeaveAlternateScreen
         // through the backend, the TTY state is clean. Reopen /dev/tty.
-        if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+        if let Ok(tty) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
             libc::dup2(tty.as_raw_fd(), 1);
         }
     }
@@ -488,13 +517,26 @@ fn handle_module_toggle<C: std::borrow::BorrowMut<MapData>>(
     config: &Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
     logs: &mut VecDeque<String>,
 ) {
-    let module_names = ["ALL", "PortScan", "RateLimit", "Threats", "ConnTrack", "ScanDetect", "Verbose", "Entropy", "SkipWList"];
+    let module_names = [
+        "ALL",
+        "PortScan",
+        "RateLimit",
+        "Threats",
+        "ConnTrack",
+        "ScanDetect",
+        "Verbose",
+        "Entropy",
+        "SkipWList",
+    ];
 
     if let Ok(mut cfg) = config.lock() {
         if key == '0' {
             // Toggle all (1 through 8, including Verbose, Entropy, SkipWList)
             let any_on = (1u32..=8u32).any(|k| {
-                let default = match k { 6 | 7 | 8 => 0, _ => 1 };
+                let default = match k {
+                    6..=8 => 0,
+                    _ => 1,
+                };
                 cfg.get(&k, 0).unwrap_or(default) == 1
             });
             let new_val = if any_on { 0u32 } else { 1u32 };
@@ -504,9 +546,12 @@ fn handle_module_toggle<C: std::borrow::BorrowMut<MapData>>(
             let state = if new_val == 1 { "ON" } else { "OFF" };
             logs.push_back(format!("ALL MODULES: {}", state));
         } else if let Some(digit) = key.to_digit(10) {
-            let k = digit as u32;
-            if k >= 1 && k <= 8 {
-                let default = match k { 6 | 7 | 8 => 0, _ => 1 };
+            let k = digit;
+            if (1..=8).contains(&k) {
+                let default = match k {
+                    6..=8 => 0,
+                    _ => 1,
+                };
                 let cur = cfg.get(&k, 0).unwrap_or(default);
                 let new_val = if cur == 1 { 0u32 } else { 1u32 };
                 let _ = cfg.insert(k, new_val, 0);
@@ -522,11 +567,7 @@ fn handle_module_toggle<C: std::borrow::BorrowMut<MapData>>(
 // UI RENDER
 // ============================================================
 
-fn ui<T, C>(
-    f: &mut Frame,
-    app: &mut App<T>,
-    config: &Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>,
-)
+fn ui<T, C>(f: &mut Frame, app: &mut App<T>, config: &Arc<Mutex<aya::maps::HashMap<C, u32, u32>>>)
 where
     T: std::borrow::BorrowMut<MapData> + 'static,
     C: std::borrow::BorrowMut<MapData> + 'static,
@@ -534,10 +575,10 @@ where
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header with stats
-            Constraint::Length(1),  // Tab bar
-            Constraint::Min(10),    // Main content
-            Constraint::Length(3),  // Footer/help
+            Constraint::Length(3), // Header with stats
+            Constraint::Length(1), // Tab bar
+            Constraint::Min(10),   // Main content
+            Constraint::Length(3), // Footer/help
         ])
         .split(f.size());
 
@@ -563,25 +604,34 @@ where
 
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 50)))
-        .block(Block::default().borders(Borders::ALL).title(" AEGIS FIREWALL [FD-ISOLATED] "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" AEGIS FIREWALL [FD-ISOLATED] "),
+        );
     f.render_widget(header, chunks[0]);
 
     // --- TAB BAR ---
-    let tab_titles = vec![
+    let tab_titles = [
         ("Connections", Tab::Connections),
         ("Stats", Tab::Stats),
         ("Logs", Tab::Logs),
     ];
-    let tab_spans: Vec<Span> = tab_titles.iter().map(|(name, tab)| {
-        let style = if *tab == app.current_tab {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        Span::styled(format!(" [{}] ", name), style)
-    }).collect();
-    let tabs = Paragraph::new(Line::from(tab_spans))
-        .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+    let tab_spans: Vec<Span> = tab_titles
+        .iter()
+        .map(|(name, tab)| {
+            let style = if *tab == app.current_tab {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Span::styled(format!(" [{}] ", name), style)
+        })
+        .collect();
+    let tabs =
+        Paragraph::new(Line::from(tab_spans)).style(Style::default().bg(Color::Rgb(20, 20, 30)));
     f.render_widget(tabs, chunks[1]);
 
     // --- MAIN CONTENT ---
@@ -607,7 +657,9 @@ where
         (true, true, true, true, true, false, false, false)
     };
 
-    let on = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let on = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
     let off = Style::default().fg(Color::DarkGray);
     let help = Line::from(vec![
         Span::raw(" "),
@@ -637,8 +689,7 @@ where
         Span::raw(":ALL"),
     ]);
 
-    let footer = Paragraph::new(help)
-        .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+    let footer = Paragraph::new(help).style(Style::default().bg(Color::Rgb(20, 20, 30)));
     f.render_widget(footer, chunks[3]);
 }
 
@@ -657,25 +708,36 @@ fn render_connections<T: std::borrow::BorrowMut<MapData> + 'static>(
         .split(area);
 
     // Connection list
-    let items: Vec<ListItem> = app.connections.iter().map(|c| {
-        let style = if c.is_blocked {
-            Style::default().fg(Color::Red).add_modifier(Modifier::CROSSED_OUT)
-        } else if c.proto == "TCP" {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::Yellow)
-        };
+    let items: Vec<ListItem> = app
+        .connections
+        .iter()
+        .map(|c| {
+            let style = if c.is_blocked {
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::CROSSED_OUT)
+            } else if c.proto == "TCP" {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
 
-        let line = format!(
-            "{:<15} :{:<5} {:3} [{}]",
-            c.ip, c.port, c.proto, c.geo
-        );
-        ListItem::new(line).style(style)
-    }).collect();
+            let line = format!("{:<15} :{:<5} {:3} [{}]", c.ip, c.port, c.proto, c.geo);
+            ListItem::new(line).style(style)
+        })
+        .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Active Connections "))
-        .highlight_style(Style::default().bg(Color::Rgb(50, 50, 80)).add_modifier(Modifier::BOLD))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Active Connections "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(50, 50, 80))
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("> ");
 
     f.render_stateful_widget(list, chunks[0], &mut app.state);
@@ -683,21 +745,62 @@ fn render_connections<T: std::borrow::BorrowMut<MapData> + 'static>(
     // Details panel
     let details = if let Some(i) = app.state.selected() {
         if let Some(conn) = app.connections.get(i) {
-            let status = if conn.is_blocked { "BLOCKED" } else { "ALLOWED" };
-            let status_color = if conn.is_blocked { Color::Red } else { Color::Green };
+            let status = if conn.is_blocked {
+                "BLOCKED"
+            } else {
+                "ALLOWED"
+            };
+            let status_color = if conn.is_blocked {
+                Color::Red
+            } else {
+                Color::Green
+            };
 
-            let isp_display = if conn.isp.is_empty() { "N/A".to_string() } else { conn.isp.clone() };
+            let isp_display = if conn.isp.is_empty() {
+                "N/A".to_string()
+            } else {
+                conn.isp.clone()
+            };
             vec![
-                Line::from(Span::styled("Target Details", Style::default().add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(
+                    "Target Details",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
                 Line::from(""),
-                Line::from(vec![Span::raw("IP:      "), Span::styled(format!("{}", conn.ip), Style::default().fg(Color::White))]),
-                Line::from(vec![Span::raw("Port:    "), Span::styled(format!("{}", conn.port), Style::default().fg(Color::White))]),
-                Line::from(vec![Span::raw("Proto:   "), Span::styled(&conn.proto, Style::default().fg(Color::White))]),
-                Line::from(vec![Span::raw("Geo:     "), Span::styled(&conn.geo, Style::default().fg(Color::Magenta))]),
-                Line::from(vec![Span::raw("ISP:     "), Span::styled(isp_display, Style::default().fg(Color::Yellow))]),
-                Line::from(vec![Span::raw("Status:  "), Span::styled(status, Style::default().fg(status_color).add_modifier(Modifier::BOLD))]),
+                Line::from(vec![
+                    Span::raw("IP:      "),
+                    Span::styled(format!("{}", conn.ip), Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![
+                    Span::raw("Port:    "),
+                    Span::styled(format!("{}", conn.port), Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![
+                    Span::raw("Proto:   "),
+                    Span::styled(&conn.proto, Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![
+                    Span::raw("Geo:     "),
+                    Span::styled(&conn.geo, Style::default().fg(Color::Magenta)),
+                ]),
+                Line::from(vec![
+                    Span::raw("ISP:     "),
+                    Span::styled(isp_display, Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::raw("Status:  "),
+                    Span::styled(
+                        status,
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
                 Line::from(""),
-                Line::from(Span::styled("SPACE to toggle block", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "SPACE to toggle block",
+                    Style::default().fg(Color::DarkGray),
+                )),
             ]
         } else {
             vec![Line::from("Select a connection...")]
@@ -720,9 +823,9 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Packet sparkline
-            Constraint::Length(5),  // Drop sparkline
-            Constraint::Min(5),     // Stats details
+            Constraint::Length(5), // Packet sparkline
+            Constraint::Length(5), // Drop sparkline
+            Constraint::Min(5),    // Stats details
         ])
         .split(area);
 
@@ -732,7 +835,10 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
     let pkt_sum: u64 = pkt_data.iter().sum();
     let pkt_max = pkt_data.iter().copied().max().unwrap_or(1).max(1);
     let sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Pkts/s n={} sum={} max={} ", pkt_len, pkt_sum, pkt_max)))
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            " Pkts/s n={} sum={} max={} ",
+            pkt_len, pkt_sum, pkt_max
+        )))
         .data(&pkt_data)
         .max(pkt_max)
         .style(Style::default().fg(Color::Cyan));
@@ -744,7 +850,10 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
     let drop_sum: u64 = drop_data.iter().sum();
     let drop_max = drop_data.iter().copied().max().unwrap_or(1).max(1);
     let drop_sparkline = Sparkline::default()
-        .block(Block::default().borders(Borders::ALL).title(format!(" Drops/s n={} sum={} max={} ", drop_len, drop_sum, drop_max)))
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            " Drops/s n={} sum={} max={} ",
+            drop_len, drop_sum, drop_max
+        )))
         .data(&drop_data)
         .max(drop_max)
         .style(Style::default().fg(Color::Red));
@@ -755,11 +864,17 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
     let stats_text = vec![
         Line::from(vec![
             Span::raw("Total Packets:     "),
-            Span::styled(format_num(stats.pkts_seen), Style::default().fg(Color::White)),
+            Span::styled(
+                format_num(stats.pkts_seen),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Passed:            "),
-            Span::styled(format_num(stats.pkts_pass), Style::default().fg(Color::Green)),
+            Span::styled(
+                format_num(stats.pkts_pass),
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Dropped:           "),
@@ -768,28 +883,46 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
         Line::from(""),
         Line::from(vec![
             Span::raw("Manual Blocks:     "),
-            Span::styled(format!("{}", stats.block_manual), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", stats.block_manual),
+                Style::default().fg(Color::Yellow),
+            ),
         ]),
         Line::from(vec![
             Span::raw("CIDR Blocks:       "),
-            Span::styled(format!("{}", stats.block_cidr), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", stats.block_cidr),
+                Style::default().fg(Color::Yellow),
+            ),
         ]),
         Line::from(vec![
             Span::raw("ConnTrack Hits:    "),
-            Span::styled(format_num(stats.conntrack_hits), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format_num(stats.conntrack_hits),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(vec![
             Span::raw("PortScan Detect:   "),
-            Span::styled(format!("{}", stats.portscan_hits), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("{}", stats.portscan_hits),
+                Style::default().fg(Color::Magenta),
+            ),
         ]),
         Line::from(vec![
             Span::raw("Events OK/Fail:    "),
-            Span::styled(format!("{}/{}", stats.events_ok, stats.events_fail), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}/{}", stats.events_ok, stats.events_fail),
+                Style::default().fg(Color::White),
+            ),
         ]),
     ];
 
-    let stats_widget = Paragraph::new(stats_text)
-        .block(Block::default().borders(Borders::ALL).title(" Detailed Statistics "));
+    let stats_widget = Paragraph::new(stats_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Detailed Statistics "),
+    );
     f.render_widget(stats_widget, chunks[2]);
 }
 
@@ -798,19 +931,28 @@ fn render_logs<T: std::borrow::BorrowMut<MapData> + 'static>(
     app: &mut App<T>,
     area: Rect,
 ) {
-    let items: Vec<ListItem> = app.logs.iter().rev().take(50).map(|log| {
-        let style = if log.contains("BLOCK") || log.contains("DROP") || log.contains("SCAN") {
-            Style::default().fg(Color::Red)
-        } else if log.contains("UNBLOCK") || log.contains("PASS") {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        ListItem::new(log.as_str()).style(style)
-    }).collect();
+    let items: Vec<ListItem> = app
+        .logs
+        .iter()
+        .rev()
+        .take(50)
+        .map(|log| {
+            let style = if log.contains("BLOCK") || log.contains("DROP") || log.contains("SCAN") {
+                Style::default().fg(Color::Red)
+            } else if log.contains("UNBLOCK") || log.contains("PASS") {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            ListItem::new(log.as_str()).style(style)
+        })
+        .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Security Events "));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Security Events "),
+    );
     f.render_widget(list, area);
 }
 

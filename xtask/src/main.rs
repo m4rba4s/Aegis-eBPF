@@ -3,10 +3,10 @@
 //! Build automation for eBPF programs.
 //! IMPORTANT: All outputs go to workspace target/ directory for consistency.
 
-use std::process::Command;
-use std::path::PathBuf;
-use std::env;
 use clap::Parser;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Parser)]
 pub struct Options {
@@ -51,9 +51,13 @@ fn main() -> anyhow::Result<()> {
         CommandOpts::BuildTc(opts) => build_tc(opts),
         CommandOpts::BuildAll(opts) => {
             println!("🔨 Building all eBPF programs...\n");
-            build_ebpf(BuildEbpfOpts { profile: opts.profile.clone() })?;
+            build_ebpf(BuildEbpfOpts {
+                profile: opts.profile.clone(),
+            })?;
             println!();
-            build_tc(BuildTcOpts { profile: opts.profile })?;
+            build_tc(BuildTcOpts {
+                profile: opts.profile,
+            })?;
             println!("\n✅ All eBPF programs built successfully!");
             Ok(())
         }
@@ -75,13 +79,25 @@ fn main() -> anyhow::Result<()> {
 fn build_ebpf(opts: BuildEbpfOpts) -> anyhow::Result<()> {
     let workspace_root = get_workspace_root()?;
     let crate_dir = workspace_root.join("aegis-ebpf");
-    build_bpf_crate(&crate_dir, &workspace_root, &opts.profile, "aegis-ebpf", "aegis")
+    build_bpf_crate(
+        &crate_dir,
+        &workspace_root,
+        &opts.profile,
+        "aegis-ebpf",
+        "aegis",
+    )
 }
 
 fn build_tc(opts: BuildTcOpts) -> anyhow::Result<()> {
     let workspace_root = get_workspace_root()?;
     let crate_dir = workspace_root.join("aegis-tc");
-    build_bpf_crate(&crate_dir, &workspace_root, &opts.profile, "aegis-tc", "aegis-tc")
+    build_bpf_crate(
+        &crate_dir,
+        &workspace_root,
+        &opts.profile,
+        "aegis-tc",
+        "aegis-tc",
+    )
 }
 
 fn get_workspace_root() -> anyhow::Result<PathBuf> {
@@ -99,14 +115,17 @@ fn get_workspace_root() -> anyhow::Result<PathBuf> {
 
         if !current.pop() {
             // Fallback: assume we're in xtask, go up one level
-            return Ok(env::current_dir()?.parent().unwrap_or(&env::current_dir()?).to_path_buf());
+            return Ok(env::current_dir()?
+                .parent()
+                .unwrap_or(&env::current_dir()?)
+                .to_path_buf());
         }
     }
 }
 
 fn build_bpf_crate(
-    crate_dir: &PathBuf,
-    workspace_root: &PathBuf,
+    crate_dir: &Path,
+    workspace_root: &Path,
     profile: &str,
     name: &str,
     bin_name: &str,
@@ -144,11 +163,12 @@ fn build_bpf_crate(
     }
 
     // Verify output exists
-    let profile_dir = if profile == "release" { "release" } else { "debug" };
-    let output_path = target_dir
-        .join(target)
-        .join(profile_dir)
-        .join(bin_name);
+    let profile_dir = if profile == "release" {
+        "release"
+    } else {
+        "debug"
+    };
+    let output_path = target_dir.join(target).join(profile_dir).join(bin_name);
 
     if output_path.exists() {
         println!("✅ {} built successfully", name);

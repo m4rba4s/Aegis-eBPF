@@ -54,12 +54,12 @@ pub fn check_rate_limit(ip: IpAddr) -> bool {
 
     // Evict old entries periodically (every 1000 entries)
     if limiter.buckets.len() > 1000 {
-        limiter.buckets.retain(|_, bucket| {
-            match bucket.blocked_until {
+        limiter
+            .buckets
+            .retain(|_, bucket| match bucket.blocked_until {
                 Some(until) if until < now => false,
                 _ => now.duration_since(bucket.last_refill) < Duration::from_secs(600),
-            }
-        });
+            });
     }
 
     let bucket = limiter.buckets.entry(ip).or_insert(ClientBucket {

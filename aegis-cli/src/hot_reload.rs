@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::time::Duration;
 use tokio::time;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::config::AegisConfig;
 
@@ -49,7 +49,10 @@ pub fn spawn_config_watcher(toml_path: &str, yaml_path: &str) {
         }
     });
 
-    info!("🔄 Config hot-reload watcher active (poll {}s)", POLL_INTERVAL_SECS);
+    info!(
+        "🔄 Config hot-reload watcher active (poll {}s)",
+        POLL_INTERVAL_SECS
+    );
 }
 
 /// Get file modification timestamp (returns 0 if file doesn't exist)
@@ -68,12 +71,11 @@ fn apply_toml_config(path: &str) {
     let cfg = AegisConfig::load(Some(path));
 
     // Update BPF CONFIG map with module toggles
-    use aya::maps::HashMap;
     use aegis_common::{
-        CFG_PORT_SCAN, CFG_RATE_LIMIT, CFG_THREAT_FEEDS,
-        CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE, CFG_ENTROPY,
-        CFG_DPI_ENABLED,
+        CFG_CONN_TRACK, CFG_DPI_ENABLED, CFG_ENTROPY, CFG_PORT_SCAN, CFG_RATE_LIMIT,
+        CFG_SCAN_DETECT, CFG_THREAT_FEEDS, CFG_VERBOSE,
     };
+    use aya::maps::HashMap;
 
     let map_path = "/sys/fs/bpf/aegis/CONFIG";
     let md = match aya::maps::MapData::from_pin(map_path) {
@@ -111,7 +113,10 @@ fn apply_toml_config(path: &str) {
         }
     }
 
-    info!(updated = updated, "BPF CONFIG map reloaded — {} module toggles applied", updated);
+    info!(
+        updated = updated,
+        "BPF CONFIG map reloaded — {} module toggles applied", updated
+    );
 }
 
 /// Apply YAML rule changes to BPF BLOCKLIST map
@@ -124,8 +129,8 @@ fn apply_yaml_rules(path: &str) {
         }
     };
 
-    use aya::maps::HashMap;
     use aegis_common::FlowKey;
+    use aya::maps::HashMap;
 
     let map_path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let md = match aya::maps::MapData::from_pin(map_path) {
@@ -148,7 +153,7 @@ fn apply_yaml_rules(path: &str) {
     for rule in &cfg.rules {
         if rule.action.to_lowercase() == "drop" {
             let key = FlowKey {
-                src_ip: u32::from(rule.ip),
+                src_ip: u32::from(rule.ip).to_be(), // Network Byte Order for BPF map
                 dst_port: rule.port,
                 proto: crate::config::parse_proto(&rule.proto),
                 _pad: 0,
@@ -159,5 +164,8 @@ fn apply_yaml_rules(path: &str) {
         }
     }
 
-    info!(rules = loaded, "BLOCKLIST reloaded — {} drop rules applied", loaded);
+    info!(
+        rules = loaded,
+        "BLOCKLIST reloaded — {} drop rules applied", loaded
+    );
 }

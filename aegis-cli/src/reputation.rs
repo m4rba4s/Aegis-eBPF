@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Maximum entries in the score cache
 const CACHE_MAX: usize = 4096;
@@ -29,7 +29,7 @@ static CACHE: std::sync::LazyLock<RwLock<ReputationCache>> =
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReputationScore {
     pub ip: String,
-    pub score: u8,               // 0 (clean) → 100 (malicious)
+    pub score: u8,                // 0 (clean) → 100 (malicious)
     pub risk_level: &'static str, // "low", "medium", "high", "critical"
     pub factors: Vec<String>,
     pub cached: bool,
@@ -70,10 +70,13 @@ impl ReputationCache {
             self.entries.retain(|_, v| v.expires > now);
         }
 
-        self.entries.insert(ip, CacheEntry {
-            score,
-            expires: Instant::now() + Duration::from_secs(CACHE_TTL_SECS),
-        });
+        self.entries.insert(
+            ip,
+            CacheEntry {
+                score,
+                expires: Instant::now() + Duration::from_secs(CACHE_TTL_SECS),
+            },
+        );
     }
 }
 
@@ -171,6 +174,7 @@ pub fn lookup(ip_str: &str, abuseipdb_key: Option<&str>) -> ReputationScore {
 }
 
 /// Record a DPI hit for an IP (boosts reputation score on next lookup)
+#[allow(dead_code)] // Reserved API — wired when DPI confidence scores feed reputation
 pub fn record_dpi_hit(ip: u32) {
     // Invalidate cache so next lookup recomputes with fresh data
     if let Ok(mut cache) = CACHE.write() {
@@ -183,27 +187,51 @@ pub fn record_dpi_hit(ip: u32) {
 fn is_on_blocklist(ip: u32) -> bool {
     use aya::maps::HashMap;
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else { return false };
+    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+        return false;
+    };
     let map = aya::maps::Map::HashMap(md);
-    let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) else { return false };
+    let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) else {
+        return false;
+    };
     hm.get(&ip, 0).is_ok()
 }
 
 fn is_on_allowlist(ip: u32) -> bool {
     use aya::maps::HashMap;
     let path = "/sys/fs/bpf/aegis/ALLOWLIST";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else { return false };
+    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+        return false;
+    };
     let map = aya::maps::Map::HashMap(md);
-    let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) else { return false };
+    let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) else {
+        return false;
+    };
     hm.get(&ip, 0).is_ok()
 }
 
-fn is_on_cidr_feed(_ip: u32) -> bool {
-    // LPM Trie lookup from pinned map
-    // Simplified: check if /sys/fs/bpf/aegis/CIDR_BLOCKLIST exists
-    // Full implementation would do LPM lookup
-    std::path::Path::new("/sys/fs/bpf/aegis/CIDR_BLOCKLIST").exists()
-        && false // conservative: only flag if we can actually query
+fn is_on_cidr_feed(ip: u32) -> bool {
+    // LPM Trie lookup from pinned CIDR_BLOCKLIST map
+    use aegis_common::LpmKeyIpv4;
+
+    let path = "/sys/fs/bpf/aegis/CIDR_BLOCKLIST";
+    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+        return false;
+    };
+    let map = aya::maps::Map::LpmTrie(md);
+    let Ok(trie) = aya::maps::lpm_trie::LpmTrie::<_, LpmKeyIpv4, u32>::try_from(map) else {
+        return false;
+    };
+
+    // Build a /32 key (exact match) — LPM Trie will find the longest matching prefix
+    let key = aya::maps::lpm_trie::Key::new(
+        32,
+        LpmKeyIpv4 {
+            prefix_len: 32,
+            addr: ip, // Already in network byte order from caller
+        },
+    );
+    trie.get(&key, 0).is_ok()
 }
 
 // ── AbuseIPDB Query ─────────────────────────────────────────────────
@@ -247,5 +275,92 @@ fn unknown_score(ip: &str) -> ReputationScore {
         risk_level: "unknown",
         factors: vec!["invalid_ip".to_string()],
         cached: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unknown_score() {
+        let score = unknown_score("not_an_ip");
+        assert_eq!(score.score, 0);
+        assert_eq!(score.risk_level, "unknown");
+        assert!(score.factors.contains(&"invalid_ip".to_string()));
+    }
+
+    #[test]
+    fn test_rfc1918_private_ips() {
+        let ip = "10.0.0.1";
+        // This will naturally bypass map lookups when not run as root (returns false)
+        let score = lookup(ip, None);
+        assert_eq!(score.score, 0);
+        assert!(score.factors.contains(&"private_rfc1918 (-20)".to_string()));
+    }
+
+    #[test]
+    fn test_cache_ttl() {
+        let mut cache = ReputationCache::new();
+        let ip: u32 = 0x01020304; // 1.2.3.4
+
+        let score = ReputationScore {
+            ip: "1.2.3.4".to_string(),
+            score: 50,
+            risk_level: "medium",
+            factors: vec![],
+            cached: false,
+        };
+
+        // Insert
+        cache.insert(ip, score.clone());
+
+        // Get should return cached=true
+        let cached = cache.get(ip).unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.score, 50);
+
+        // Manually expire the entry
+        if let Some(entry) = cache.entries.get_mut(&ip) {
+            entry.expires = Instant::now() - Duration::from_secs(1);
+        }
+
+        // Get should return None
+        assert!(cache.get(ip).is_none());
+    }
+
+    // Pure function duplicating logic for testability without BPF/HTTP dependencies
+    fn compute_score_pure(
+        is_blocked: bool,
+        is_allowed: bool,
+        is_cidr: bool,
+        abuse_score: Option<u8>,
+        is_private: bool,
+    ) -> u8 {
+        let mut score: u16 = 0;
+        if is_blocked {
+            score += 40;
+        }
+        if is_allowed {
+            score = score.saturating_sub(30);
+        }
+        if is_cidr {
+            score += 30;
+        }
+        if is_private {
+            score = score.saturating_sub(20);
+        }
+        if let Some(ab) = abuse_score {
+            score += (ab as u16) / 3;
+        }
+        score.min(100) as u8
+    }
+
+    #[test]
+    fn test_score_clamping() {
+        // Clamping at 100
+        assert_eq!(compute_score_pure(true, false, true, Some(100), false), 100); // 40 + 30 + 33 = 103 -> 100
+                                                                                  // Clamping at 0
+        assert_eq!(compute_score_pure(false, true, false, None, true), 0); // -30 - 20 -> 0
     }
 }

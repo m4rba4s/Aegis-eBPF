@@ -25,7 +25,10 @@ fn main() {
         println!("cargo:rustc-cfg=embedded_xdp");
         eprintln!("build.rs: Found XDP object at {}", canonical.display());
     } else {
-        eprintln!("build.rs: XDP object not found at {:?}, embedding disabled", xdp_path);
+        eprintln!(
+            "build.rs: XDP object not found at {:?}, embedding disabled",
+            xdp_path
+        );
     }
 
     // Check for TC eBPF object
@@ -36,7 +39,10 @@ fn main() {
         println!("cargo:rustc-cfg=embedded_tc");
         eprintln!("build.rs: Found TC object at {}", canonical.display());
     } else {
-        eprintln!("build.rs: TC object not found at {:?}, embedding disabled", tc_path);
+        eprintln!(
+            "build.rs: TC object not found at {:?}, embedding disabled",
+            tc_path
+        );
     }
 
     // ── Build metadata for --version ──────────────────────────
@@ -69,4 +75,7 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=AEGIS_RUSTC={}", rustc_ver);
+
+    println!("cargo:rerun-if-changed=../proto/aegis.proto");
+    tonic_build::compile_protos("../proto/aegis.proto").unwrap();
 }

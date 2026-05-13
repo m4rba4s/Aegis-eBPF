@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 const GEODB_PATHS: &[&str] = &[
     "/var/lib/aegis/GeoLite2-City.mmdb",
-    "/usr/share/GeoIP/GeoLite2-City.mmdb",     // Debian/Ubuntu default
-    "/usr/share/GeoIP2/GeoLite2-City.mmdb",     // Fedora
+    "/usr/share/GeoIP/GeoLite2-City.mmdb", // Debian/Ubuntu default
+    "/usr/share/GeoIP2/GeoLite2-City.mmdb", // Fedora
     "/usr/local/share/GeoIP/GeoLite2-City.mmdb",
-    "GeoLite2-City.mmdb",                        // Local dev
+    "GeoLite2-City.mmdb", // Local dev
 ];
 
 pub struct GeoLookup {
@@ -19,7 +19,7 @@ pub struct GeoLookup {
 pub struct GeoResult {
     pub country_code: String,
     pub city: String,
-    pub isp: String,  // Not available in GeoLite2-City (requires ASN db), kept for API compatibility
+    pub isp: String, // Not available in GeoLite2-City (requires ASN db), kept for API compatibility
 }
 
 impl GeoLookup {
@@ -46,13 +46,15 @@ impl GeoLookup {
     pub fn lookup(&self, ip: IpAddr) -> Option<GeoResult> {
         let city: geoip2::City = self.reader.lookup(ip).ok()?;
 
-        let country_code = city.country
+        let country_code = city
+            .country
             .as_ref()
             .and_then(|c| c.iso_code)
             .unwrap_or("??")
             .to_string();
 
-        let city_name = city.city
+        let city_name = city
+            .city
             .as_ref()
             .and_then(|c| c.names.as_ref())
             .and_then(|n| n.get("en"))

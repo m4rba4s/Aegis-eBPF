@@ -7,7 +7,7 @@
 //! In-memory only — no disk persistence (intentional for security).
 
 use std::sync::RwLock;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Sampling interval
 const SAMPLE_INTERVAL_SECS: u64 = 10;
@@ -23,7 +23,7 @@ static HISTORY: std::sync::LazyLock<RwLock<StatsHistory>> =
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatsSample {
-    pub timestamp: u64,    // Unix epoch seconds
+    pub timestamp: u64, // Unix epoch seconds
     pub pkts_seen: u64,
     pub pkts_pass: u64,
     pub pkts_drop: u64,
@@ -76,7 +76,11 @@ impl StatsHistory {
         let mut result = Vec::with_capacity(self.count);
 
         // Read in chronological order from the ring buffer
-        let start = if self.samples.len() < MAX_SAMPLES { 0 } else { self.head };
+        let start = if self.samples.len() < MAX_SAMPLES {
+            0
+        } else {
+            self.head
+        };
         for i in 0..self.count {
             let idx = (start + i) % MAX_SAMPLES;
             let sample = &self.samples[idx];
@@ -148,17 +152,17 @@ pub fn get_history_json(last_minutes: Option<u64>) -> String {
 pub fn spawn_collector() {
     tokio::spawn(async {
         let mut interval = tokio::time::interval(Duration::from_secs(SAMPLE_INTERVAL_SECS));
-        tracing::info!("📊 Stats history collector started ({}s interval, 24h window)", SAMPLE_INTERVAL_SECS);
+        tracing::info!(
+            "📊 Stats history collector started ({}s interval, 24h window)",
+            SAMPLE_INTERVAL_SECS
+        );
 
         loop {
             interval.tick().await;
 
             // Read current stats from BPF STATS map
-            match read_bpf_stats() {
-                Some((seen, pass, drop, manual, cidr, scan, ct)) => {
-                    record_sample(seen, pass, drop, manual, cidr, scan, ct);
-                }
-                None => {} // BPF not attached yet, skip
+            if let Some((seen, pass, drop, manual, cidr, scan, ct)) = read_bpf_stats() {
+                record_sample(seen, pass, drop, manual, cidr, scan, ct);
             }
         }
     });
@@ -166,8 +170,8 @@ pub fn spawn_collector() {
 
 /// Read aggregated stats from BPF PerCpuArray
 fn read_bpf_stats() -> Option<(u64, u64, u64, u64, u64, u64, u64)> {
-    use aya::maps::PerCpuArray;
     use aegis_common::Stats;
+    use aya::maps::PerCpuArray;
 
     let path = "/sys/fs/bpf/aegis/STATS";
     let md = aya::maps::MapData::from_pin(path).ok()?;

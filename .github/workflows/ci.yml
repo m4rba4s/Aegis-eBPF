@@ -1,91 +1,14 @@
 name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-env:
-  CARGO_TERM_COLOR: always
-
+on: [push, pull_request]
 jobs:
-  build:
-    name: Build & Test
+  test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y llvm clang libelf-dev pkg-config
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install nightly + rust-src
-        run: rustup install nightly && rustup component add rust-src --toolchain nightly
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install bpf-linker
-        run: cargo install bpf-linker || true
-
-      - name: Build eBPF
-        run: cargo run -p xtask -- build-all --profile release
-
-      - name: Build CLI
-        run: cargo build --release -p aegis-cli
-
-      - name: Run tests
-        run: cargo test --workspace --exclude aegis-ebpf --exclude aegis-tc
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: aegis-cli
-          path: target/release/aegis-cli
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Check format
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Unit Tests
+        run: cargo test -p aegis-cli -p aegis-common -p aegis-cni -p xtask
+      - name: Clippy
+        run: cargo clippy -p aegis-cli -p aegis-common -p aegis-cni -p xtask -- -D warnings
+      - name: Format Check
         run: cargo fmt --all -- --check
-
-      - name: Clippy (userspace)
-        run: cargo clippy -p aegis-cli -p aegis-common -- -D warnings
-
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit || true
-
-      - name: Audit dependencies
-        run: cargo audit

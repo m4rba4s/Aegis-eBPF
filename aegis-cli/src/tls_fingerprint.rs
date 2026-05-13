@@ -10,34 +10,33 @@
 
 use std::collections::HashMap;
 use std::sync::RwLock;
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Known-bad JA3 fingerprints (Cobalt Strike, Metasploit, common RATs)
 /// Source: ja3er.com + internal threat intel
-static KNOWN_BAD_JA3: std::sync::LazyLock<HashMap<&str, &str>> =
-    std::sync::LazyLock::new(|| {
-        let mut m = HashMap::new();
-        // Cobalt Strike default HTTPS beacon
-        m.insert("72a589da586844d7f0818ce684948eea", "CobaltStrike_HTTPS");
-        m.insert("a0e9f5d64349fb13191bc781f81f42e1", "CobaltStrike_4.0");
-        m.insert("6734f37431670b3ab4292b8f60f29984", "CobaltStrike_3.x");
-        // Metasploit / Meterpreter
-        m.insert("b386946a5a44d1ddcc843bc75336dfce", "Metasploit_Meterpreter");
-        m.insert("e35df3e00ca4ef31d42b34bebaa2f86e", "Metasploit_HTTPS");
-        // Empire
-        m.insert("d0ec4b50a944b182fc10ff51f883ccae", "Empire_C2");
-        // Trickbot
-        m.insert("6734f37431670b3ab4292b8f60f29984", "Trickbot");
-        // PoshC2
-        m.insert("2c14bfb3f8a2e2e33a6773cd933a1e27", "PoshC2");
-        // Sliver C2
-        m.insert("cd08e31494f9531f560d64c695473da9", "Sliver_C2");
-        // Havoc C2
-        m.insert("3b5074b1b5d032e5620f69f9f700ff0e", "Havoc_C2");
-        // Generic suspicious (empty extensions = old/custom TLS)
-        m.insert("e7d705a3286e19ea42f587b344ee6865", "Empty_Extensions");
-        m
-    });
+static KNOWN_BAD_JA3: std::sync::LazyLock<HashMap<&str, &str>> = std::sync::LazyLock::new(|| {
+    let mut m = HashMap::new();
+    // Cobalt Strike default HTTPS beacon
+    m.insert("72a589da586844d7f0818ce684948eea", "CobaltStrike_HTTPS");
+    m.insert("a0e9f5d64349fb13191bc781f81f42e1", "CobaltStrike_4.0");
+    m.insert("6734f37431670b3ab4292b8f60f29984", "CobaltStrike_3.x");
+    // Metasploit / Meterpreter
+    m.insert("b386946a5a44d1ddcc843bc75336dfce", "Metasploit_Meterpreter");
+    m.insert("e35df3e00ca4ef31d42b34bebaa2f86e", "Metasploit_HTTPS");
+    // Empire
+    m.insert("d0ec4b50a944b182fc10ff51f883ccae", "Empire_C2");
+    // Trickbot
+    m.insert("6734f37431670b3ab4292b8f60f29984", "Trickbot");
+    // PoshC2
+    m.insert("2c14bfb3f8a2e2e33a6773cd933a1e27", "PoshC2");
+    // Sliver C2
+    m.insert("cd08e31494f9531f560d64c695473da9", "Sliver_C2");
+    // Havoc C2
+    m.insert("3b5074b1b5d032e5620f69f9f700ff0e", "Havoc_C2");
+    // Generic suspicious (empty extensions = old/custom TLS)
+    m.insert("e7d705a3286e19ea42f587b344ee6865", "Empty_Extensions");
+    m
+});
 
 /// Recent JA3 sightings cache (IP → last seen JA3)
 static JA3_CACHE: std::sync::LazyLock<RwLock<HashMap<u32, JA3Entry>>> =
@@ -69,34 +68,39 @@ pub struct TlsClientHello {
 /// Compute JA3 string and MD5 hash from TLS ClientHello fields
 pub fn compute_ja3(hello: &TlsClientHello) -> (String, String) {
     // Build JA3 string: TLSVersion,Ciphers,Extensions,EllipticCurves,ECPointFormats
-    let ciphers = hello.cipher_suites
+    let ciphers = hello
+        .cipher_suites
         .iter()
         .filter(|&&c| !is_grease(c))
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
         .join("-");
 
-    let extensions = hello.extensions
+    let extensions = hello
+        .extensions
         .iter()
         .filter(|&&e| !is_grease(e))
         .map(|e| e.to_string())
         .collect::<Vec<_>>()
         .join("-");
 
-    let curves = hello.elliptic_curves
+    let curves = hello
+        .elliptic_curves
         .iter()
         .filter(|&&c| !is_grease(c))
         .map(|c| c.to_string())
         .collect::<Vec<_>>()
         .join("-");
 
-    let formats = hello.ec_point_formats
+    let formats = hello
+        .ec_point_formats
         .iter()
         .map(|f| f.to_string())
         .collect::<Vec<_>>()
         .join("-");
 
-    let ja3_string = format!("{},{},{},{},{}",
+    let ja3_string = format!(
+        "{},{},{},{},{}",
         hello.tls_version, ciphers, extensions, curves, formats
     );
 
@@ -139,7 +143,8 @@ pub fn process_hello(hello: &TlsClientHello) -> Option<JA3Entry> {
         } else {
             // Evict old entries if at capacity
             if cache.len() >= 2048 {
-                let oldest_key = cache.iter()
+                let oldest_key = cache
+                    .iter()
                     .min_by_key(|(_, v)| v.last_seen)
                     .map(|(&k, _)| k);
                 if let Some(key) = oldest_key {
@@ -166,17 +171,20 @@ pub fn process_hello(hello: &TlsClientHello) -> Option<JA3Entry> {
 /// Get all cached JA3 entries as JSON
 pub fn get_ja3_cache_json() -> String {
     let entries: Vec<_> = if let Ok(cache) = JA3_CACHE.read() {
-        cache.iter().map(|(&ip, entry)| {
-            serde_json::json!({
-                "ip": std::net::Ipv4Addr::from(u32::from_be(ip)).to_string(),
-                "ja3_hash": entry.ja3_hash,
-                "ja3_string": entry.ja3_string,
-                "match": entry.match_name,
-                "first_seen": entry.first_seen,
-                "last_seen": entry.last_seen,
-                "count": entry.count,
+        cache
+            .iter()
+            .map(|(&ip, entry)| {
+                serde_json::json!({
+                    "ip": std::net::Ipv4Addr::from(u32::from_be(ip)).to_string(),
+                    "ja3_hash": entry.ja3_hash,
+                    "ja3_string": entry.ja3_string,
+                    "match": entry.match_name,
+                    "first_seen": entry.first_seen,
+                    "last_seen": entry.last_seen,
+                    "count": entry.count,
+                })
             })
-        }).collect()
+            .collect()
     } else {
         Vec::new()
     };
@@ -214,21 +222,22 @@ impl std::fmt::LowerHex for Md5Hash {
 fn md5_simple(data: &[u8]) -> Md5Hash {
     // MD5 constants
     const S: [u32; 64] = [
-        7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
-        5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
-        4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
-        6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
 
     const K: [u32; 64] = [
-        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
-        0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
-        0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
-        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
-        0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
-        0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
-        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
-        0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391,
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
     ];
 
     let mut a0: u32 = 0x67452301;
@@ -266,8 +275,7 @@ fn md5_simple(data: &[u8]) -> Md5Hash {
             d = c;
             c = b;
             b = b.wrapping_add(
-                (a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]))
-                    .rotate_left(S[i]),
+                (a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g])).rotate_left(S[i]),
             );
             a = temp;
         }

@@ -1,10 +1,10 @@
 //! Loader for CIDR blocklist into eBPF map
 
+use aegis_common::{CidrBlockEntry, LpmKeyIpv4, CAT_ABUSE_CH, CAT_FIREHOL, CAT_SPAMHAUS};
 use aya::maps::lpm_trie::LpmTrie;
 use aya::maps::MapData;
-use aegis_common::{LpmKeyIpv4, CidrBlockEntry, CAT_SPAMHAUS, CAT_ABUSE_CH, CAT_FIREHOL};
 
-use super::{FeedConfig, FeedCategory, download_feed_blocking};
+use super::{download_feed_blocking, FeedCategory, FeedConfig};
 
 /// Load all enabled feeds into the CIDR blocklist eBPF map
 /// Now preserves real CIDR prefix lengths for proper LPM matching
@@ -14,7 +14,7 @@ pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
 ) -> Result<usize, String> {
     let mut total_loaded = 0usize;
     let mut errors = 0usize;
-    
+
     for config in configs.iter().filter(|c| c.enabled) {
         match download_feed_blocking(config) {
             Ok(result) => {
@@ -25,22 +25,22 @@ pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
                     FeedCategory::CountryBlock => 6, // Dedicated category ID
                     _ => 0,
                 };
-                
+
                 for entry in result.entries.iter() {
                     // Use real prefix_len from the feed
                     let key = aya::maps::lpm_trie::Key::new(
                         entry.prefix_len as u32,
                         LpmKeyIpv4 {
                             prefix_len: entry.prefix_len as u32,
-                            addr: entry.addr,  // Already in network byte order
+                            addr: entry.addr, // Already in network byte order
                         },
                     );
-                    
+
                     let bpf_entry = CidrBlockEntry {
                         category,
                         _pad: [0u8; 3],
                     };
-                    
+
                     // Insert, count errors (map might be full)
                     if cidr_map.insert(&key, bpf_entry, 0).is_ok() {
                         total_loaded += 1;
@@ -48,9 +48,12 @@ pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
                         errors += 1;
                     }
                 }
-                
-                println!("  ✓ {} {} entries (prefix ranges preserved)", 
-                    config.name, result.entry_count());
+
+                println!(
+                    "  ✓ {} {} entries (prefix ranges preserved)",
+                    config.name,
+                    result.entry_count()
+                );
             }
             Err(e) => {
                 println!("  ✗ {} failed: {}", config.name, e);
@@ -58,10 +61,10 @@ pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
             }
         }
     }
-    
+
     if errors > 0 {
         println!("  ⚠ {} entries failed to insert (map may be full)", errors);
     }
-    
+
     Ok(total_loaded)
 }

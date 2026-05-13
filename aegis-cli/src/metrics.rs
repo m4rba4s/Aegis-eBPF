@@ -16,8 +16,8 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use aegis_common::Stats;
@@ -122,29 +122,67 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
     let mut buf = Vec::with_capacity(2048);
 
     if let Some(s) = stats {
-        writeln!(buf, "# HELP aegis_packets_total Total packets processed by category").ok();
+        writeln!(
+            buf,
+            "# HELP aegis_packets_total Total packets processed by category"
+        )
+        .ok();
         writeln!(buf, "# TYPE aegis_packets_total counter").ok();
-        writeln!(buf, "aegis_packets_total{{action=\"seen\"}} {}", s.pkts_seen).ok();
-        writeln!(buf, "aegis_packets_total{{action=\"drop\"}} {}", s.pkts_drop).ok();
-        writeln!(buf, "aegis_packets_total{{action=\"pass\"}} {}", s.pkts_pass).ok();
+        writeln!(
+            buf,
+            "aegis_packets_total{{action=\"seen\"}} {}",
+            s.pkts_seen
+        )
+        .ok();
+        writeln!(
+            buf,
+            "aegis_packets_total{{action=\"drop\"}} {}",
+            s.pkts_drop
+        )
+        .ok();
+        writeln!(
+            buf,
+            "aegis_packets_total{{action=\"pass\"}} {}",
+            s.pkts_pass
+        )
+        .ok();
 
         writeln!(buf, "# HELP aegis_blocks_total Blocks by source").ok();
         writeln!(buf, "# TYPE aegis_blocks_total counter").ok();
-        writeln!(buf, "aegis_blocks_total{{source=\"manual\"}} {}", s.block_manual).ok();
-        writeln!(buf, "aegis_blocks_total{{source=\"cidr_feed\"}} {}", s.block_cidr).ok();
+        writeln!(
+            buf,
+            "aegis_blocks_total{{source=\"manual\"}} {}",
+            s.block_manual
+        )
+        .ok();
+        writeln!(
+            buf,
+            "aegis_blocks_total{{source=\"cidr_feed\"}} {}",
+            s.block_cidr
+        )
+        .ok();
 
         writeln!(buf, "# HELP aegis_portscan_hits_total Port scan detections").ok();
         writeln!(buf, "# TYPE aegis_portscan_hits_total counter").ok();
         writeln!(buf, "aegis_portscan_hits_total {}", s.portscan_hits).ok();
 
-        writeln!(buf, "# HELP aegis_conntrack_hits_total Connection tracking cache hits").ok();
+        writeln!(
+            buf,
+            "# HELP aegis_conntrack_hits_total Connection tracking cache hits"
+        )
+        .ok();
         writeln!(buf, "# TYPE aegis_conntrack_hits_total counter").ok();
         writeln!(buf, "aegis_conntrack_hits_total {}", s.conntrack_hits).ok();
 
         writeln!(buf, "# HELP aegis_events_total eBPF perf events").ok();
         writeln!(buf, "# TYPE aegis_events_total counter").ok();
         writeln!(buf, "aegis_events_total{{status=\"ok\"}} {}", s.events_ok).ok();
-        writeln!(buf, "aegis_events_total{{status=\"fail\"}} {}", s.events_fail).ok();
+        writeln!(
+            buf,
+            "aegis_events_total{{status=\"fail\"}} {}",
+            s.events_fail
+        )
+        .ok();
     } else {
         writeln!(buf, "# aegis: BPF maps not available (is aegis running?)").ok();
     }
@@ -166,10 +204,15 @@ fn json_stats(stats: &Option<Stats>, blocklist_count: u64) -> String {
     match stats {
         Some(s) => format!(
             r#"{{"up":true,"packets":{{"seen":{},"drop":{},"pass":{}}},"blocks":{{"manual":{},"cidr_feed":{}}},"portscan_hits":{},"conntrack_hits":{},"events":{{"ok":{},"fail":{}}},"blocklist_entries":{}}}"#,
-            s.pkts_seen, s.pkts_drop, s.pkts_pass,
-            s.block_manual, s.block_cidr,
-            s.portscan_hits, s.conntrack_hits,
-            s.events_ok, s.events_fail,
+            s.pkts_seen,
+            s.pkts_drop,
+            s.pkts_pass,
+            s.block_manual,
+            s.block_cidr,
+            s.portscan_hits,
+            s.conntrack_hits,
+            s.events_ok,
+            s.events_fail,
             blocklist_count
         ),
         None => r#"{"up":false,"error":"BPF maps not available"}"#.to_string(),
@@ -179,7 +222,11 @@ fn json_stats(stats: &Option<Stats>, blocklist_count: u64) -> String {
 fn json_blocklist() -> String {
     let ips = read_blocklist_ips();
     let entries: Vec<String> = ips.iter().map(|ip| format!(r#""{}""#, ip)).collect();
-    format!(r#"{{"count":{},"ips":[{}]}}"#, entries.len(), entries.join(","))
+    format!(
+        r#"{{"count":{},"ips":[{}]}}"#,
+        entries.len(),
+        entries.join(",")
+    )
 }
 
 fn json_config() -> String {
@@ -244,7 +291,10 @@ fn json_geo(ip_str: &str) -> String {
                 r#"{{"ip":"{}","country":"{}","city":"{}"}}"#,
                 ip_str, result.country_code, result.city
             ),
-            None => format!(r#"{{"ip":"{}","error":"not found in GeoIP database"}}"#, ip_str),
+            None => format!(
+                r#"{{"ip":"{}","error":"not found in GeoIP database"}}"#,
+                ip_str
+            ),
         },
         None => r#"{"error":"GeoIP database not available"}"#.to_string(),
     }
@@ -317,11 +367,21 @@ fn check_auth(req: &str) -> bool {
         Some(expected) if !expected.is_empty() => {
             // Look for X-Aegis-Token header in raw request
             for line in req.lines() {
-                if let Some(val) = line.strip_prefix("X-Aegis-Token:") {
-                    return val.trim() == expected;
-                }
-                if let Some(val) = line.strip_prefix("x-aegis-token:") {
-                    return val.trim() == expected;
+                if let Some(val) = line
+                    .strip_prefix("X-Aegis-Token:")
+                    .or_else(|| line.strip_prefix("x-aegis-token:"))
+                {
+                    let provided = val.trim().as_bytes();
+                    let expected_b = expected.as_bytes();
+                    // Constant-time comparison
+                    if provided.len() != expected_b.len() {
+                        return false;
+                    }
+                    let mut diff = 0u8;
+                    for (a, b) in provided.iter().zip(expected_b.iter()) {
+                        diff |= a ^ b;
+                    }
+                    return diff == 0;
                 }
             }
             false
@@ -348,10 +408,11 @@ fn http_json(status: u16, body: &str) -> Vec<u8> {
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        413 => "Payload Too Large",
         _ => "Error",
     };
     format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: 127.0.0.1\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\n\r\n{}",
         status, status_text, body.len(), body
     )
     .into_bytes()
@@ -388,7 +449,7 @@ pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAd
 
     tokio::spawn(async move {
         loop {
-            let (mut stream, _peer) = match listener.accept().await {
+            let (mut stream, peer) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(_) => continue,
             };
@@ -396,15 +457,49 @@ pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAd
             let cache = cache.clone();
 
             tokio::spawn(async move {
-                let mut req_buf = vec![0u8; 4096];
-                let n = match stream.read(&mut req_buf).await {
-                    Ok(n) if n > 0 => n,
-                    _ => return,
-                };
-                let req = String::from_utf8_lossy(&req_buf[..n]);
-                let first_line = req.lines().next().unwrap_or("");
+                // API Rate Limiting (per-IP token bucket)
+                if !crate::api_ratelimit::check_rate_limit(peer.ip()) {
+                    let body = crate::api_ratelimit::rate_limit_response();
+                    let resp = http_json(429, &body);
+                    let _ = stream.write_all(&resp).await;
+                    return;
+                }
 
-                let response = route_request(first_line, &req, &cache).await;
+                // Enforce 8KB limit (8192 bytes)
+
+                let mut total_read = 0;
+                let mut req_str = String::new();
+
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    match stream.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            total_read += n;
+                            if total_read > 8192 {
+                                let resp = http_json(413, r#"{"error":"payload too large"}"#);
+                                let _ = stream.write_all(&resp).await;
+                                return;
+                            }
+                            req_str.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                            // Minimal check: if we have full headers and body (or just GET headers), break.
+                            // For simplicity in this raw HTTP parser, if it contains "\r\n\r\n" and Method is GET, break early.
+                            if req_str.contains("\r\n\r\n") && req_str.starts_with("GET") {
+                                break;
+                            }
+                            // If POST, we might need more body, but we have a hard limit at 8192 anyway.
+                            // In a real server, parse Content-Length. Here we just rely on EOF or limit.
+                        }
+                        Err(_) => return,
+                    }
+                }
+
+                if req_str.is_empty() {
+                    return;
+                }
+                let first_line = req_str.lines().next().unwrap_or("");
+
+                let response = route_request(first_line, &req_str, &cache).await;
                 let _ = stream.write_all(&response).await;
             });
         }
@@ -427,45 +522,39 @@ async fn route_request(
 
     match (method, path) {
         // ── Dashboard ───────────────────────────────────
-        ("GET", "/") => {
-            http_html(dashboard::DASHBOARD_HTML)
-        }
+        ("GET", "/") => http_html(dashboard::DASHBOARD_HTML),
 
         // ── Prometheus ──────────────────────────────────
         ("GET", "/metrics") => {
             let mut c = cache.write().await;
-            if c.is_stale() { c.refresh(); }
+            if c.is_stale() {
+                c.refresh();
+            }
             let body = render_prometheus(&c.stats, c.blocklist_count);
             http_text(&body)
         }
 
         // ── Health ──────────────────────────────────────
-        ("GET", "/health") => {
-            http_json(200, r#"{"status":"ok"}"#)
-        }
+        ("GET", "/health") => http_json(200, r#"{"status":"ok"}"#),
 
         // ── API: Stats ──────────────────────────────────
         ("GET", "/api/stats") => {
             let mut c = cache.write().await;
-            if c.is_stale() { c.refresh(); }
+            if c.is_stale() {
+                c.refresh();
+            }
             let body = json_stats(&c.stats, c.blocklist_count);
             http_json(200, &body)
         }
 
         // ── API: Blocklist ──────────────────────────────
-        ("GET", "/api/blocklist") => {
-            http_json(200, &json_blocklist())
-        }
+        ("GET", "/api/blocklist") => http_json(200, &json_blocklist()),
 
         // ── API: Config ─────────────────────────────────
-        ("GET", "/api/config") => {
-            http_json(200, &json_config())
-        }
+        ("GET", "/api/config") => http_json(200, &json_config()),
 
         // ── API: Feeds ──────────────────────────────────
-        ("GET", "/api/feeds") => {
-            http_json(200, &json_feeds())
-        }
+        ("GET", "/api/feeds") => http_json(200, &json_feeds()),
 
         // ── API: GeoIP ──────────────────────────────────
         ("GET", p) if p.starts_with("/api/geo/") => {
@@ -497,6 +586,18 @@ async fn route_request(
                 None => http_json(400, r#"{"error":"missing 'ip' field in JSON body"}"#),
             }
         }
+        // ── API: IP Reputation Score ──────────────────
+        ("GET", p) if p.starts_with("/api/reputation/") => {
+            let ip = &p["/api/reputation/".len()..];
+            let score = crate::reputation::lookup(ip, None);
+            http_json(200, &serde_json::to_string(&score).unwrap_or_default())
+        }
+
+        // ── API: JA3 TLS Fingerprint Cache ──────────
+        ("GET", "/api/ja3") => http_json(200, &crate::tls_fingerprint::get_ja3_cache_json()),
+
+        // ── API: Stats History (time-series) ────────
+        ("GET", "/api/history") => http_json(200, &crate::stats_history::get_history_json(None)),
 
         // ── 404 ─────────────────────────────────────────
         _ => http_json(404, r#"{"error":"not found"}"#),
