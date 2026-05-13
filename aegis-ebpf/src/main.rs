@@ -450,6 +450,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     };
 
     // Check if this is an existing ESTABLISHED connection
+    let mut conntrack_established = false;
     if let Some(state) = unsafe { CONN_TRACK.get(&conn_key) } {
         if state.state == CONN_ESTABLISHED {
             let mut updated = *state;
@@ -457,7 +458,11 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             updated.packets = updated.packets.saturating_add(1);
             updated.bytes = updated.bytes.saturating_add(total_len as u32);
             let _ = CONN_TRACK.insert(&conn_key, &updated, 0);
-            return Ok(xdp_action::XDP_PASS);
+            // Don't early-return for TCP/443 — let TLS fingerprint extractor run
+            if !(proto == 6 && dst_port == 443 && is_module_enabled(CFG_DPI_ENABLED)) {
+                return Ok(xdp_action::XDP_PASS);
+            }
+            conntrack_established = true;
         }
     }
 
@@ -504,7 +509,11 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     total_len,
                 );
             }
-            return Ok(xdp_action::XDP_PASS);
+            // Don't early-return for TCP/443 — let TLS fingerprint extractor run
+            if !(proto == 6 && dst_port == 443 && is_module_enabled(CFG_DPI_ENABLED)) {
+                return Ok(xdp_action::XDP_PASS);
+            }
+            conntrack_established = true;
         }
     }
 
@@ -1077,6 +1086,11 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 let _ = DPI_EVENTS.output(&ctx, &evt, 0);
             }
         }
+    }
+
+    // If conntrack already decided PASS (we only delayed return for TLS extraction), exit now
+    if conntrack_established {
+        return Ok(xdp_action::XDP_PASS);
     }
 
     // --- CREATE/UPDATE CONNECTION TRACKING ---
