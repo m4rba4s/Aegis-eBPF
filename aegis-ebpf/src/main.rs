@@ -980,8 +980,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     //
     // NOTE: This runs AFTER all DROP checks, so only clean traffic reaches here.
     if is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
-        // TLS record starts after TCP header (minimum 20 bytes)
-        let tls_offset = l4_offset + 20;
+        // Read actual TCP header length from Data Offset field (byte 12, upper 4 bits)
+        let doff_ptr: *const u8 = ptr_at(&ctx, l4_offset + 12)?;
+        let tcp_hdr_len = ((unsafe { *doff_ptr } >> 4) & 0x0F) as usize * 4;
+        let tls_offset = l4_offset + tcp_hdr_len;
         let data = ctx.data();
         let data_end = ctx.data_end();
 
