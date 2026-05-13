@@ -13,7 +13,10 @@ use aya_ebpf::{
     bindings::TC_ACT_OK,
     bindings::TC_ACT_SHOT,
     macros::{classifier, map},
-    maps::{HashMap, PerfEventArray, lpm_trie::{LpmTrie, Key}},
+    maps::{
+        lpm_trie::{Key, LpmTrie},
+        HashMap, PerfEventArray,
+    },
     programs::TcContext,
 };
 use headers::{EthHdr, Ipv4Hdr, ETH_P_IP};
@@ -23,20 +26,27 @@ use parsing::ptr_at;
 // IMPORTS FROM aegis-common (Single Source of Truth)
 // ============================================================
 use aegis_common::{
+    CidrBlockEntry,
+    ConnTrackKey,
+    ConnTrackState,
+    LpmKeyIpv4,
     // Structures
-    PacketLog, ConnTrackKey, ConnTrackState, LpmKeyIpv4, CidrBlockEntry,
-    // Verdict reasons
-    REASON_EGRESS_BLOCK,
-    // Threat types
-    THREAT_NONE, THREAT_EGRESS_BLOCKED,
+    PacketLog,
+    ACTION_DROP,
     // Actions
-    ACTION_PASS, ACTION_DROP,
-    // Hook points
-    HOOK_TC_EGRESS,
-    // Connection states
-    CONN_SYN_SENT, CONN_FIN_WAIT,
+    ACTION_PASS,
     // Config keys
     CFG_INTERFACE_MODE,
+    CONN_FIN_WAIT,
+    // Connection states
+    CONN_SYN_SENT,
+    // Hook points
+    HOOK_TC_EGRESS,
+    // Verdict reasons
+    REASON_EGRESS_BLOCK,
+    THREAT_EGRESS_BLOCKED,
+    // Threat types
+    THREAT_NONE,
 };
 
 // ============================================================
@@ -53,7 +63,8 @@ static EGRESS_BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(8192, 0);
 
 /// CIDR-based egress blocklist (for C2/malware feeds)
 #[map]
-static EGRESS_CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(65536, 0);
+static EGRESS_CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> =
+    LpmTrie::with_max_entries(65536, 0);
 
 /// Shared config map
 #[map]
@@ -77,9 +88,7 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
 
 fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     // Get interface mode (L2 vs L3)
-    let is_l3_mode = unsafe {
-        CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1
-    };
+    let is_l3_mode = unsafe { CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1 };
 
     let ip_offset = if is_l3_mode {
         0usize
@@ -105,7 +114,8 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
 
-    if proto == 6 { // TCP
+    if proto == 6 {
+        // TCP
         let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
         src_port = u16::from_be(unsafe { *src_port_ptr });
 
@@ -114,7 +124,8 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
 
         let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
         tcp_flags = unsafe { *flags_ptr };
-    } else if proto == 17 { // UDP
+    } else if proto == 17 {
+        // UDP
         let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
         src_port = u16::from_be(unsafe { *src_port_ptr });
 
@@ -125,24 +136,32 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     // --- EGRESS BLOCKLIST CHECK ---
     // 1. Exact IP match
     if let Some(_) = unsafe { EGRESS_BLOCKLIST.get(&dst_addr) } {
-        log_and_drop(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len);
+        log_and_drop(
+            &ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len,
+        );
         return Ok(TC_ACT_SHOT);
     }
 
     // 2. CIDR match
-    let cidr_key = Key::new(32, LpmKeyIpv4 {
-        prefix_len: 32,
-        addr: dst_addr,
-    });
+    let cidr_key = Key::new(
+        32,
+        LpmKeyIpv4 {
+            prefix_len: 32,
+            addr: dst_addr,
+        },
+    );
     if let Some(_) = EGRESS_CIDR_BLOCKLIST.get(&cidr_key) {
-        log_and_drop(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len);
+        log_and_drop(
+            &ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len,
+        );
         return Ok(TC_ACT_SHOT);
     }
 
     // --- CONNECTION STATE TRACKING ---
     let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
-    if proto == 6 { // TCP
+    if proto == 6 {
+        // TCP
         let syn = tcp_flags & 0x02 != 0;
         let ack = tcp_flags & 0x10 != 0;
         let fin = tcp_flags & 0x01 != 0;
@@ -160,7 +179,7 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
 
             let new_state = ConnTrackState {
                 state: CONN_SYN_SENT,
-                direction: 0,  // Outgoing
+                direction: 0, // Outgoing
                 _pad: [0u8; 2],
                 last_seen: now_ns,
                 packets: 1,
@@ -168,7 +187,9 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
             };
 
             let _ = CONN_TRACK.insert(&conn_key, &new_state, 0);
-            log_pass(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len);
+            log_pass(
+                &ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len,
+            );
         }
 
         // Outgoing FIN = connection closing
@@ -205,7 +226,7 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
         };
 
         let new_state = ConnTrackState {
-            state: CONN_SYN_SENT,  // Pseudo-state for UDP
+            state: CONN_SYN_SENT, // Pseudo-state for UDP
             direction: 0,
             _pad: [0u8; 2],
             last_seen: now_ns,
@@ -273,7 +294,7 @@ fn log_pass(
         proto,
         tcp_flags,
         action: ACTION_PASS,
-        reason: 0,  // REASON_DEFAULT
+        reason: 0, // REASON_DEFAULT
         threat_type: THREAT_NONE,
         hook: HOOK_TC_EGRESS,
         packet_len,

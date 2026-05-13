@@ -1,4 +1,3 @@
-
 #[repr(C)]
 pub struct EthHdr {
     pub dst_addr: [u8; 6],

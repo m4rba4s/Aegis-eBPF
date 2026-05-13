@@ -5,9 +5,9 @@
 //! - Abuse.ch Feodo Tracker
 //! - Firehol Level1
 
-mod parser;
 mod downloader;
 mod loader;
+mod parser;
 
 // Re-export used items
 pub use downloader::{cache_dir, download_feed_blocking};
@@ -85,21 +85,24 @@ impl FeedConfig {
     /// Build feed configs including dynamic country blocks
     pub fn from_config(config: &crate::config::Config) -> Vec<FeedConfig> {
         let mut feeds = Self::defaults();
-        
+
         for country in &config.blocked_countries {
             // Validate country code (e.g., "cn", "ru")
             let code = country.to_lowercase();
             if code.len() == 2 && code.chars().all(|c| c.is_ascii_alphabetic()) {
                 feeds.push(FeedConfig {
                     name: format!("country_block_{}", code),
-                    url: format!("https://www.ipdeny.com/ipblocks/data/countries/{}.zone", code),
+                    url: format!(
+                        "https://www.ipdeny.com/ipblocks/data/countries/{}.zone",
+                        code
+                    ),
                     category: FeedCategory::CountryBlock,
                     enabled: true,
                     update_interval_secs: 86400, // Daily
                 });
             }
         }
-        
+
         feeds
     }
 }

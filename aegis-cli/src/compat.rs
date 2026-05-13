@@ -61,8 +61,11 @@ impl KernelCaps {
         if (self.version.0, self.version.1) < MIN_KERNEL_VERSION {
             errors.push(format!(
                 "Kernel {}.{}.{} is too old. Aegis requires >= {}.{}",
-                self.version.0, self.version.1, self.version.2,
-                MIN_KERNEL_VERSION.0, MIN_KERNEL_VERSION.1
+                self.version.0,
+                self.version.1,
+                self.version.2,
+                MIN_KERNEL_VERSION.0,
+                MIN_KERNEL_VERSION.1
             ));
         }
 
@@ -83,9 +86,7 @@ impl KernelCaps {
 
         // Check memlock
         if !self.memlock_ok {
-            errors.push(
-                "Insufficient locked memory. Run with: ulimit -l unlimited".to_string()
-            );
+            errors.push("Insufficient locked memory. Run with: ulimit -l unlimited".to_string());
         }
 
         if errors.is_empty() {
@@ -97,9 +98,9 @@ impl KernelCaps {
 
     /// Print detected capabilities
     pub fn print_summary(&self) {
-        println!("🔍 Kernel: {} ({}.{}.{})",
-            self.version_string,
-            self.version.0, self.version.1, self.version.2
+        println!(
+            "🔍 Kernel: {} ({}.{}.{})",
+            self.version_string, self.version.0, self.version.1, self.version.2
         );
 
         let check = |ok: bool| if ok { "✅" } else { "❌" };
@@ -170,7 +171,10 @@ mod tests {
     fn test_parse_version() {
         assert_eq!(KernelCaps::parse_version("5.15.0-generic"), (5, 15, 0));
         assert_eq!(KernelCaps::parse_version("6.1.0"), (6, 1, 0));
-        assert_eq!(KernelCaps::parse_version("4.18.0-372.el8.x86_64"), (4, 18, 0));
+        assert_eq!(
+            KernelCaps::parse_version("4.18.0-372.el8.x86_64"),
+            (4, 18, 0)
+        );
         assert_eq!(KernelCaps::parse_version("5.4"), (5, 4, 0));
     }
 

@@ -38,7 +38,7 @@ struct PcapGlobalHeader {
     thiszone: i32,
     sigfigs: u32,
     snaplen: u32,
-    network: u32,  // LINKTYPE_RAW_IPV4 = 228
+    network: u32, // LINKTYPE_RAW_IPV4 = 228
 }
 
 /// PCAP Record Header (16 bytes)

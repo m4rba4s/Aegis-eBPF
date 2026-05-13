@@ -12,54 +12,101 @@ mod parsing;
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{HashMap, PerfEventArray, PerCpuArray, lpm_trie::{LpmTrie, Key}},
+    maps::{
+        lpm_trie::{Key, LpmTrie},
+        HashMap, PerCpuArray, PerfEventArray,
+    },
     programs::XdpContext,
 };
-use headers::{
-    EthHdr, Ipv4Hdr, ETH_P_IP, ETH_P_IPV6,
-    Ipv6Hdr, Ipv6ExtHdr, Ipv6FragHdr,
-};
+use headers::{EthHdr, Ipv4Hdr, Ipv6ExtHdr, Ipv6FragHdr, Ipv6Hdr, ETH_P_IP, ETH_P_IPV6};
 use parsing::ptr_at;
 
 // ============================================================
 // IMPORTS FROM aegis-common (Single Source of Truth)
 // ============================================================
 use aegis_common::{
+    CidrBlockEntry,
+    ConnTrackKey,
+    ConnTrackKeyIpv6,
+    ConnTrackState,
+    // DPI
+    DpiEvent,
+    FlowKey,
+    FlowKeyIpv6,
+    LpmKeyIpv4,
+    LpmKeyIpv6,
     // Structures - IPv4
-    PacketLog, Stats, FlowKey, ConnTrackKey, ConnTrackState,
-    LpmKeyIpv4, CidrBlockEntry, RateLimitState, PortScanState,
+    PacketLog,
     // Structures - IPv6
-    PacketLogIpv6, FlowKeyIpv6, ConnTrackKeyIpv6, LpmKeyIpv6,
-    // Verdict reasons
-    REASON_DEFAULT, REASON_WHITELIST, REASON_CONNTRACK, REASON_MANUAL_BLOCK,
-    REASON_CIDR_FEED, REASON_PORTSCAN, REASON_TCP_ANOMALY, REASON_RATELIMIT,
-    REASON_ENTROPY,
-    // Threat types - IPv4
-    THREAT_NONE, THREAT_SCAN_XMAS, THREAT_SCAN_NULL, THREAT_SCAN_SYNFIN,
-    THREAT_SCAN_PORT, THREAT_FLOOD_SYN, THREAT_BLOCKLIST, THREAT_HIGH_ENTROPY,
+    PacketLogIpv6,
+    PortScanState,
+    RateLimitState,
+    Stats,
+    ACTION_DPI,
+    ACTION_DROP,
     // Actions
-    ACTION_PASS, ACTION_DROP, ACTION_DPI,
-    // Hook points
-    HOOK_XDP,
+    ACTION_PASS,
+    CFG_CONN_TRACK,
+    CFG_DPI_ENABLED,
+    CFG_ENTROPY,
+    // Config keys
+    CFG_INTERFACE_MODE,
+    CFG_PORT_SCAN,
+    CFG_RATE_LIMIT,
+    CFG_SCAN_DETECT,
+    CFG_SKIP_WHITELIST,
+    CFG_THREAT_FEEDS,
+    CFG_VERBOSE,
     // Connection states
     CONN_ESTABLISHED,
-    // Config keys
-    CFG_INTERFACE_MODE, CFG_PORT_SCAN, CFG_RATE_LIMIT, CFG_THREAT_FEEDS,
-    CFG_CONN_TRACK, CFG_SCAN_DETECT, CFG_VERBOSE, CFG_ENTROPY, CFG_SKIP_WHITELIST,
-    CFG_DPI_ENABLED,
-    // DPI
-    DpiEvent, DPI_REASON_ENTROPY, DPI_REASON_RARE_PORT, DPI_REASON_UNKNOWN_PROTO,
-    // IPv6 constants
-    REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN,
-    // Rate limiting constants
-    TOKENS_PER_SEC, MAX_TOKENS,
-    // Port scan constants
-    PORT_SCAN_THRESHOLD, PORT_SCAN_WINDOW_NS,
     // Connection timeouts
-    CONN_TIMEOUT_ESTABLISHED_NS, CONN_TIMEOUT_OTHER_NS,
+    CONN_TIMEOUT_ESTABLISHED_NS,
+    CONN_TIMEOUT_OTHER_NS,
+    DPI_REASON_ENTROPY,
+    DPI_REASON_RARE_PORT,
+    DPI_REASON_TLS_HELLO,
+    DPI_REASON_UNKNOWN_PROTO,
+    DPI_REASON_DNS_TUNNEL,
+    // Hook points
+    HOOK_XDP,
+    MAX_TOKENS,
+    NEXTHDR_AUTH,
+    NEXTHDR_DEST,
+    NEXTHDR_FRAGMENT,
     // IPv6 next header protocol constants
-    NEXTHDR_HOP, NEXTHDR_TCP, NEXTHDR_UDP, NEXTHDR_ROUTING, NEXTHDR_FRAGMENT,
-    NEXTHDR_DEST, NEXTHDR_NONE, NEXTHDR_AUTH, NEXTHDR_ICMPV6,
+    NEXTHDR_HOP,
+    NEXTHDR_ICMPV6,
+    NEXTHDR_NONE,
+    NEXTHDR_ROUTING,
+    NEXTHDR_TCP,
+    NEXTHDR_UDP,
+    // Port scan constants
+    PORT_SCAN_THRESHOLD,
+    PORT_SCAN_WINDOW_NS,
+    REASON_CIDR_FEED,
+    REASON_CONNTRACK,
+    // Verdict reasons
+    REASON_DEFAULT,
+    REASON_ENTROPY,
+    // IPv6 constants
+    REASON_IPV6_POLICY,
+    REASON_MANUAL_BLOCK,
+    REASON_PORTSCAN,
+    REASON_RATELIMIT,
+    REASON_TCP_ANOMALY,
+    REASON_WHITELIST,
+    THREAT_BLOCKLIST,
+    THREAT_FLOOD_SYN,
+    THREAT_HIGH_ENTROPY,
+    THREAT_IPV6_EXT_CHAIN,
+    // Threat types - IPv4
+    THREAT_NONE,
+    THREAT_SCAN_NULL,
+    THREAT_SCAN_PORT,
+    THREAT_SCAN_SYNFIN,
+    THREAT_SCAN_XMAS,
+    // Rate limiting constants
+    TOKENS_PER_SEC,
 };
 
 // ============================================================
@@ -120,11 +167,13 @@ static ALLOWLIST_IPV6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(1024, 
 
 /// IPv6 CIDR prefix blocklist using LPM Trie
 #[map]
-static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> = LpmTrie::with_max_entries(16384, 0);
+static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> =
+    LpmTrie::with_max_entries(16384, 0);
 
 /// IPv6 Connection tracking
 #[map]
-static CONN_TRACK_IPV6: HashMap<ConnTrackKeyIpv6, ConnTrackState> = HashMap::with_max_entries(32768, 0);
+static CONN_TRACK_IPV6: HashMap<ConnTrackKeyIpv6, ConnTrackState> =
+    HashMap::with_max_entries(32768, 0);
 
 /// IPv6 event log (separate due to larger struct size)
 #[map]
@@ -250,14 +299,14 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_ABORTED,
     };
-    
+
     // Check outcome and update global counters
     if ret == xdp_action::XDP_DROP || ret == xdp_action::XDP_ABORTED {
         stats_inc_drop();
     } else if ret == xdp_action::XDP_PASS {
         stats_inc_pass();
     }
-    
+
     ret
 }
 
@@ -266,9 +315,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     stats_inc_seen();
 
     // Check CONFIG map for interface mode (0 = L2/Ethernet, 1 = L3/raw IP)
-    let is_l3_mode = unsafe {
-        CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1
-    };
+    let is_l3_mode = unsafe { CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1 };
 
     // Determine IP version and offset
     let (ip_offset, ether_type) = if is_l3_mode {
@@ -322,7 +369,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
 
-    if proto == 6 { // TCP
+    if proto == 6 {
+        // TCP
         let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
         src_port = u16::from_be(unsafe { *src_port_ptr });
 
@@ -331,7 +379,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
         let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
         tcp_flags = unsafe { *flags_ptr };
-    } else if proto == 17 { // UDP
+    } else if proto == 17 {
+        // UDP
         let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
         src_port = u16::from_be(unsafe { *src_port_ptr });
 
@@ -341,17 +390,28 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     // --- WHITELIST CHECK (EARLY) ---
     let src_octets = src_addr.to_be_bytes();
-    let is_whitelisted =
-        src_octets[0] == 10 ||  // 10.0.0.0/8
+    let is_whitelisted = src_octets[0] == 10 ||  // 10.0.0.0/8
         (src_octets[0] == 172 && (src_octets[1] & 0xF0) == 16) ||  // 172.16.0.0/12
         (src_octets[0] == 192 && src_octets[1] == 168) ||  // 192.168.0.0/16
         (src_octets[0] == 100 && (src_octets[1] & 0xC0) == 64) ||  // 100.64.0.0/10 CGNAT/VPN
-        src_octets[0] == 127;  // 127.0.0.0/8 localhost
+        src_octets[0] == 127; // 127.0.0.0/8 localhost
 
     // --- DYNAMIC ALLOWLIST ---
     if unsafe { ALLOWLIST.get(&src_addr).is_some() } {
         if is_module_enabled(CFG_VERBOSE) {
-            log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_WHITELIST, THREAT_NONE, total_len);
+            log_packet(
+                &ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                ACTION_PASS,
+                REASON_WHITELIST,
+                THREAT_NONE,
+                total_len,
+            );
         }
         return Ok(xdp_action::XDP_PASS);
     }
@@ -359,7 +419,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // Skip RFC1918/loopback whitelist when CFG_SKIP_WHITELIST is enabled (for testing on lo)
     if is_whitelisted && !is_module_enabled(CFG_SKIP_WHITELIST) {
         if is_module_enabled(CFG_VERBOSE) {
-            log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_WHITELIST, THREAT_NONE, total_len);
+            log_packet(
+                &ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                ACTION_PASS,
+                REASON_WHITELIST,
+                THREAT_NONE,
+                total_len,
+            );
         }
         return Ok(xdp_action::XDP_PASS);
     }
@@ -418,7 +490,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
             stats_inc_conntrack();
             if is_module_enabled(CFG_VERBOSE) {
-                log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_CONNTRACK, THREAT_NONE, total_len);
+                log_packet(
+                    &ctx,
+                    src_addr,
+                    dst_addr,
+                    src_port,
+                    dst_port,
+                    proto,
+                    tcp_flags,
+                    ACTION_PASS,
+                    REASON_CONNTRACK,
+                    THREAT_NONE,
+                    total_len,
+                );
             }
             return Ok(xdp_action::XDP_PASS);
         }
@@ -433,20 +517,53 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
         // Xmas Tree Scan (FIN + URG + PSH)
         if fin && urg && psh {
-            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, REASON_TCP_ANOMALY, THREAT_SCAN_XMAS, total_len);
+            return log_and_return(
+                &ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                ACTION_DROP,
+                REASON_TCP_ANOMALY,
+                THREAT_SCAN_XMAS,
+                total_len,
+            );
         }
 
         // Null Scan (No flags set)
         if tcp_flags == 0 {
-            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, REASON_TCP_ANOMALY, THREAT_SCAN_NULL, total_len);
+            return log_and_return(
+                &ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                ACTION_DROP,
+                REASON_TCP_ANOMALY,
+                THREAT_SCAN_NULL,
+                total_len,
+            );
         }
 
         // SYN + FIN (Illegal)
         if syn && fin {
-            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, REASON_TCP_ANOMALY, THREAT_SCAN_SYNFIN, total_len);
+            return log_and_return(
+                &ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                ACTION_DROP,
+                REASON_TCP_ANOMALY,
+                THREAT_SCAN_SYNFIN,
+                total_len,
+            );
         }
     }
 
@@ -474,8 +591,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
                 if state_ref.port_count > PORT_SCAN_THRESHOLD {
                     stats_inc_portscan();
-                    return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                        proto, tcp_flags, ACTION_DROP, REASON_PORTSCAN, THREAT_SCAN_PORT, total_len);
+                    return log_and_return(
+                        &ctx,
+                        src_addr,
+                        dst_addr,
+                        src_port,
+                        dst_port,
+                        proto,
+                        tcp_flags,
+                        ACTION_DROP,
+                        REASON_PORTSCAN,
+                        THREAT_SCAN_PORT,
+                        total_len,
+                    );
                 }
             }
         } else {
@@ -505,14 +633,29 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 let delta_sec = (delta_ns / 1_000_000_000) as u32;
 
                 let new_tokens = state.tokens.saturating_add(delta_sec * TOKENS_PER_SEC);
-                state.tokens = if new_tokens > MAX_TOKENS { MAX_TOKENS } else { new_tokens };
+                state.tokens = if new_tokens > MAX_TOKENS {
+                    MAX_TOKENS
+                } else {
+                    new_tokens
+                };
                 state.last_update = now_ns;
 
                 if state.tokens > 0 {
                     state.tokens -= 1;
                 } else {
-                    return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                        proto, tcp_flags, ACTION_DROP, REASON_RATELIMIT, THREAT_FLOOD_SYN, total_len);
+                    return log_and_return(
+                        &ctx,
+                        src_addr,
+                        dst_addr,
+                        src_port,
+                        dst_port,
+                        proto,
+                        tcp_flags,
+                        ACTION_DROP,
+                        REASON_RATELIMIT,
+                        THREAT_FLOOD_SYN,
+                        total_len,
+                    );
                 }
             } else {
                 let new_state = RateLimitState {
@@ -526,15 +669,29 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     // --- CIDR BLOCKLIST (Threat feeds) ---
     if is_module_enabled(CFG_THREAT_FEEDS) {
-        let cidr_key = Key::new(32, LpmKeyIpv4 {
-            prefix_len: 32,
-            addr: src_addr,
-        });
+        let cidr_key = Key::new(
+            32,
+            LpmKeyIpv4 {
+                prefix_len: 32,
+                addr: src_addr,
+            },
+        );
 
         if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
             stats_inc_block_cidr();
-            return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                proto, tcp_flags, ACTION_DROP, REASON_CIDR_FEED, THREAT_BLOCKLIST, total_len);
+            return log_and_return(
+                &ctx,
+                src_addr,
+                dst_addr,
+                src_port,
+                dst_port,
+                proto,
+                tcp_flags,
+                ACTION_DROP,
+                REASON_CIDR_FEED,
+                THREAT_BLOCKLIST,
+                total_len,
+            );
         }
     }
 
@@ -548,8 +705,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     if let Some(_action) = unsafe { BLOCKLIST.get(&key_exact) } {
         stats_inc_block_manual();
-        return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-            proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len);
+        return log_and_return(
+            &ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            tcp_flags,
+            ACTION_DROP,
+            REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST,
+            total_len,
+        );
     }
 
     // Wildcard port/proto lookup
@@ -562,45 +730,104 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
         stats_inc_block_manual();
-        return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-            proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, total_len);
+        return log_and_return(
+            &ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            tcp_flags,
+            ACTION_DROP,
+            REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST,
+            total_len,
+        );
     }
 
-    // --- ENTROPY DETECTION (encrypted C2/tunnels) ---
+    // --- ENTROPY DETECTION (observe-only, sends to DPI queue) ---
     // High entropy in payload suggests encrypted traffic (potential C2)
+    // NOTE: Does NOT drop packets — sends to DPI_EVENTS for userspace analysis.
+    //       Previously this dropped, causing 97.7% false positive rate on TLS/gzip/JPEG.
     // NOTE: Manually unrolled - NO LOOPS! Verifier explodes with loops.
-    if is_module_enabled(CFG_ENTROPY) {
-        // Calculate payload offset: TCP header min 20, UDP header 8
-        let payload_offset = if proto == 6 {
-            l4_offset + 20  // TCP minimum header
-        } else if proto == 17 {
-            l4_offset + 8   // UDP header
-        } else {
-            0
-        };
+    if is_module_enabled(CFG_ENTROPY) && is_module_enabled(CFG_DPI_ENABLED) {
+        // Skip known encrypted ports — they are EXPECTED to be encrypted
+        let is_encrypted_port = dst_port == 443
+            || dst_port == 993
+            || dst_port == 995
+            || dst_port == 22
+            || dst_port == 8443
+            || src_port == 443
+            || src_port == 993
+            || src_port == 995
+            || src_port == 22
+            || src_port == 8443;
 
-        if payload_offset > 0 {
-            // Check if we have enough payload to sample (4 bytes)
-            let sample_end = payload_offset + 4;
-            let data = ctx.data();
-            let data_end = ctx.data_end();
-            let check_end = core::hint::black_box(data + sample_end);
+        if !is_encrypted_port {
+            // Calculate payload offset: TCP header min 20, UDP header 8
+            let payload_offset = if proto == 6 {
+                l4_offset + 20 // TCP minimum header
+            } else if proto == 17 {
+                l4_offset + 8 // UDP header
+            } else {
+                0
+            };
 
-            if check_end <= data_end {
-                // MANUALLY UNROLLED: Read 4 bytes
-                let b0 = unsafe { *((data + payload_offset) as *const u8) };
-                let b1 = unsafe { *((data + payload_offset + 1) as *const u8) };
-                let b2 = unsafe { *((data + payload_offset + 2) as *const u8) };
-                let b3 = unsafe { *((data + payload_offset + 3) as *const u8) };
+            if payload_offset > 0 {
+                // Check if we have enough payload to sample (4 bytes)
+                let sample_end = payload_offset + 4;
+                let data = ctx.data();
+                let data_end = ctx.data_end();
+                let check_end = core::hint::black_box(data + sample_end);
 
-                // High entropy heuristic: all 4 bytes different = likely random/encrypted
-                // This catches encrypted C2 while passing normal HTTP/text
-                let all_different = (b0 != b1) && (b0 != b2) && (b0 != b3) &&
-                                    (b1 != b2) && (b1 != b3) && (b2 != b3);
+                if check_end <= data_end {
+                    // MANUALLY UNROLLED: Read 4 bytes
+                    let b0 = unsafe { *((data + payload_offset) as *const u8) };
+                    let b1 = unsafe { *((data + payload_offset + 1) as *const u8) };
+                    let b2 = unsafe { *((data + payload_offset + 2) as *const u8) };
+                    let b3 = unsafe { *((data + payload_offset + 3) as *const u8) };
 
-                if all_different {
-                    return log_and_return(&ctx, src_addr, dst_addr, src_port, dst_port,
-                        proto, tcp_flags, ACTION_DROP, REASON_ENTROPY, THREAT_HIGH_ENTROPY, total_len);
+                    // Count unique bytes (verifier-safe: no loops, manually unrolled)
+                    let mut unique: u8 = 1; // b0 is always 1 unique
+                    if b1 != b0 {
+                        unique += 1;
+                    }
+                    if b2 != b0 && b2 != b1 {
+                        unique += 1;
+                    }
+                    if b3 != b0 && b3 != b1 && b3 != b2 {
+                        unique += 1;
+                    }
+
+                    // Only flag if ALL 4 bytes are different (high entropy)
+                    if unique >= 4 {
+                        // Entropy score: 0-255 scaled (4 unique out of 4 = 255)
+                        let entropy_score: u8 = ((unique as u16) * 64).min(255) as u8;
+
+                        // Build payload snippet for DPI (reuse the 4 entropy bytes)
+                        let mut snippet = [0u8; 16];
+                        snippet[0] = b0;
+                        snippet[1] = b1;
+                        snippet[2] = b2;
+                        snippet[3] = b3;
+
+                        let evt = DpiEvent {
+                            src_ip: src_addr,
+                            dst_ip: dst_addr,
+                            src_port,
+                            dst_port,
+                            proto,
+                            dpi_reason: DPI_REASON_ENTROPY,
+                            payload_len: 4,
+                            timestamp: now_ns,
+                            payload_snippet: snippet,
+                            packet_len: total_len,
+                            entropy_score,
+                            _pad: [0u8; 5],
+                        };
+                        let _ = DPI_EVENTS.output(&ctx, &evt, 0);
+                        // DO NOT DROP — entropy alone is not enough to block
+                    }
                 }
             }
         }
@@ -613,11 +840,21 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         let mut dpi_reason: u8 = 0;
 
         // Heuristic 1: Rare destination port (not common services)
-        let is_common_port = dst_port == 22 || dst_port == 53 || dst_port == 80 ||
-            dst_port == 443 || dst_port == 8080 || dst_port == 8443 ||
-            dst_port == 25 || dst_port == 110 || dst_port == 143 ||
-            dst_port == 993 || dst_port == 995 || dst_port == 587 ||
-            dst_port == 3306 || dst_port == 5432 || dst_port == 6379;
+        let is_common_port = dst_port == 22
+            || dst_port == 53
+            || dst_port == 80
+            || dst_port == 443
+            || dst_port == 8080
+            || dst_port == 8443
+            || dst_port == 25
+            || dst_port == 110
+            || dst_port == 143
+            || dst_port == 993
+            || dst_port == 995
+            || dst_port == 587
+            || dst_port == 3306
+            || dst_port == 5432
+            || dst_port == 6379;
         if !is_common_port && dst_port > 0 {
             dpi_reason = DPI_REASON_RARE_PORT;
         }
@@ -629,7 +866,11 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
         if dpi_reason > 0 {
             // Collect payload snippet (first 16 bytes of L4 payload)
-            let payload_off = if proto == 6 { l4_offset + 20 } else { l4_offset + 8 };
+            let payload_off = if proto == 6 {
+                l4_offset + 20
+            } else {
+                l4_offset + 8
+            };
             let mut snippet = [0u8; 16];
             let mut snippet_len: u16 = 0;
 
@@ -649,22 +890,54 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let check_end = core::hint::black_box(data + payload_off + copy_len);
             if copy_len > 0 && check_end <= data_end {
                 let p = (data + payload_off) as *const u8;
-                if copy_len >= 1 { snippet[0] = unsafe { *p }; }
-                if copy_len >= 2 { snippet[1] = unsafe { *p.add(1) }; }
-                if copy_len >= 3 { snippet[2] = unsafe { *p.add(2) }; }
-                if copy_len >= 4 { snippet[3] = unsafe { *p.add(3) }; }
-                if copy_len >= 5 { snippet[4] = unsafe { *p.add(4) }; }
-                if copy_len >= 6 { snippet[5] = unsafe { *p.add(5) }; }
-                if copy_len >= 7 { snippet[6] = unsafe { *p.add(6) }; }
-                if copy_len >= 8 { snippet[7] = unsafe { *p.add(7) }; }
-                if copy_len >= 9 { snippet[8] = unsafe { *p.add(8) }; }
-                if copy_len >= 10 { snippet[9] = unsafe { *p.add(9) }; }
-                if copy_len >= 11 { snippet[10] = unsafe { *p.add(10) }; }
-                if copy_len >= 12 { snippet[11] = unsafe { *p.add(11) }; }
-                if copy_len >= 13 { snippet[12] = unsafe { *p.add(12) }; }
-                if copy_len >= 14 { snippet[13] = unsafe { *p.add(13) }; }
-                if copy_len >= 15 { snippet[14] = unsafe { *p.add(14) }; }
-                if copy_len >= 16 { snippet[15] = unsafe { *p.add(15) }; }
+                if copy_len >= 1 {
+                    snippet[0] = unsafe { *p };
+                }
+                if copy_len >= 2 {
+                    snippet[1] = unsafe { *p.add(1) };
+                }
+                if copy_len >= 3 {
+                    snippet[2] = unsafe { *p.add(2) };
+                }
+                if copy_len >= 4 {
+                    snippet[3] = unsafe { *p.add(3) };
+                }
+                if copy_len >= 5 {
+                    snippet[4] = unsafe { *p.add(4) };
+                }
+                if copy_len >= 6 {
+                    snippet[5] = unsafe { *p.add(5) };
+                }
+                if copy_len >= 7 {
+                    snippet[6] = unsafe { *p.add(6) };
+                }
+                if copy_len >= 8 {
+                    snippet[7] = unsafe { *p.add(7) };
+                }
+                if copy_len >= 9 {
+                    snippet[8] = unsafe { *p.add(8) };
+                }
+                if copy_len >= 10 {
+                    snippet[9] = unsafe { *p.add(9) };
+                }
+                if copy_len >= 11 {
+                    snippet[10] = unsafe { *p.add(10) };
+                }
+                if copy_len >= 12 {
+                    snippet[11] = unsafe { *p.add(11) };
+                }
+                if copy_len >= 13 {
+                    snippet[12] = unsafe { *p.add(12) };
+                }
+                if copy_len >= 14 {
+                    snippet[13] = unsafe { *p.add(13) };
+                }
+                if copy_len >= 15 {
+                    snippet[14] = unsafe { *p.add(14) };
+                }
+                if copy_len >= 16 {
+                    snippet[15] = unsafe { *p.add(15) };
+                }
             }
 
             let evt = DpiEvent {
@@ -685,8 +958,130 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         }
     }
 
+    // --- TLS CLIENTHELLO FINGERPRINT EXTRACTION (observe-only) ---
+    // Detect TLS Handshake (ContentType 0x16) with ClientHello (HandshakeType 0x01)
+    // on TCP port 443. Extract first 16 bytes of TLS record payload for userspace
+    // JA3/JA4 fingerprint computation. Packet is ALWAYS passed.
+    //
+    // TLS Record Layer:
+    //   Byte 0: ContentType (0x16 = Handshake)
+    //   Bytes 1-2: TLS Version (0x0301 = TLS 1.0, 0x0303 = TLS 1.2, etc.)
+    //   Bytes 3-4: Record Length
+    //   Byte 5: HandshakeType (0x01 = ClientHello)
+    //
+    // NOTE: This runs AFTER all DROP checks, so only clean traffic reaches here.
+    if is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
+        // TLS record starts after TCP header (minimum 20 bytes)
+        let tls_offset = l4_offset + 20;
+        let data = ctx.data();
+        let data_end = ctx.data_end();
+
+        // Bounds check: need at least 6 bytes (5 TLS record header + 1 handshake type)
+        let check_tls = core::hint::black_box(data + tls_offset + 6);
+        if check_tls <= data_end {
+            let content_type = unsafe { *((data + tls_offset) as *const u8) };
+            let handshake_type = unsafe { *((data + tls_offset + 5) as *const u8) };
+
+            // ContentType 0x16 = Handshake, HandshakeType 0x01 = ClientHello
+            if content_type == 0x16 && handshake_type == 0x01 {
+                // Extract TLS version from record header (bytes 1-2)
+                let tls_ver_major = unsafe { *((data + tls_offset + 1) as *const u8) };
+                let tls_ver_minor = unsafe { *((data + tls_offset + 2) as *const u8) };
+
+                // Collect first 16 bytes of TLS payload (after 5-byte record header)
+                let tls_payload_off = tls_offset + 5;
+                let mut snippet = [0u8; 16];
+                let mut snippet_len: u16 = 0;
+
+                let avail = if data_end > data + tls_payload_off {
+                    data_end - (data + tls_payload_off)
+                } else {
+                    0
+                };
+                let copy_len = if avail > 16 { 16 } else { avail };
+                snippet_len = copy_len as u16;
+
+                let check_copy = core::hint::black_box(data + tls_payload_off + copy_len);
+                if copy_len > 0 && check_copy <= data_end {
+                    let p = (data + tls_payload_off) as *const u8;
+                    // Manual unroll (verifier requirement — NO LOOPS)
+                    if copy_len >= 1 {
+                        snippet[0] = unsafe { *p };
+                    }
+                    if copy_len >= 2 {
+                        snippet[1] = unsafe { *p.add(1) };
+                    }
+                    if copy_len >= 3 {
+                        snippet[2] = unsafe { *p.add(2) };
+                    }
+                    if copy_len >= 4 {
+                        snippet[3] = unsafe { *p.add(3) };
+                    }
+                    if copy_len >= 5 {
+                        snippet[4] = unsafe { *p.add(4) };
+                    }
+                    if copy_len >= 6 {
+                        snippet[5] = unsafe { *p.add(5) };
+                    }
+                    if copy_len >= 7 {
+                        snippet[6] = unsafe { *p.add(6) };
+                    }
+                    if copy_len >= 8 {
+                        snippet[7] = unsafe { *p.add(7) };
+                    }
+                    if copy_len >= 9 {
+                        snippet[8] = unsafe { *p.add(8) };
+                    }
+                    if copy_len >= 10 {
+                        snippet[9] = unsafe { *p.add(9) };
+                    }
+                    if copy_len >= 11 {
+                        snippet[10] = unsafe { *p.add(10) };
+                    }
+                    if copy_len >= 12 {
+                        snippet[11] = unsafe { *p.add(11) };
+                    }
+                    if copy_len >= 13 {
+                        snippet[12] = unsafe { *p.add(12) };
+                    }
+                    if copy_len >= 14 {
+                        snippet[13] = unsafe { *p.add(13) };
+                    }
+                    if copy_len >= 15 {
+                        snippet[14] = unsafe { *p.add(14) };
+                    }
+                    if copy_len >= 16 {
+                        snippet[15] = unsafe { *p.add(15) };
+                    }
+                }
+
+                // Encode TLS version in entropy_score field (repurposed):
+                // Major in high nibble, minor in low nibble
+                // e.g. TLS 1.2 (0x03, 0x03) → 0x33
+                let tls_ver_encoded = ((tls_ver_major & 0x0F) << 4) | (tls_ver_minor & 0x0F);
+
+                let evt = DpiEvent {
+                    src_ip: src_addr,
+                    dst_ip: dst_addr,
+                    src_port,
+                    dst_port,
+                    proto,
+                    dpi_reason: DPI_REASON_TLS_HELLO,
+                    payload_len: snippet_len,
+                    timestamp: now_ns,
+                    payload_snippet: snippet,
+                    packet_len: total_len,
+                    entropy_score: tls_ver_encoded,
+                    _pad: [0u8; 5],
+                };
+                let _ = DPI_EVENTS.output(&ctx, &evt, 0);
+            }
+        }
+    }
+
     // --- CREATE/UPDATE CONNECTION TRACKING ---
-    if proto == 6 { // TCP
+    if proto == 6 {
+        // TCP
         let syn = tcp_flags & 0x02 != 0;
         let ack = tcp_flags & 0x10 != 0;
 
@@ -710,7 +1105,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             };
             let _ = CONN_TRACK.insert(&out_key, &new_conn, 0);
         }
-    } else if proto == 17 { // UDP
+    } else if proto == 17 {
+        // UDP
         let new_conn = ConnTrackState {
             state: CONN_ESTABLISHED,
             direction: 0,
@@ -732,7 +1128,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     // Verbose logging for normal pass
     if is_module_enabled(CFG_VERBOSE) {
-        log_packet(&ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, ACTION_PASS, REASON_DEFAULT, THREAT_NONE, total_len);
+        log_packet(
+            &ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            tcp_flags,
+            ACTION_PASS,
+            REASON_DEFAULT,
+            THREAT_NONE,
+            total_len,
+        );
     }
 
     Ok(xdp_action::XDP_PASS)
@@ -810,8 +1218,19 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         // SECURITY: Fail-closed — we couldn't find a supported L4 header within 4 hops,
         // or we hit an unknown extension header. Drop the packet.
         stats_inc_ipv6_drop();
-        return log_ipv6_drop(ctx, &src_addr, &dst_addr, 0, 0,
-            current_nh, 0, REASON_IPV6_POLICY, THREAT_IPV6_EXT_CHAIN, payload_len, ext_hdr_count);
+        return log_ipv6_drop(
+            ctx,
+            &src_addr,
+            &dst_addr,
+            0,
+            0,
+            current_nh,
+            0,
+            REASON_IPV6_POLICY,
+            THREAT_IPV6_EXT_CHAIN,
+            payload_len,
+            ext_hdr_count,
+        );
     }
 
     let next_header = current_nh;
@@ -837,10 +1256,9 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     // Link-local: fe80::/10
     // Loopback: ::1
     // Multicast: ff00::/8
-    let is_whitelisted =
-        (src_addr[0] == 0xfe && (src_addr[1] & 0xc0) == 0x80) ||  // Link-local
+    let is_whitelisted = (src_addr[0] == 0xfe && (src_addr[1] & 0xc0) == 0x80) ||  // Link-local
         (src_addr == [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]) ||        // ::1
-        (src_addr[0] == 0xff);                                     // Multicast
+        (src_addr[0] == 0xff); // Multicast
 
     // --- DYNAMIC ALLOWLIST ---
     if unsafe { ALLOWLIST_IPV6.get(&src_addr).is_some() } {
@@ -883,16 +1301,30 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
 
     // --- IPv6 CIDR BLOCKLIST ---
     if is_module_enabled(CFG_THREAT_FEEDS) {
-        let cidr_key = Key::new(128, LpmKeyIpv6 {
-            prefix_len: 128,
-            addr: src_addr,
-        });
+        let cidr_key = Key::new(
+            128,
+            LpmKeyIpv6 {
+                prefix_len: 128,
+                addr: src_addr,
+            },
+        );
 
         if let Some(_entry) = CIDR_BLOCKLIST_IPV6.get(&cidr_key) {
             stats_inc_ipv6_drop();
             stats_inc_block_cidr();
-            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
-                next_header, tcp_flags, REASON_CIDR_FEED, THREAT_BLOCKLIST, payload_len, ext_hdr_count);
+            return log_ipv6_drop(
+                ctx,
+                &src_addr,
+                &dst_addr,
+                src_port,
+                dst_port,
+                next_header,
+                tcp_flags,
+                REASON_CIDR_FEED,
+                THREAT_BLOCKLIST,
+                payload_len,
+                ext_hdr_count,
+            );
         }
     }
 
@@ -907,8 +1339,19 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     if let Some(_) = unsafe { BLOCKLIST_IPV6.get(&key_exact) } {
         stats_inc_ipv6_drop();
         stats_inc_block_manual();
-        return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
-            next_header, tcp_flags, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, payload_len, ext_hdr_count);
+        return log_ipv6_drop(
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            next_header,
+            tcp_flags,
+            REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST,
+            payload_len,
+            ext_hdr_count,
+        );
     }
 
     // Wildcard lookup
@@ -922,8 +1365,19 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     if let Some(_) = unsafe { BLOCKLIST_IPV6.get(&key_wild) } {
         stats_inc_ipv6_drop();
         stats_inc_block_manual();
-        return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
-            next_header, tcp_flags, REASON_MANUAL_BLOCK, THREAT_BLOCKLIST, payload_len, ext_hdr_count);
+        return log_ipv6_drop(
+            ctx,
+            &src_addr,
+            &dst_addr,
+            src_port,
+            dst_port,
+            next_header,
+            tcp_flags,
+            REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST,
+            payload_len,
+            ext_hdr_count,
+        );
     }
 
     // --- TCP SCAN DETECTION for IPv6 ---
@@ -936,22 +1390,55 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         // Xmas Tree
         if fin && urg && psh {
             stats_inc_ipv6_drop();
-            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
-                next_header, tcp_flags, REASON_TCP_ANOMALY, THREAT_SCAN_XMAS, payload_len, ext_hdr_count);
+            return log_ipv6_drop(
+                ctx,
+                &src_addr,
+                &dst_addr,
+                src_port,
+                dst_port,
+                next_header,
+                tcp_flags,
+                REASON_TCP_ANOMALY,
+                THREAT_SCAN_XMAS,
+                payload_len,
+                ext_hdr_count,
+            );
         }
 
         // Null Scan
         if tcp_flags == 0 {
             stats_inc_ipv6_drop();
-            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
-                next_header, tcp_flags, REASON_TCP_ANOMALY, THREAT_SCAN_NULL, payload_len, ext_hdr_count);
+            return log_ipv6_drop(
+                ctx,
+                &src_addr,
+                &dst_addr,
+                src_port,
+                dst_port,
+                next_header,
+                tcp_flags,
+                REASON_TCP_ANOMALY,
+                THREAT_SCAN_NULL,
+                payload_len,
+                ext_hdr_count,
+            );
         }
 
         // SYN+FIN
         if syn && fin {
             stats_inc_ipv6_drop();
-            return log_ipv6_drop(ctx, &src_addr, &dst_addr, src_port, dst_port,
-                next_header, tcp_flags, REASON_TCP_ANOMALY, THREAT_SCAN_SYNFIN, payload_len, ext_hdr_count);
+            return log_ipv6_drop(
+                ctx,
+                &src_addr,
+                &dst_addr,
+                src_port,
+                dst_port,
+                next_header,
+                tcp_flags,
+                REASON_TCP_ANOMALY,
+                THREAT_SCAN_SYNFIN,
+                payload_len,
+                ext_hdr_count,
+            );
         }
     }
 

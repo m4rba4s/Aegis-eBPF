@@ -37,3 +37,7 @@ aegis-cli/fuzz/artifacts/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal engineering documentation (sensitive architecture details)
+guide/gemini/
+README.md

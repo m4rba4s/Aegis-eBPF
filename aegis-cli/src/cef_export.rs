@@ -26,13 +26,16 @@ const PRODUCT_VERSION: &str = "3.0";
 pub fn init_syslog(dest: &str) -> anyhow::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.connect(dest)?;
-    SYSLOG_SOCKET.set(socket).map_err(|_| anyhow::anyhow!("syslog already initialized"))?;
+    SYSLOG_SOCKET
+        .set(socket)
+        .map_err(|_| anyhow::anyhow!("syslog already initialized"))?;
     info!(dest = dest, "📡 CEF syslog export initialized");
     Ok(())
 }
 
 /// CEF severity levels (0-10)
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // All variants are part of the public CEF/SIEM export API
 pub enum CefSeverity {
     Low = 3,
     Medium = 5,
@@ -47,6 +50,7 @@ impl CefSeverity {
 }
 
 /// Send a CEF-formatted event to syslog
+#[allow(clippy::too_many_arguments)] // Params map 1:1 to CEF extension fields
 pub fn send_cef_event(
     event_name: &str,
     event_id: u32,
@@ -66,9 +70,19 @@ pub fn send_cef_event(
     // CEF format: CEF:Version|Vendor|Product|Version|EventID|Name|Severity|Extensions
     let cef = format!(
         "{}|{}|{}|{}|{}|{}|{}|src={} dst={} spt={} dpt={} proto={} msg={}",
-        CEF_VERSION, VENDOR, PRODUCT, PRODUCT_VERSION,
-        event_id, event_name, severity.as_u8(),
-        src_ip, dst_ip, src_port, dst_port, proto, message,
+        CEF_VERSION,
+        VENDOR,
+        PRODUCT,
+        PRODUCT_VERSION,
+        event_id,
+        event_name,
+        severity.as_u8(),
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        proto,
+        message,
     );
 
     // Wrap in syslog format (RFC 5424 simplified)
@@ -86,16 +100,36 @@ pub fn send_cef_event(
 // ── Convenience Functions ───────────────────────────────────────────
 
 /// Report a blocked packet via CEF
-pub fn report_block(src_ip: &str, dst_ip: &str, src_port: u16, dst_port: u16, proto: &str, reason: &str) {
+pub fn report_block(
+    src_ip: &str,
+    dst_ip: &str,
+    src_port: u16,
+    dst_port: u16,
+    proto: &str,
+    reason: &str,
+) {
     send_cef_event(
-        "PacketBlocked", 100, CefSeverity::Medium,
-        src_ip, dst_ip, src_port, dst_port, proto,
+        "PacketBlocked",
+        100,
+        CefSeverity::Medium,
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        proto,
         &format!("Blocked: {}", reason),
     );
 }
 
 /// Report a DPI detection via CEF
-pub fn report_dpi_detection(src_ip: &str, dst_ip: &str, dst_port: u16, detection: &str, confidence: u8) {
+#[allow(dead_code)] // Reserved SIEM export API — wired when DPI pipeline matures
+pub fn report_dpi_detection(
+    src_ip: &str,
+    dst_ip: &str,
+    dst_port: u16,
+    detection: &str,
+    confidence: u8,
+) {
     let severity = if confidence >= 80 {
         CefSeverity::Critical
     } else if confidence >= 50 {
@@ -105,26 +139,46 @@ pub fn report_dpi_detection(src_ip: &str, dst_ip: &str, dst_port: u16, detection
     };
 
     send_cef_event(
-        "DPIDetection", 200, severity,
-        src_ip, dst_ip, 0, dst_port, "tcp",
+        "DPIDetection",
+        200,
+        severity,
+        src_ip,
+        dst_ip,
+        0,
+        dst_port,
+        "tcp",
         &format!("DPI: {} (confidence={}%)", detection, confidence),
     );
 }
 
 /// Report a JA3 match via CEF
+#[allow(dead_code)] // Reserved SIEM export API — wired when JA3 match triggers CEF
 pub fn report_ja3_match(src_ip: &str, ja3_hash: &str, threat_name: &str) {
     send_cef_event(
-        "TLSFingerprintMatch", 300, CefSeverity::Critical,
-        src_ip, "0.0.0.0", 0, 443, "tcp",
+        "TLSFingerprintMatch",
+        300,
+        CefSeverity::Critical,
+        src_ip,
+        "0.0.0.0",
+        0,
+        443,
+        "tcp",
         &format!("JA3={} threat={}", ja3_hash, threat_name),
     );
 }
 
 /// Report an auto-block via CEF
+#[allow(dead_code)] // Reserved SIEM export API — wired when OODA loop triggers CEF
 pub fn report_auto_block(src_ip: &str, reason: &str) {
     send_cef_event(
-        "AutoBlock", 400, CefSeverity::High,
-        src_ip, "0.0.0.0", 0, 0, "ip",
+        "AutoBlock",
+        400,
+        CefSeverity::High,
+        src_ip,
+        "0.0.0.0",
+        0,
+        0,
+        "ip",
         &format!("Auto-blocked: {}", reason),
     );
 }

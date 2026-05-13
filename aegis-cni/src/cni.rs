@@ -13,6 +13,7 @@ use std::process::Command;
 /// CNI network configuration (from stdin)
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // Fields populated by serde deserialization from CNI stdin
 pub struct CniConfig {
     pub cni_version: String,
     pub name: String,
@@ -183,22 +184,14 @@ pub fn handle_add(
 }
 
 /// CNI DEL — detach XDP firewall from pod veth
-pub fn handle_del(
-    _container_id: &str,
-    netns: &str,
-    ifname: &str,
-) -> Result<String> {
+pub fn handle_del(_container_id: &str, netns: &str, ifname: &str) -> Result<String> {
     // Best-effort detach — don't fail if netns is already gone
     let _ = detach_xdp(netns, ifname);
     Ok(String::new())
 }
 
 /// CNI CHECK — verify XDP attachment is healthy
-pub fn handle_check(
-    _container_id: &str,
-    netns: &str,
-    ifname: &str,
-) -> Result<String> {
+pub fn handle_check(_container_id: &str, netns: &str, ifname: &str) -> Result<String> {
     if check_xdp(netns, ifname)? {
         Ok(String::new())
     } else {

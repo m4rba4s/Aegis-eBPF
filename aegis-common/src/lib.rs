@@ -26,19 +26,19 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "user", derive(Debug, Serialize, Deserialize))]
 #[repr(C)]
 pub struct PacketLog {
-    pub src_ip: u32,       // 4  Source IP address (network byte order)
-    pub dst_ip: u32,       // 4  Destination IP address (network byte order)
-    pub src_port: u16,     // 2  Source port (host byte order)
-    pub dst_port: u16,     // 2  Destination port (host byte order)
-    pub proto: u8,         // 1  Protocol (6=TCP, 17=UDP, 1=ICMP)
-    pub tcp_flags: u8,     // 1  TCP flags byte
-    pub action: u8,        // 1  0=PASS, 1=DROP, 2=ALERT
-    pub reason: u8,        // 1  Verdict reason (REASON_* constants)
-    pub threat_type: u8,   // 1  Threat category (THREAT_* constants)
-    pub hook: u8,          // 1  Hook point (HOOK_* constants)
-    pub packet_len: u16,   // 2  Packet length
-    pub timestamp: u64,    // 8  Kernel timestamp (nanoseconds)
-}                          // Total: 32 bytes
+    pub src_ip: u32,     // 4  Source IP address (network byte order)
+    pub dst_ip: u32,     // 4  Destination IP address (network byte order)
+    pub src_port: u16,   // 2  Source port (host byte order)
+    pub dst_port: u16,   // 2  Destination port (host byte order)
+    pub proto: u8,       // 1  Protocol (6=TCP, 17=UDP, 1=ICMP)
+    pub tcp_flags: u8,   // 1  TCP flags byte
+    pub action: u8,      // 1  0=PASS, 1=DROP, 2=ALERT
+    pub reason: u8,      // 1  Verdict reason (REASON_* constants)
+    pub threat_type: u8, // 1  Threat category (THREAT_* constants)
+    pub hook: u8,        // 1  Hook point (HOOK_* constants)
+    pub packet_len: u16, // 2  Packet length
+    pub timestamp: u64,  // 8  Kernel timestamp (nanoseconds)
+} // Total: 32 bytes
 
 // ============================================================
 // DPI EVENT (Deep Packet Inspection suspect queue)
@@ -51,18 +51,18 @@ pub struct PacketLog {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct DpiEvent {
-    pub src_ip: u32,           // 4  Source IP (network byte order)
-    pub dst_ip: u32,           // 4  Destination IP (network byte order)
-    pub src_port: u16,         // 2  Source port
-    pub dst_port: u16,         // 2  Destination port
-    pub proto: u8,             // 1  Protocol
-    pub dpi_reason: u8,        // 1  Why this packet was flagged (DPI_REASON_*)
-    pub payload_len: u16,      // 2  Actual payload length available
-    pub timestamp: u64,        // 8  Kernel timestamp (nanoseconds)
+    pub src_ip: u32,               // 4  Source IP (network byte order)
+    pub dst_ip: u32,               // 4  Destination IP (network byte order)
+    pub src_port: u16,             // 2  Source port
+    pub dst_port: u16,             // 2  Destination port
+    pub proto: u8,                 // 1  Protocol
+    pub dpi_reason: u8,            // 1  Why this packet was flagged (DPI_REASON_*)
+    pub payload_len: u16,          // 2  Actual payload length available
+    pub timestamp: u64,            // 8  Kernel timestamp (nanoseconds)
     pub payload_snippet: [u8; 16], // 16  First 16 bytes of L4 payload
-    pub packet_len: u16,       // 2  Total packet length
-    pub entropy_score: u8,     // 1  Computed entropy (0-255 scaled)
-    pub _pad: [u8; 5],        // 5  Padding to 48 bytes
+    pub packet_len: u16,           // 2  Total packet length
+    pub entropy_score: u8,         // 1  Computed entropy (0-255 scaled)
+    pub _pad: [u8; 5],             // 5  Padding to 48 bytes
 }
 
 // ============================================================
@@ -74,18 +74,18 @@ pub struct DpiEvent {
 #[cfg_attr(feature = "user", derive(Debug, Serialize, Deserialize))]
 #[repr(C)]
 pub struct Stats {
-    pub pkts_seen: u64,       // Total packets seen
-    pub pkts_pass: u64,       // Packets passed
-    pub pkts_drop: u64,       // Packets dropped
-    pub events_ok: u64,       // Events sent to userspace successfully
-    pub events_fail: u64,     // Events failed to send (perf overflow)
-    pub ipv6_seen: u64,       // IPv6 packets seen
-    pub ipv6_pass: u64,       // IPv6 packets passed
-    pub ipv6_drop: u64,       // IPv6 packets dropped
-    pub block_manual: u64,    // Manual block hits
-    pub block_cidr: u64,      // CIDR feed block hits
-    pub portscan_hits: u64,   // Port scan detections
-    pub conntrack_hits: u64,  // Connection tracking fast-path hits
+    pub pkts_seen: u64,      // Total packets seen
+    pub pkts_pass: u64,      // Packets passed
+    pub pkts_drop: u64,      // Packets dropped
+    pub events_ok: u64,      // Events sent to userspace successfully
+    pub events_fail: u64,    // Events failed to send (perf overflow)
+    pub ipv6_seen: u64,      // IPv6 packets seen
+    pub ipv6_pass: u64,      // IPv6 packets passed
+    pub ipv6_drop: u64,      // IPv6 packets dropped
+    pub block_manual: u64,   // Manual block hits
+    pub block_cidr: u64,     // CIDR feed block hits
+    pub portscan_hits: u64,  // Port scan detections
+    pub conntrack_hits: u64, // Connection tracking fast-path hits
 }
 
 // ============================================================
@@ -97,10 +97,10 @@ pub struct Stats {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct FlowKey {
-    pub src_ip: u32,      // Source IP (network byte order)
-    pub dst_port: u16,    // Destination port (0 = wildcard)
-    pub proto: u8,        // Protocol (0 = wildcard)
-    pub _pad: u8,         // Padding for alignment
+    pub src_ip: u32,   // Source IP (network byte order)
+    pub dst_port: u16, // Destination port (0 = wildcard)
+    pub proto: u8,     // Protocol (0 = wildcard)
+    pub _pad: u8,      // Padding for alignment
 }
 
 // ============================================================
@@ -112,12 +112,12 @@ pub struct FlowKey {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct ConnTrackKey {
-    pub src_ip: u32,      // Source IP (network byte order)
-    pub dst_ip: u32,      // Destination IP (network byte order)
-    pub src_port: u16,    // Source port
-    pub dst_port: u16,    // Destination port
-    pub proto: u8,        // Protocol
-    pub _pad: [u8; 3],    // Padding for alignment
+    pub src_ip: u32,   // Source IP (network byte order)
+    pub dst_ip: u32,   // Destination IP (network byte order)
+    pub src_port: u16, // Source port
+    pub dst_port: u16, // Destination port
+    pub proto: u8,     // Protocol
+    pub _pad: [u8; 3], // Padding for alignment
 }
 
 /// Connection state with timing info
@@ -125,21 +125,21 @@ pub struct ConnTrackKey {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct ConnTrackState {
-    pub state: u8,        // Connection state (CONN_* constants)
-    pub direction: u8,    // 0 = outgoing (we initiated), 1 = incoming
-    pub _pad: [u8; 2],    // Padding
-    pub last_seen: u64,   // Last packet timestamp (ns)
-    pub packets: u32,     // Packet count
-    pub bytes: u32,       // Byte count
+    pub state: u8,      // Connection state (CONN_* constants)
+    pub direction: u8,  // 0 = outgoing (we initiated), 1 = incoming
+    pub _pad: [u8; 2],  // Padding
+    pub last_seen: u64, // Last packet timestamp (ns)
+    pub packets: u32,   // Packet count
+    pub bytes: u32,     // Byte count
 }
 
 // Connection state constants
 pub const CONN_NEW: u8 = 0;
-pub const CONN_SYN_SENT: u8 = 1;      // Outgoing SYN sent
-pub const CONN_SYN_RECV: u8 = 2;      // SYN received, awaiting SYN-ACK
-pub const CONN_ESTABLISHED: u8 = 3;   // 3-way handshake complete
-pub const CONN_FIN_WAIT: u8 = 4;      // FIN sent/received
-pub const CONN_CLOSED: u8 = 5;        // Ready for cleanup
+pub const CONN_SYN_SENT: u8 = 1; // Outgoing SYN sent
+pub const CONN_SYN_RECV: u8 = 2; // SYN received, awaiting SYN-ACK
+pub const CONN_ESTABLISHED: u8 = 3; // 3-way handshake complete
+pub const CONN_FIN_WAIT: u8 = 4; // FIN sent/received
+pub const CONN_CLOSED: u8 = 5; // Ready for cleanup
 
 // ============================================================
 // CIDR BLOCKLIST (LPM Trie for threat feeds)
@@ -150,8 +150,8 @@ pub const CONN_CLOSED: u8 = 5;        // Ready for cleanup
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct LpmKeyIpv4 {
-    pub prefix_len: u32,  // Number of bits in prefix (0-32)
-    pub addr: u32,        // IPv4 address in network byte order
+    pub prefix_len: u32, // Number of bits in prefix (0-32)
+    pub addr: u32,       // IPv4 address in network byte order
 }
 
 /// Value for CIDR blocklist entry
@@ -159,8 +159,8 @@ pub struct LpmKeyIpv4 {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct CidrBlockEntry {
-    pub category: u8,     // Feed category (CAT_* constants)
-    pub _pad: [u8; 3],    // Padding for alignment
+    pub category: u8,  // Feed category (CAT_* constants)
+    pub _pad: [u8; 3], // Padding for alignment
 }
 
 // Feed category constants
@@ -180,8 +180,8 @@ pub const CAT_MANUAL: u8 = 5;
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct RateLimitState {
-    pub tokens: u32,       // Current tokens available
-    pub last_update: u64,  // Last refill timestamp (ns)
+    pub tokens: u32,      // Current tokens available
+    pub last_update: u64, // Last refill timestamp (ns)
 }
 
 // ============================================================
@@ -193,43 +193,43 @@ pub struct RateLimitState {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct PortScanState {
-    pub port_bitmap: [u32; 8],  // 256 bits = ports 0-255 bitmap
-    pub port_count: u16,        // Count of unique ports accessed
-    pub first_seen: u64,        // First packet timestamp (ns)
-    pub _pad: [u8; 6],          // Padding for alignment
+    pub port_bitmap: [u32; 8], // 256 bits = ports 0-255 bitmap
+    pub port_count: u16,       // Count of unique ports accessed
+    pub first_seen: u64,       // First packet timestamp (ns)
+    pub _pad: [u8; 6],         // Padding for alignment
 }
 
 // ============================================================
 // VERDICT REASON CONSTANTS (WHY action was taken)
 // ============================================================
 
-pub const REASON_DEFAULT: u8 = 0;        // Default policy (no rule matched)
-pub const REASON_WHITELIST: u8 = 1;      // Private/internal IP whitelist
-pub const REASON_CONNTRACK: u8 = 2;      // Connection tracking fast-path
-pub const REASON_MANUAL_BLOCK: u8 = 3;   // Manual block via TUI/CLI
-pub const REASON_CIDR_FEED: u8 = 4;      // Threat feed CIDR match
-pub const REASON_PORTSCAN: u8 = 5;       // Port scan detection
-pub const REASON_TCP_ANOMALY: u8 = 6;    // Null/Xmas/SYN+FIN scan
-pub const REASON_RATELIMIT: u8 = 7;      // Rate limiting triggered
-pub const REASON_IPV6_POLICY: u8 = 8;    // IPv6 policy decision
-pub const REASON_MALFORMED: u8 = 9;      // Malformed L2/L3/L4
-pub const REASON_EGRESS_BLOCK: u8 = 10;  // Egress blocklist match
-pub const REASON_ENTROPY: u8 = 11;       // High entropy payload detected
+pub const REASON_DEFAULT: u8 = 0; // Default policy (no rule matched)
+pub const REASON_WHITELIST: u8 = 1; // Private/internal IP whitelist
+pub const REASON_CONNTRACK: u8 = 2; // Connection tracking fast-path
+pub const REASON_MANUAL_BLOCK: u8 = 3; // Manual block via TUI/CLI
+pub const REASON_CIDR_FEED: u8 = 4; // Threat feed CIDR match
+pub const REASON_PORTSCAN: u8 = 5; // Port scan detection
+pub const REASON_TCP_ANOMALY: u8 = 6; // Null/Xmas/SYN+FIN scan
+pub const REASON_RATELIMIT: u8 = 7; // Rate limiting triggered
+pub const REASON_IPV6_POLICY: u8 = 8; // IPv6 policy decision
+pub const REASON_MALFORMED: u8 = 9; // Malformed L2/L3/L4
+pub const REASON_EGRESS_BLOCK: u8 = 10; // Egress blocklist match
+pub const REASON_ENTROPY: u8 = 11; // High entropy payload detected
 
 // ============================================================
 // THREAT TYPE CONSTANTS (WHAT was detected)
 // ============================================================
 
 pub const THREAT_NONE: u8 = 0;
-pub const THREAT_SCAN_XMAS: u8 = 1;      // Xmas tree scan (FIN+URG+PSH)
-pub const THREAT_SCAN_NULL: u8 = 2;      // Null scan (no flags)
-pub const THREAT_SCAN_SYNFIN: u8 = 3;    // SYN+FIN (illegal combo)
-pub const THREAT_SCAN_PORT: u8 = 4;      // Port scan detected
-pub const THREAT_FLOOD_SYN: u8 = 5;      // SYN flood rate exceeded
-pub const THREAT_BLOCKLIST: u8 = 6;      // IP on blocklist
-pub const THREAT_INCOMING_SYN: u8 = 7;   // Incoming SYN (server mode)
+pub const THREAT_SCAN_XMAS: u8 = 1; // Xmas tree scan (FIN+URG+PSH)
+pub const THREAT_SCAN_NULL: u8 = 2; // Null scan (no flags)
+pub const THREAT_SCAN_SYNFIN: u8 = 3; // SYN+FIN (illegal combo)
+pub const THREAT_SCAN_PORT: u8 = 4; // Port scan detected
+pub const THREAT_FLOOD_SYN: u8 = 5; // SYN flood rate exceeded
+pub const THREAT_BLOCKLIST: u8 = 6; // IP on blocklist
+pub const THREAT_INCOMING_SYN: u8 = 7; // Incoming SYN (server mode)
 pub const THREAT_EGRESS_BLOCKED: u8 = 8; // Egress to bad destination
-pub const THREAT_HIGH_ENTROPY: u8 = 9;   // High entropy payload (encrypted C2)
+pub const THREAT_HIGH_ENTROPY: u8 = 9; // High entropy payload (encrypted C2)
 
 // ============================================================
 // ACTION CONSTANTS
@@ -237,8 +237,8 @@ pub const THREAT_HIGH_ENTROPY: u8 = 9;   // High entropy payload (encrypted C2)
 
 pub const ACTION_PASS: u8 = 0;
 pub const ACTION_DROP: u8 = 1;
-pub const ACTION_ALERT: u8 = 2;  // Log but don't drop
-pub const ACTION_DPI: u8 = 3;    // Send to DPI suspect queue
+pub const ACTION_ALERT: u8 = 2; // Log but don't drop
+pub const ACTION_DPI: u8 = 3; // Send to DPI suspect queue
 
 // ============================================================
 // HOOK POINT CONSTANTS
@@ -252,26 +252,27 @@ pub const HOOK_TC_EGRESS: u8 = 3;
 // CONFIG MAP KEYS
 // ============================================================
 
-pub const CFG_INTERFACE_MODE: u32 = 0;  // 0 = L2/Ethernet, 1 = L3/raw IP
-pub const CFG_PORT_SCAN: u32 = 1;       // Port scan detection toggle
-pub const CFG_RATE_LIMIT: u32 = 2;      // Rate limiting toggle
-pub const CFG_THREAT_FEEDS: u32 = 3;    // Threat feeds toggle
-pub const CFG_CONN_TRACK: u32 = 4;      // Connection tracking toggle
-pub const CFG_SCAN_DETECT: u32 = 5;     // Scan detection toggle
-pub const CFG_VERBOSE: u32 = 6;         // Verbose logging toggle
-pub const CFG_ENTROPY: u32 = 7;         // Entropy analysis toggle
-pub const CFG_SKIP_WHITELIST: u32 = 8;  // Skip RFC1918/loopback whitelist (for testing)
-pub const CFG_DPI_ENABLED: u32 = 9;     // Deep Packet Inspection queue toggle
+pub const CFG_INTERFACE_MODE: u32 = 0; // 0 = L2/Ethernet, 1 = L3/raw IP
+pub const CFG_PORT_SCAN: u32 = 1; // Port scan detection toggle
+pub const CFG_RATE_LIMIT: u32 = 2; // Rate limiting toggle
+pub const CFG_THREAT_FEEDS: u32 = 3; // Threat feeds toggle
+pub const CFG_CONN_TRACK: u32 = 4; // Connection tracking toggle
+pub const CFG_SCAN_DETECT: u32 = 5; // Scan detection toggle
+pub const CFG_VERBOSE: u32 = 6; // Verbose logging toggle
+pub const CFG_ENTROPY: u32 = 7; // Entropy analysis toggle
+pub const CFG_SKIP_WHITELIST: u32 = 8; // Skip RFC1918/loopback whitelist (for testing)
+pub const CFG_DPI_ENABLED: u32 = 9; // Deep Packet Inspection queue toggle
 
 // ============================================================
 // DPI REASON CONSTANTS (why a packet was sent to DPI queue)
 // ============================================================
 
-pub const DPI_REASON_ENTROPY: u8 = 1;     // High entropy payload
-pub const DPI_REASON_RARE_PORT: u8 = 2;   // Unusual destination port
-pub const DPI_REASON_DNS_TUNNEL: u8 = 3;  // Possible DNS tunneling (long query)
+pub const DPI_REASON_ENTROPY: u8 = 1; // High entropy payload
+pub const DPI_REASON_RARE_PORT: u8 = 2; // Unusual destination port
+pub const DPI_REASON_DNS_TUNNEL: u8 = 3; // Possible DNS tunneling (long query)
 pub const DPI_REASON_UNKNOWN_PROTO: u8 = 4; // Unknown L4 protocol
-pub const DPI_REASON_C2_PATTERN: u8 = 5;  // Short periodic beaconing pattern
+pub const DPI_REASON_C2_PATTERN: u8 = 5; // Short periodic beaconing pattern
+pub const DPI_REASON_TLS_HELLO: u8 = 6; // TLS ClientHello detected (for JA3 fingerprinting)
 
 // ============================================================
 // AYA POD IMPLEMENTATIONS (userspace only)
@@ -319,15 +320,15 @@ pub const PROTO_UDP: u8 = 17;
 // RATE LIMITING DEFAULTS
 // ============================================================
 
-pub const TOKENS_PER_SEC: u32 = 100;   // SYN packets/sec allowed
-pub const MAX_TOKENS: u32 = 200;       // Burst capacity
+pub const TOKENS_PER_SEC: u32 = 100; // SYN packets/sec allowed
+pub const MAX_TOKENS: u32 = 200; // Burst capacity
 
 // ============================================================
 // PORT SCAN DEFAULTS
 // ============================================================
 
-pub const PORT_SCAN_THRESHOLD: u16 = 50;          // Unique ports to trigger
-pub const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000;  // 5 second window
+pub const PORT_SCAN_THRESHOLD: u16 = 50; // Unique ports to trigger
+pub const PORT_SCAN_WINDOW_NS: u64 = 5_000_000_000; // 5 second window
 
 // ============================================================
 // ENTROPY DETECTION (encrypted C2/tunnels)
@@ -345,7 +346,7 @@ pub const ENTROPY_THRESHOLD: u8 = 4;
 // ============================================================
 
 pub const CONN_TIMEOUT_ESTABLISHED_NS: u64 = 300_000_000_000; // 5 min
-pub const CONN_TIMEOUT_OTHER_NS: u64 = 30_000_000_000;        // 30 sec
+pub const CONN_TIMEOUT_OTHER_NS: u64 = 30_000_000_000; // 30 sec
 
 // ============================================================
 // IPv6 SUPPORT STRUCTURES
@@ -359,8 +360,8 @@ pub type Ipv6Addr = [u8; 16];
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct LpmKeyIpv6 {
-    pub prefix_len: u32,       // Number of bits in prefix (0-128)
-    pub addr: Ipv6Addr,        // IPv6 address in network byte order
+    pub prefix_len: u32, // Number of bits in prefix (0-128)
+    pub addr: Ipv6Addr,  // IPv6 address in network byte order
 }
 
 /// FlowKey for IPv6 manual blocklist
@@ -368,10 +369,10 @@ pub struct LpmKeyIpv6 {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct FlowKeyIpv6 {
-    pub src_ip: Ipv6Addr,      // Source IPv6 (network byte order)
-    pub dst_port: u16,         // Destination port (0 = wildcard)
-    pub proto: u8,             // Protocol (0 = wildcard)
-    pub _pad: u8,              // Padding for alignment
+    pub src_ip: Ipv6Addr, // Source IPv6 (network byte order)
+    pub dst_port: u16,    // Destination port (0 = wildcard)
+    pub proto: u8,        // Protocol (0 = wildcard)
+    pub _pad: u8,         // Padding for alignment
 }
 
 /// Connection tracking key for IPv6 (5-tuple)
@@ -379,12 +380,12 @@ pub struct FlowKeyIpv6 {
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct ConnTrackKeyIpv6 {
-    pub src_ip: Ipv6Addr,      // Source IPv6
-    pub dst_ip: Ipv6Addr,      // Destination IPv6
-    pub src_port: u16,         // Source port
-    pub dst_port: u16,         // Destination port
-    pub proto: u8,             // Protocol (next header after ext headers)
-    pub _pad: [u8; 3],         // Padding
+    pub src_ip: Ipv6Addr, // Source IPv6
+    pub dst_ip: Ipv6Addr, // Destination IPv6
+    pub src_port: u16,    // Source port
+    pub dst_port: u16,    // Destination port
+    pub proto: u8,        // Protocol (next header after ext headers)
+    pub _pad: [u8; 3],    // Padding
 }
 
 /// Extended packet log for IPv6 events (48 bytes)
@@ -392,35 +393,35 @@ pub struct ConnTrackKeyIpv6 {
 #[cfg_attr(feature = "user", derive(Debug, Serialize, Deserialize))]
 #[repr(C)]
 pub struct PacketLogIpv6 {
-    pub src_ip: Ipv6Addr,      // 16 Source IPv6
-    pub dst_ip: Ipv6Addr,      // 16 Destination IPv6
-    pub src_port: u16,         // 2
-    pub dst_port: u16,         // 2
-    pub proto: u8,             // 1  Final protocol after ext headers
-    pub tcp_flags: u8,         // 1
-    pub action: u8,            // 1
-    pub reason: u8,            // 1
-    pub threat_type: u8,       // 1
-    pub hook: u8,              // 1
-    pub packet_len: u16,       // 2
-    pub ext_hdr_count: u8,     // 1  Number of extension headers seen
-    pub _pad: [u8; 3],         // 3  Padding for alignment
-}                              // Total: 48 bytes
+    pub src_ip: Ipv6Addr,  // 16 Source IPv6
+    pub dst_ip: Ipv6Addr,  // 16 Destination IPv6
+    pub src_port: u16,     // 2
+    pub dst_port: u16,     // 2
+    pub proto: u8,         // 1  Final protocol after ext headers
+    pub tcp_flags: u8,     // 1
+    pub action: u8,        // 1
+    pub reason: u8,        // 1
+    pub threat_type: u8,   // 1
+    pub hook: u8,          // 1
+    pub packet_len: u16,   // 2
+    pub ext_hdr_count: u8, // 1  Number of extension headers seen
+    pub _pad: [u8; 3],     // 3  Padding for alignment
+} // Total: 48 bytes
 
 // ============================================================
 // IPv6 NEXT HEADER (PROTOCOL) CONSTANTS
 // ============================================================
 
-pub const NEXTHDR_HOP: u8 = 0;         // Hop-by-Hop Options (DANGEROUS)
-pub const NEXTHDR_TCP: u8 = 6;         // TCP
-pub const NEXTHDR_UDP: u8 = 17;        // UDP
-pub const NEXTHDR_ROUTING: u8 = 43;    // Routing Header (Type 0 = DEPRECATED/ATTACK)
-pub const NEXTHDR_FRAGMENT: u8 = 44;   // Fragment Header (DANGEROUS)
-pub const NEXTHDR_AUTH: u8 = 51;       // Authentication Header (AH)
-pub const NEXTHDR_NONE: u8 = 59;       // No Next Header
-pub const NEXTHDR_DEST: u8 = 60;       // Destination Options
-pub const NEXTHDR_ICMPV6: u8 = 58;     // ICMPv6
-pub const NEXTHDR_ESP: u8 = 50;        // Encapsulating Security Payload
+pub const NEXTHDR_HOP: u8 = 0; // Hop-by-Hop Options (DANGEROUS)
+pub const NEXTHDR_TCP: u8 = 6; // TCP
+pub const NEXTHDR_UDP: u8 = 17; // UDP
+pub const NEXTHDR_ROUTING: u8 = 43; // Routing Header (Type 0 = DEPRECATED/ATTACK)
+pub const NEXTHDR_FRAGMENT: u8 = 44; // Fragment Header (DANGEROUS)
+pub const NEXTHDR_AUTH: u8 = 51; // Authentication Header (AH)
+pub const NEXTHDR_NONE: u8 = 59; // No Next Header
+pub const NEXTHDR_DEST: u8 = 60; // Destination Options
+pub const NEXTHDR_ICMPV6: u8 = 58; // ICMPv6
+pub const NEXTHDR_ESP: u8 = 50; // Encapsulating Security Payload
 
 // ============================================================
 // IPv6 SECURITY CONSTANTS
@@ -441,7 +442,7 @@ pub const ROUTING_TYPE_0: u8 = 0;
 
 /// ICMPv6 types that MUST be allowed for IPv6 to function
 pub const ICMPV6_DEST_UNREACHABLE: u8 = 1;
-pub const ICMPV6_PKT_TOO_BIG: u8 = 2;        // Required for PMTUD!
+pub const ICMPV6_PKT_TOO_BIG: u8 = 2; // Required for PMTUD!
 pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
 pub const ICMPV6_PARAM_PROBLEM: u8 = 4;
 pub const ICMPV6_ECHO_REQUEST: u8 = 128;
@@ -455,11 +456,11 @@ pub const ICMPV6_NEIGHBOR_ADVERTISEMENT: u8 = 136;
 // IPv6 THREAT TYPES (extension of THREAT_* constants)
 // ============================================================
 
-pub const THREAT_IPV6_EXT_CHAIN: u8 = 20;     // Too many extension headers
+pub const THREAT_IPV6_EXT_CHAIN: u8 = 20; // Too many extension headers
 pub const THREAT_IPV6_ROUTING_TYPE0: u8 = 21; // Deprecated routing header
-pub const THREAT_IPV6_FRAGMENT: u8 = 22;      // Fragment attack (tiny, overlap)
-pub const THREAT_IPV6_HOP_BY_HOP: u8 = 23;    // Hop-by-hop outside first
-pub const THREAT_IPV6_UNKNOWN_EXT: u8 = 24;   // Unknown extension header
+pub const THREAT_IPV6_FRAGMENT: u8 = 22; // Fragment attack (tiny, overlap)
+pub const THREAT_IPV6_HOP_BY_HOP: u8 = 23; // Hop-by-hop outside first
+pub const THREAT_IPV6_UNKNOWN_EXT: u8 = 24; // Unknown extension header
 
 // ============================================================
 // IPv6 AYA POD IMPLEMENTATIONS (userspace only)
