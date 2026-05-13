@@ -101,12 +101,14 @@ install_system_deps() {
                 gcc make pkg-config \
                 llvm clang llvm-devel \
                 elfutils-libelf-devel \
+                protobuf-compiler \
                 curl wget git \
                 2>/dev/null || \
             yum install -y \
                 gcc make pkgconfig \
                 llvm clang llvm-devel \
                 elfutils-libelf-devel \
+                protobuf-compiler \
                 curl wget git \
                 2>/dev/null || true
             ;;
@@ -115,12 +117,14 @@ install_system_deps() {
             apt-get install -y \
                 build-essential pkg-config \
                 llvm clang libelf-dev \
+                protobuf-compiler \
                 curl wget git \
                 2>/dev/null || true
             ;;
         arch|manjaro|endeavouros)
             pacman -Sy --noconfirm --needed \
                 base-devel llvm clang libelf \
+                protobuf \
                 curl wget git \
                 2>/dev/null || true
             ;;
@@ -128,6 +132,7 @@ install_system_deps() {
             zypper install -y \
                 gcc make pkg-config \
                 llvm clang libelf-devel \
+                protobuf-devel \
                 curl wget git \
                 2>/dev/null || true
             ;;
@@ -135,6 +140,7 @@ install_system_deps() {
             apk add \
                 build-base musl-dev linux-headers \
                 llvm clang libelf-dev \
+                protobuf \
                 curl wget git \
                 2>/dev/null || true
             ;;
