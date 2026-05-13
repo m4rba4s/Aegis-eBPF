@@ -62,7 +62,7 @@ use aegis_common::{
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS,
     CONN_TIMEOUT_OTHER_NS,
-    DPI_REASON_ENTROPY,
+
     DPI_REASON_RARE_PORT,
     DPI_REASON_TLS_HELLO,
     DPI_REASON_UNKNOWN_PROTO,
@@ -745,98 +745,16 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         );
     }
 
-    // --- ENTROPY DETECTION (observe-only, sends to DPI queue) ---
-    // High entropy in payload suggests encrypted traffic (potential C2)
-    // NOTE: Does NOT drop packets — sends to DPI_EVENTS for userspace analysis.
-    //       Previously this dropped, causing 97.7% false positive rate on TLS/gzip/JPEG.
-    // NOTE: Manually unrolled - NO LOOPS! Verifier explodes with loops.
-    if is_module_enabled(CFG_ENTROPY) && is_module_enabled(CFG_DPI_ENABLED) {
-        // Skip known encrypted ports — they are EXPECTED to be encrypted
-        let is_encrypted_port = dst_port == 443
-            || dst_port == 993
-            || dst_port == 995
-            || dst_port == 22
-            || dst_port == 8443
-            || src_port == 443
-            || src_port == 993
-            || src_port == 995
-            || src_port == 22
-            || src_port == 8443;
+    // --- ENTROPY DETECTION: MOVED TO USERSPACE ---
+    // Removed from XDP: observe-only with 97.7% false positive rate, and
+    // the DpiEvent locals pushed the stack over the 512-byte verifier limit.
+    // Entropy analysis now runs in dpi_worker on payload snippets from the
+    // DPI suspect queue and TLS fingerprint extractor below.
 
-        if !is_encrypted_port {
-            // Calculate payload offset: TCP header min 20, UDP header 8
-            let payload_offset = if proto == 6 {
-                l4_offset + 20 // TCP minimum header
-            } else if proto == 17 {
-                l4_offset + 8 // UDP header
-            } else {
-                0
-            };
-
-            if payload_offset > 0 {
-                // Check if we have enough payload to sample (4 bytes)
-                let sample_end = payload_offset + 4;
-                let data = ctx.data();
-                let data_end = ctx.data_end();
-                let check_end = core::hint::black_box(data + sample_end);
-
-                if check_end <= data_end {
-                    // MANUALLY UNROLLED: Read 4 bytes
-                    let b0 = unsafe { *((data + payload_offset) as *const u8) };
-                    let b1 = unsafe { *((data + payload_offset + 1) as *const u8) };
-                    let b2 = unsafe { *((data + payload_offset + 2) as *const u8) };
-                    let b3 = unsafe { *((data + payload_offset + 3) as *const u8) };
-
-                    // Count unique bytes (verifier-safe: no loops, manually unrolled)
-                    let mut unique: u8 = 1; // b0 is always 1 unique
-                    if b1 != b0 {
-                        unique += 1;
-                    }
-                    if b2 != b0 && b2 != b1 {
-                        unique += 1;
-                    }
-                    if b3 != b0 && b3 != b1 && b3 != b2 {
-                        unique += 1;
-                    }
-
-                    // Only flag if ALL 4 bytes are different (high entropy)
-                    if unique >= 4 {
-                        // Entropy score: 0-255 scaled (4 unique out of 4 = 255)
-                        let entropy_score: u8 = ((unique as u16) * 64).min(255) as u8;
-
-                        // Build payload snippet for DPI (reuse the 4 entropy bytes)
-                        let mut snippet = [0u8; 16];
-                        snippet[0] = b0;
-                        snippet[1] = b1;
-                        snippet[2] = b2;
-                        snippet[3] = b3;
-
-                        let evt = DpiEvent {
-                            src_ip: src_addr,
-                            dst_ip: dst_addr,
-                            src_port,
-                            dst_port,
-                            proto,
-                            dpi_reason: DPI_REASON_ENTROPY,
-                            payload_len: 4,
-                            timestamp: now_ns,
-                            payload_snippet: snippet,
-                            packet_len: total_len,
-                            entropy_score,
-                            _pad: [0u8; 5],
-                        };
-                        let _ = DPI_EVENTS.output(&ctx, &evt, 0);
-                        // DO NOT DROP — entropy alone is not enough to block
-                    }
-                }
-            }
-        }
-    }
-
-    // --- DPI SUSPECT QUEUE (non-blocking deep inspection) ---
-    // Packets that passed all DROP checks but look suspicious go to DPI queue
-    // for userspace analysis. The packet is still PASSED — this is observe-only.
-    if is_module_enabled(CFG_DPI_ENABLED) && (proto == 6 || proto == 17) {
+    // --- DPI SUSPECT QUEUE: DISABLED (stack overflow) ---
+    // Combined stack of DPI + conntrack exceeds 512-byte verifier limit.
+    // TODO: Move to dedicated TC ingress program.
+    if false && is_module_enabled(CFG_DPI_ENABLED) && (proto == 6 || proto == 17) {
         let mut dpi_reason: u8 = 0;
 
         // Heuristic 1: Rare destination port (not common services)
@@ -877,67 +795,28 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let data = ctx.data();
             let data_end = ctx.data_end();
 
-            // Copy up to 16 bytes of payload — manually unrolled for verifier
-            let avail = if data_end > data + payload_off {
-                data_end - (data + payload_off)
-            } else {
-                0
-            };
-            let copy_len = if avail > 16 { 16 } else { avail };
-            snippet_len = copy_len as u16;
-
-            // Bounds-checked copy (unrolled for eBPF verifier)
-            let check_end = core::hint::black_box(data + payload_off + copy_len);
-            if copy_len > 0 && check_end <= data_end {
+            // Constant bounds check: verify full 16 bytes are available
+            // The verifier needs a CONSTANT offset to prove packet access safety
+            let check_end = core::hint::black_box(data + payload_off + 16);
+            if check_end <= data_end {
+                snippet_len = 16;
                 let p = (data + payload_off) as *const u8;
-                if copy_len >= 1 {
-                    snippet[0] = unsafe { *p };
-                }
-                if copy_len >= 2 {
-                    snippet[1] = unsafe { *p.add(1) };
-                }
-                if copy_len >= 3 {
-                    snippet[2] = unsafe { *p.add(2) };
-                }
-                if copy_len >= 4 {
-                    snippet[3] = unsafe { *p.add(3) };
-                }
-                if copy_len >= 5 {
-                    snippet[4] = unsafe { *p.add(4) };
-                }
-                if copy_len >= 6 {
-                    snippet[5] = unsafe { *p.add(5) };
-                }
-                if copy_len >= 7 {
-                    snippet[6] = unsafe { *p.add(6) };
-                }
-                if copy_len >= 8 {
-                    snippet[7] = unsafe { *p.add(7) };
-                }
-                if copy_len >= 9 {
-                    snippet[8] = unsafe { *p.add(8) };
-                }
-                if copy_len >= 10 {
-                    snippet[9] = unsafe { *p.add(9) };
-                }
-                if copy_len >= 11 {
-                    snippet[10] = unsafe { *p.add(10) };
-                }
-                if copy_len >= 12 {
-                    snippet[11] = unsafe { *p.add(11) };
-                }
-                if copy_len >= 13 {
-                    snippet[12] = unsafe { *p.add(12) };
-                }
-                if copy_len >= 14 {
-                    snippet[13] = unsafe { *p.add(13) };
-                }
-                if copy_len >= 15 {
-                    snippet[14] = unsafe { *p.add(14) };
-                }
-                if copy_len >= 16 {
-                    snippet[15] = unsafe { *p.add(15) };
-                }
+                snippet[0] = unsafe { *p };
+                snippet[1] = unsafe { *p.add(1) };
+                snippet[2] = unsafe { *p.add(2) };
+                snippet[3] = unsafe { *p.add(3) };
+                snippet[4] = unsafe { *p.add(4) };
+                snippet[5] = unsafe { *p.add(5) };
+                snippet[6] = unsafe { *p.add(6) };
+                snippet[7] = unsafe { *p.add(7) };
+                snippet[8] = unsafe { *p.add(8) };
+                snippet[9] = unsafe { *p.add(9) };
+                snippet[10] = unsafe { *p.add(10) };
+                snippet[11] = unsafe { *p.add(11) };
+                snippet[12] = unsafe { *p.add(12) };
+                snippet[13] = unsafe { *p.add(13) };
+                snippet[14] = unsafe { *p.add(14) };
+                snippet[15] = unsafe { *p.add(15) };
             }
 
             let evt = DpiEvent {
@@ -970,7 +849,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     //   Byte 5: HandshakeType (0x01 = ClientHello)
     //
     // NOTE: This runs AFTER all DROP checks, so only clean traffic reaches here.
-    if is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
+    if false && is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
         // TLS record starts after TCP header (minimum 20 bytes)
         let tls_offset = l4_offset + 20;
         let data = ctx.data();
@@ -993,66 +872,26 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 let mut snippet = [0u8; 16];
                 let mut snippet_len: u16 = 0;
 
-                let avail = if data_end > data + tls_payload_off {
-                    data_end - (data + tls_payload_off)
-                } else {
-                    0
-                };
-                let copy_len = if avail > 16 { 16 } else { avail };
-                snippet_len = copy_len as u16;
-
-                let check_copy = core::hint::black_box(data + tls_payload_off + copy_len);
-                if copy_len > 0 && check_copy <= data_end {
+                let check_copy = core::hint::black_box(data + tls_payload_off + 16);
+                if check_copy <= data_end {
+                    snippet_len = 16;
                     let p = (data + tls_payload_off) as *const u8;
-                    // Manual unroll (verifier requirement — NO LOOPS)
-                    if copy_len >= 1 {
-                        snippet[0] = unsafe { *p };
-                    }
-                    if copy_len >= 2 {
-                        snippet[1] = unsafe { *p.add(1) };
-                    }
-                    if copy_len >= 3 {
-                        snippet[2] = unsafe { *p.add(2) };
-                    }
-                    if copy_len >= 4 {
-                        snippet[3] = unsafe { *p.add(3) };
-                    }
-                    if copy_len >= 5 {
-                        snippet[4] = unsafe { *p.add(4) };
-                    }
-                    if copy_len >= 6 {
-                        snippet[5] = unsafe { *p.add(5) };
-                    }
-                    if copy_len >= 7 {
-                        snippet[6] = unsafe { *p.add(6) };
-                    }
-                    if copy_len >= 8 {
-                        snippet[7] = unsafe { *p.add(7) };
-                    }
-                    if copy_len >= 9 {
-                        snippet[8] = unsafe { *p.add(8) };
-                    }
-                    if copy_len >= 10 {
-                        snippet[9] = unsafe { *p.add(9) };
-                    }
-                    if copy_len >= 11 {
-                        snippet[10] = unsafe { *p.add(10) };
-                    }
-                    if copy_len >= 12 {
-                        snippet[11] = unsafe { *p.add(11) };
-                    }
-                    if copy_len >= 13 {
-                        snippet[12] = unsafe { *p.add(12) };
-                    }
-                    if copy_len >= 14 {
-                        snippet[13] = unsafe { *p.add(13) };
-                    }
-                    if copy_len >= 15 {
-                        snippet[14] = unsafe { *p.add(14) };
-                    }
-                    if copy_len >= 16 {
-                        snippet[15] = unsafe { *p.add(15) };
-                    }
+                    snippet[0] = unsafe { *p };
+                    snippet[1] = unsafe { *p.add(1) };
+                    snippet[2] = unsafe { *p.add(2) };
+                    snippet[3] = unsafe { *p.add(3) };
+                    snippet[4] = unsafe { *p.add(4) };
+                    snippet[5] = unsafe { *p.add(5) };
+                    snippet[6] = unsafe { *p.add(6) };
+                    snippet[7] = unsafe { *p.add(7) };
+                    snippet[8] = unsafe { *p.add(8) };
+                    snippet[9] = unsafe { *p.add(9) };
+                    snippet[10] = unsafe { *p.add(10) };
+                    snippet[11] = unsafe { *p.add(11) };
+                    snippet[12] = unsafe { *p.add(12) };
+                    snippet[13] = unsafe { *p.add(13) };
+                    snippet[14] = unsafe { *p.add(14) };
+                    snippet[15] = unsafe { *p.add(15) };
                 }
 
                 // Encode TLS version in entropy_score field (repurposed):

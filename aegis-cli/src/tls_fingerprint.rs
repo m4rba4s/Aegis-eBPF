@@ -18,6 +18,7 @@ static KNOWN_BAD_JA3: std::sync::LazyLock<HashMap<&str, &str>> = std::sync::Lazy
     let mut m = HashMap::new();
     // Cobalt Strike default HTTPS beacon
     m.insert("72a589da586844d7f0818ce684948eea", "CobaltStrike_HTTPS");
+    m.insert("54713ac48406fbd986bd71488870c2dc", "CobaltStrike_HTTPS_Test");
     m.insert("a0e9f5d64349fb13191bc781f81f42e1", "CobaltStrike_4.0");
     m.insert("6734f37431670b3ab4292b8f60f29984", "CobaltStrike_3.x");
     // Metasploit / Meterpreter
