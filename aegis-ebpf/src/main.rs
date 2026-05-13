@@ -450,7 +450,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     };
 
     // Check if this is an existing ESTABLISHED connection
-    let mut conntrack_established = false;
     if let Some(state) = unsafe { CONN_TRACK.get(&conn_key) } {
         if state.state == CONN_ESTABLISHED {
             let mut updated = *state;
@@ -458,11 +457,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             updated.packets = updated.packets.saturating_add(1);
             updated.bytes = updated.bytes.saturating_add(total_len as u32);
             let _ = CONN_TRACK.insert(&conn_key, &updated, 0);
-            // Don't early-return for TCP/443 — let TLS fingerprint extractor run
-            if !(proto == 6 && dst_port == 443 && is_module_enabled(CFG_DPI_ENABLED)) {
-                return Ok(xdp_action::XDP_PASS);
-            }
-            conntrack_established = true;
+            return Ok(xdp_action::XDP_PASS);
         }
     }
 
@@ -509,11 +504,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                     total_len,
                 );
             }
-            // Don't early-return for TCP/443 — let TLS fingerprint extractor run
-            if !(proto == 6 && dst_port == 443 && is_module_enabled(CFG_DPI_ENABLED)) {
-                return Ok(xdp_action::XDP_PASS);
-            }
-            conntrack_established = true;
+            return Ok(xdp_action::XDP_PASS);
         }
     }
 
@@ -980,16 +971,20 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     //
     // NOTE: This runs AFTER all DROP checks, so only clean traffic reaches here.
     if is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
-        // Read actual TCP header length from Data Offset field (byte 12, upper 4 bits)
-        let doff_ptr: *const u8 = ptr_at(&ctx, l4_offset + 12)?;
-        let tcp_hdr_len = ((unsafe { *doff_ptr } >> 4) & 0x0F) as usize * 4;
-        let tls_offset = l4_offset + tcp_hdr_len;
         let data = ctx.data();
         let data_end = ctx.data_end();
 
-        // Bounds check: need at least 6 bytes (5 TLS record header + 1 handshake type)
-        let check_tls = core::hint::black_box(data + tls_offset + 6);
-        if check_tls <= data_end {
+        // Constant bounds check: verify we can read up to max TCP header (60) + 6 TLS bytes
+        // This satisfies the verifier with a CONSTANT offset, not a variable one.
+        let max_tls_end = core::hint::black_box(data + l4_offset + 60 + 6);
+        if max_tls_end <= data_end {
+            // Read actual TCP data offset (byte 12 of TCP header, upper 4 bits × 4)
+            let doff = unsafe { *((data + l4_offset + 12) as *const u8) };
+            let tcp_hdr_len = ((doff >> 4) & 0x0F) as usize * 4;
+
+            // Sanity: TCP header must be 20..60 bytes
+            if tcp_hdr_len >= 20 && tcp_hdr_len <= 60 {
+                let tls_offset = l4_offset + tcp_hdr_len;
             let content_type = unsafe { *((data + tls_offset) as *const u8) };
             let handshake_type = unsafe { *((data + tls_offset + 5) as *const u8) };
 
@@ -1088,11 +1083,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 let _ = DPI_EVENTS.output(&ctx, &evt, 0);
             }
         }
-    }
-
-    // If conntrack already decided PASS (we only delayed return for TLS extraction), exit now
-    if conntrack_established {
-        return Ok(xdp_action::XDP_PASS);
+        }
     }
 
     // --- CREATE/UPDATE CONNECTION TRACKING ---
