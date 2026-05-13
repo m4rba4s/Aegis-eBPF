@@ -971,20 +971,14 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     //
     // NOTE: This runs AFTER all DROP checks, so only clean traffic reaches here.
     if is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
+        // TLS record starts after TCP header (minimum 20 bytes)
+        let tls_offset = l4_offset + 20;
         let data = ctx.data();
         let data_end = ctx.data_end();
 
-        // Constant bounds check: verify we can read up to max TCP header (60) + 6 TLS bytes
-        // This satisfies the verifier with a CONSTANT offset, not a variable one.
-        let max_tls_end = core::hint::black_box(data + l4_offset + 60 + 6);
-        if max_tls_end <= data_end {
-            // Read actual TCP data offset (byte 12 of TCP header, upper 4 bits × 4)
-            let doff = unsafe { *((data + l4_offset + 12) as *const u8) };
-            let tcp_hdr_len = ((doff >> 4) & 0x0F) as usize * 4;
-
-            // Sanity: TCP header must be 20..60 bytes
-            if tcp_hdr_len >= 20 && tcp_hdr_len <= 60 {
-                let tls_offset = l4_offset + tcp_hdr_len;
+        // Bounds check: need at least 6 bytes (5 TLS record header + 1 handshake type)
+        let check_tls = core::hint::black_box(data + tls_offset + 6);
+        if check_tls <= data_end {
             let content_type = unsafe { *((data + tls_offset) as *const u8) };
             let handshake_type = unsafe { *((data + tls_offset + 5) as *const u8) };
 
@@ -1082,7 +1076,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 };
                 let _ = DPI_EVENTS.output(&ctx, &evt, 0);
             }
-        }
         }
     }
 
