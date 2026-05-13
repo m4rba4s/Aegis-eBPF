@@ -250,7 +250,7 @@ fn default_yara_rules_path() -> String {
 impl Default for DpiModuleConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             auto_block_threshold: 80,
             rules_path: default_yara_rules_path(),
         }
