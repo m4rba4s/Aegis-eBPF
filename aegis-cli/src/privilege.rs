@@ -65,19 +65,8 @@ pub fn drop_privileges() -> anyhow::Result<()> {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(65534);
 
-    if let Ok(entries) = std::fs::read_dir("/sys/fs/bpf/aegis") {
-        for entry in entries.flatten() {
-            unsafe {
-                use std::os::unix::ffi::OsStrExt;
-                let c_path = std::ffi::CString::new(entry.path().as_os_str().as_bytes()).unwrap();
-                libc::chown(c_path.as_ptr(), uid, gid);
-            }
-        }
-        unsafe {
-            let c_dir = std::ffi::CString::new("/sys/fs/bpf/aegis").unwrap();
-            libc::chown(c_dir.as_ptr(), uid, gid);
-        }
-    }
+    // NOTE: Do NOT chown BPF maps to non-root — writable BPF maps allow
+    // unprivileged modification of firewall state. Maps remain root-owned.
 
     caps::securebits::set_keepcaps(true)?;
 

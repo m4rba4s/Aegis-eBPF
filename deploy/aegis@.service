@@ -21,7 +21,7 @@ TimeoutStopSec=30
 # CAP_NET_ADMIN: attach XDP/TC, manage network
 # CAP_PERFMON: perf events for logging
 # CAP_SYS_ADMIN: fallback for older kernels without CAP_BPF
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
 
 # Filesystem protection
