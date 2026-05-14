@@ -57,6 +57,7 @@ use aegis_common::{
     CFG_VERBOSE,
     // Connection states
     CONN_ESTABLISHED,
+    CONN_SYN_SENT,
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS,
     CONN_TIMEOUT_OTHER_NS,
@@ -809,15 +810,9 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         let ack = tcp_flags & 0x10 != 0;
 
         // Incoming SYN-ACK = response to our SYN = ESTABLISHED
+        // Only promote if TC egress recorded an outgoing SYN (SYN_SENT state).
+        // Without this check, spoofed SYN-ACK packets poison conntrack.
         if syn && ack {
-            let new_conn = ConnTrackState {
-                state: CONN_ESTABLISHED,
-                direction: 0,
-                _pad: [0u8; 2],
-                last_seen: now_ns,
-                packets: 1,
-                bytes: total_len as u32,
-            };
             let out_key = ConnTrackKey {
                 src_ip: dst_addr,
                 dst_ip: src_addr,
@@ -826,7 +821,16 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 proto,
                 _pad: [0u8; 3],
             };
-            let _ = CONN_TRACK.insert(&out_key, &new_conn, 0);
+            if let Some(existing) = unsafe { CONN_TRACK.get(&out_key) } {
+                if existing.state == CONN_SYN_SENT {
+                    let mut promoted = *existing;
+                    promoted.state = CONN_ESTABLISHED;
+                    promoted.last_seen = now_ns;
+                    promoted.packets = promoted.packets.saturating_add(1);
+                    promoted.bytes = promoted.bytes.saturating_add(total_len as u32);
+                    let _ = CONN_TRACK.insert(&out_key, &promoted, 0);
+                }
+            }
         }
     } else if proto == 17 {
         // UDP
