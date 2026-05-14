@@ -14,7 +14,7 @@ use aya_ebpf::{
     macros::{map, xdp},
     maps::{
         lpm_trie::{Key, LpmTrie},
-        HashMap, PerCpuArray, PerfEventArray,
+        HashMap, LruHashMap, PerCpuArray, PerfEventArray,
     },
     programs::XdpContext,
 };
@@ -47,8 +47,6 @@ use aegis_common::{
     // Actions
     ACTION_PASS,
     CFG_CONN_TRACK,
-    CFG_DPI_ENABLED,
-    CFG_ENTROPY,
     // Config keys
     CFG_INTERFACE_MODE,
     CFG_PORT_SCAN,
@@ -62,11 +60,6 @@ use aegis_common::{
     // Connection timeouts
     CONN_TIMEOUT_ESTABLISHED_NS,
     CONN_TIMEOUT_OTHER_NS,
-
-    DPI_REASON_RARE_PORT,
-    DPI_REASON_TLS_HELLO,
-    DPI_REASON_UNKNOWN_PROTO,
-    DPI_REASON_DNS_TUNNEL,
     // Hook points
     HOOK_XDP,
     MAX_TOKENS,
@@ -137,17 +130,17 @@ static STATS: PerCpuArray<Stats> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static DPI_EVENTS: PerfEventArray<DpiEvent> = PerfEventArray::new(0);
 
-/// Rate limit map: IP -> RateLimitState
+/// Rate limit map: IP -> RateLimitState (LRU: evicts oldest on overflow)
 #[map]
-static RATE_LIMIT: HashMap<u32, RateLimitState> = HashMap::with_max_entries(4096, 0);
+static RATE_LIMIT: LruHashMap<u32, RateLimitState> = LruHashMap::with_max_entries(65536, 0);
 
 /// Config map for runtime toggles
 #[map]
 static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
 
-/// Port Scan detection map: source IP -> PortScanState
+/// Port Scan detection map: source IP -> PortScanState (LRU: evicts oldest on overflow)
 #[map]
-static PORT_SCAN: HashMap<u32, PortScanState> = HashMap::with_max_entries(4096, 0);
+static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(65536, 0);
 
 /// Connection tracking map: 5-tuple -> state
 #[map]
@@ -357,10 +350,19 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     let proto = unsafe { (*ipv4_hdr).proto };
     let total_len = u16::from_be(unsafe { (*ipv4_hdr).tot_len });
 
-    // Check IP header length - SKIP packets with IP options
+    // Fail-closed: DROP packets with IP options (variable-length headers
+    // bypass our fixed L4 offset calculation). <0.01% of legitimate traffic.
     let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
     if ip_ihl != 5 {
-        return Ok(xdp_action::XDP_PASS);
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    // Fail-closed: DROP fragmented packets. Fragments bypass L4 port/protocol
+    // parsing, rate limiting, and scan detection. Kernel reassembly happens
+    // after XDP, so legitimate fragmented flows still complete.
+    let frag_off = u16::from_be(unsafe { (*ipv4_hdr).frag_off });
+    if (frag_off & 0x3FFF) != 0 {
+        return Ok(xdp_action::XDP_DROP);
     }
 
     let l4_offset = l4_base_offset;
@@ -434,6 +436,56 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             );
         }
         return Ok(xdp_action::XDP_PASS);
+    }
+
+    // --- BLOCKLIST CHECKS (BEFORE CONNTRACK) ---
+    // Critical: these MUST run before conntrack fast-path, otherwise
+    // established flows from blocked IPs bypass manual bans and CIDR feeds.
+    // Hot-reload bans won't work on active connections without this.
+
+    // Exact match blocklist (manual blocks)
+    let key_exact_early = FlowKey {
+        src_ip: src_addr,
+        dst_port,
+        proto,
+        _pad: 0,
+    };
+    if let Some(_) = unsafe { BLOCKLIST.get(&key_exact_early) } {
+        stats_inc_block_manual();
+        return log_and_return(
+            &ctx, src_addr, dst_addr, src_port, dst_port,
+            proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST, total_len,
+        );
+    }
+
+    // Wildcard blocklist (IP-only block, any port/proto)
+    let key_wild_early = FlowKey {
+        src_ip: src_addr,
+        dst_port: 0,
+        proto: 0,
+        _pad: 0,
+    };
+    if let Some(_) = unsafe { BLOCKLIST.get(&key_wild_early) } {
+        stats_inc_block_manual();
+        return log_and_return(
+            &ctx, src_addr, dst_addr, src_port, dst_port,
+            proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST, total_len,
+        );
+    }
+
+    // CIDR blocklist (threat feeds)
+    if is_module_enabled(CFG_THREAT_FEEDS) {
+        let cidr_key_early = Key::new(32, LpmKeyIpv4 { prefix_len: 32, addr: src_addr });
+        if let Some(_) = CIDR_BLOCKLIST.get(&cidr_key_early) {
+            stats_inc_block_cidr();
+            return log_and_return(
+                &ctx, src_addr, dst_addr, src_port, dst_port,
+                proto, tcp_flags, ACTION_DROP, REASON_CIDR_FEED,
+                THREAT_BLOCKLIST, total_len,
+            );
+        }
     }
 
     // --- CONNECTION TRACKING (Stateful Firewall) ---
@@ -745,178 +797,10 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         );
     }
 
-    // --- ENTROPY DETECTION: MOVED TO USERSPACE ---
-    // Removed from XDP: observe-only with 97.7% false positive rate, and
-    // the DpiEvent locals pushed the stack over the 512-byte verifier limit.
-    // Entropy analysis now runs in dpi_worker on payload snippets from the
-    // DPI suspect queue and TLS fingerprint extractor below.
+    // --- DPI / TLS FINGERPRINTING: DEFERRED TO v2 ---
+    // Moved to dedicated TC ingress program (separate stack frame).
+    // DPI_EVENTS map and DpiEvent struct remain in aegis-common for reuse.
 
-    // --- DPI SUSPECT QUEUE: DISABLED (stack overflow) ---
-    // Combined stack of DPI + conntrack exceeds 512-byte verifier limit.
-    // TODO: Move to dedicated TC ingress program.
-    if false && is_module_enabled(CFG_DPI_ENABLED) && (proto == 6 || proto == 17) {
-        let mut dpi_reason: u8 = 0;
-
-        // Heuristic 1: Rare destination port (not common services)
-        let is_common_port = dst_port == 22
-            || dst_port == 53
-            || dst_port == 80
-            || dst_port == 443
-            || dst_port == 8080
-            || dst_port == 8443
-            || dst_port == 25
-            || dst_port == 110
-            || dst_port == 143
-            || dst_port == 993
-            || dst_port == 995
-            || dst_port == 587
-            || dst_port == 3306
-            || dst_port == 5432
-            || dst_port == 6379;
-        if !is_common_port && dst_port > 0 {
-            dpi_reason = DPI_REASON_RARE_PORT;
-        }
-
-        // Heuristic 2: DNS on non-standard port (possible DNS tunnel)
-        if proto == 17 && src_port == 53 && total_len > 200 {
-            dpi_reason = DPI_REASON_DNS_TUNNEL;
-        }
-
-        if dpi_reason > 0 {
-            // Collect payload snippet (first 16 bytes of L4 payload)
-            let payload_off = if proto == 6 {
-                l4_offset + 20
-            } else {
-                l4_offset + 8
-            };
-            let mut snippet = [0u8; 16];
-            let mut snippet_len: u16 = 0;
-
-            let data = ctx.data();
-            let data_end = ctx.data_end();
-
-            // Constant bounds check: verify full 16 bytes are available
-            // The verifier needs a CONSTANT offset to prove packet access safety
-            let check_end = core::hint::black_box(data + payload_off + 16);
-            if check_end <= data_end {
-                snippet_len = 16;
-                let p = (data + payload_off) as *const u8;
-                snippet[0] = unsafe { *p };
-                snippet[1] = unsafe { *p.add(1) };
-                snippet[2] = unsafe { *p.add(2) };
-                snippet[3] = unsafe { *p.add(3) };
-                snippet[4] = unsafe { *p.add(4) };
-                snippet[5] = unsafe { *p.add(5) };
-                snippet[6] = unsafe { *p.add(6) };
-                snippet[7] = unsafe { *p.add(7) };
-                snippet[8] = unsafe { *p.add(8) };
-                snippet[9] = unsafe { *p.add(9) };
-                snippet[10] = unsafe { *p.add(10) };
-                snippet[11] = unsafe { *p.add(11) };
-                snippet[12] = unsafe { *p.add(12) };
-                snippet[13] = unsafe { *p.add(13) };
-                snippet[14] = unsafe { *p.add(14) };
-                snippet[15] = unsafe { *p.add(15) };
-            }
-
-            let evt = DpiEvent {
-                src_ip: src_addr,
-                dst_ip: dst_addr,
-                src_port,
-                dst_port,
-                proto,
-                dpi_reason,
-                payload_len: snippet_len,
-                timestamp: now_ns,
-                payload_snippet: snippet,
-                packet_len: total_len,
-                entropy_score: 0,
-                _pad: [0u8; 5],
-            };
-            let _ = DPI_EVENTS.output(&ctx, &evt, 0);
-        }
-    }
-
-    // --- TLS CLIENTHELLO FINGERPRINT EXTRACTION (observe-only) ---
-    // Detect TLS Handshake (ContentType 0x16) with ClientHello (HandshakeType 0x01)
-    // on TCP port 443. Extract first 16 bytes of TLS record payload for userspace
-    // JA3/JA4 fingerprint computation. Packet is ALWAYS passed.
-    //
-    // TLS Record Layer:
-    //   Byte 0: ContentType (0x16 = Handshake)
-    //   Bytes 1-2: TLS Version (0x0301 = TLS 1.0, 0x0303 = TLS 1.2, etc.)
-    //   Bytes 3-4: Record Length
-    //   Byte 5: HandshakeType (0x01 = ClientHello)
-    //
-    // NOTE: This runs AFTER all DROP checks, so only clean traffic reaches here.
-    if false && is_module_enabled(CFG_DPI_ENABLED) && proto == 6 && dst_port == 443 {
-        // TLS record starts after TCP header (minimum 20 bytes)
-        let tls_offset = l4_offset + 20;
-        let data = ctx.data();
-        let data_end = ctx.data_end();
-
-        // Bounds check: need at least 6 bytes (5 TLS record header + 1 handshake type)
-        let check_tls = core::hint::black_box(data + tls_offset + 6);
-        if check_tls <= data_end {
-            let content_type = unsafe { *((data + tls_offset) as *const u8) };
-            let handshake_type = unsafe { *((data + tls_offset + 5) as *const u8) };
-
-            // ContentType 0x16 = Handshake, HandshakeType 0x01 = ClientHello
-            if content_type == 0x16 && handshake_type == 0x01 {
-                // Extract TLS version from record header (bytes 1-2)
-                let tls_ver_major = unsafe { *((data + tls_offset + 1) as *const u8) };
-                let tls_ver_minor = unsafe { *((data + tls_offset + 2) as *const u8) };
-
-                // Collect first 16 bytes of TLS payload (after 5-byte record header)
-                let tls_payload_off = tls_offset + 5;
-                let mut snippet = [0u8; 16];
-                let mut snippet_len: u16 = 0;
-
-                let check_copy = core::hint::black_box(data + tls_payload_off + 16);
-                if check_copy <= data_end {
-                    snippet_len = 16;
-                    let p = (data + tls_payload_off) as *const u8;
-                    snippet[0] = unsafe { *p };
-                    snippet[1] = unsafe { *p.add(1) };
-                    snippet[2] = unsafe { *p.add(2) };
-                    snippet[3] = unsafe { *p.add(3) };
-                    snippet[4] = unsafe { *p.add(4) };
-                    snippet[5] = unsafe { *p.add(5) };
-                    snippet[6] = unsafe { *p.add(6) };
-                    snippet[7] = unsafe { *p.add(7) };
-                    snippet[8] = unsafe { *p.add(8) };
-                    snippet[9] = unsafe { *p.add(9) };
-                    snippet[10] = unsafe { *p.add(10) };
-                    snippet[11] = unsafe { *p.add(11) };
-                    snippet[12] = unsafe { *p.add(12) };
-                    snippet[13] = unsafe { *p.add(13) };
-                    snippet[14] = unsafe { *p.add(14) };
-                    snippet[15] = unsafe { *p.add(15) };
-                }
-
-                // Encode TLS version in entropy_score field (repurposed):
-                // Major in high nibble, minor in low nibble
-                // e.g. TLS 1.2 (0x03, 0x03) → 0x33
-                let tls_ver_encoded = ((tls_ver_major & 0x0F) << 4) | (tls_ver_minor & 0x0F);
-
-                let evt = DpiEvent {
-                    src_ip: src_addr,
-                    dst_ip: dst_addr,
-                    src_port,
-                    dst_port,
-                    proto,
-                    dpi_reason: DPI_REASON_TLS_HELLO,
-                    payload_len: snippet_len,
-                    timestamp: now_ns,
-                    payload_snippet: snippet,
-                    packet_len: total_len,
-                    entropy_score: tls_ver_encoded,
-                    _pad: [0u8; 5],
-                };
-                let _ = DPI_EVENTS.output(&ctx, &evt, 0);
-            }
-        }
-    }
 
     // --- CREATE/UPDATE CONNECTION TRACKING ---
     if proto == 6 {

@@ -62,9 +62,18 @@ pub fn setup_config_map(
         0,
     )?;
 
-    // Skip RFC1918/loopback whitelist when running on lo/tun (for testing/VPN)
-    let skip_wl: u32 = if iface == "lo" || iface.starts_with("tun") { 1 } else { 0 };
+    // Skip RFC1918/loopback whitelist on public-facing interfaces.
+    // On non-loopback/non-virtual interfaces, RFC1918 sources are spoofed.
+    let is_virtual = iface == "lo"
+        || iface.starts_with("tun")
+        || iface.starts_with("docker")
+        || iface.starts_with("veth")
+        || iface.starts_with("br-");
+    let skip_wl: u32 = if !is_virtual { 1 } else { 0 };
     config.insert(aegis_common::CFG_SKIP_WHITELIST, skip_wl, 0)?;
+    if skip_wl == 1 {
+        tracing::info!(iface = iface, "RFC1918 whitelist DISABLED (public interface)");
+    }
 
     Ok(Arc::new(Mutex::new(config)))
 }
