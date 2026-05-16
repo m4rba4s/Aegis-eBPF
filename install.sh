@@ -11,7 +11,38 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AEGIS_REPO_URL="${AEGIS_REPO_URL:-https://github.com/m4rba4s/Aegis-eBPF.git}"
+AEGIS_TARBALL_URL="${AEGIS_TARBALL_URL:-https://github.com/m4rba4s/Aegis-eBPF/archive/refs/heads/main.tar.gz}"
+
+bootstrap_from_stdin() {
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/aegis-ebpf-install.XXXXXX)
+
+    echo "Aegis installer is running from stdin; fetching source into $tmpdir"
+
+    if command -v git >/dev/null 2>&1; then
+        if git clone --depth 1 "$AEGIS_REPO_URL" "$tmpdir"; then
+            exec bash "$tmpdir/install.sh" "$@"
+        fi
+        echo "git clone failed; trying source tarball..." >&2
+    fi
+
+    if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        if curl -fsSL "$AEGIS_TARBALL_URL" | tar -xz -C "$tmpdir" --strip-components=1; then
+            exec bash "$tmpdir/install.sh" "$@"
+        fi
+    fi
+
+    echo "ERROR: one-line install requires git, or curl + tar." >&2
+    exit 1
+}
+
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+if [[ -z "$SCRIPT_PATH" || ! -f "$SCRIPT_PATH" ]]; then
+    bootstrap_from_stdin "$@"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 INSTALL_DIR="/usr/local"
 BIN_DIR="$INSTALL_DIR/bin"
 SHARE_DIR="$INSTALL_DIR/share/aegis"
@@ -48,7 +79,7 @@ detect_distro() {
 }
 
 detect_init_system() {
-    if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
+    if command -v systemctl &>/dev/null && { [[ -d /run/systemd/system ]] || [[ "$(ps -p 1 -o comm= 2>/dev/null || true)" == "systemd" ]]; }; then
         echo "systemd"
     elif command -v rc-service &>/dev/null; then
         echo "openrc"
@@ -97,20 +128,23 @@ install_system_deps() {
 
     case "$distro" in
         fedora|rhel|centos|rocky|alma)
-            dnf install -y \
-                gcc make pkg-config \
-                llvm clang llvm-devel \
-                elfutils-libelf-devel \
-                protobuf-compiler \
-                curl wget git \
-                2>/dev/null || \
-            yum install -y \
-                gcc make pkgconfig \
-                llvm clang llvm-devel \
-                elfutils-libelf-devel \
-                protobuf-compiler \
-                curl wget git \
-                2>/dev/null || true
+            if command -v dnf &>/dev/null; then
+                dnf install -y \
+                    gcc make pkg-config \
+                    llvm clang llvm-devel \
+                    elfutils-libelf-devel \
+                    protobuf-compiler \
+                    curl wget git
+            elif command -v yum &>/dev/null; then
+                yum install -y \
+                    gcc make pkgconfig \
+                    llvm clang llvm-devel \
+                    elfutils-libelf-devel \
+                    protobuf-compiler \
+                    curl wget git
+            else
+                log_warn "dnf/yum not found; install system dependencies manually"
+            fi
             ;;
         ubuntu|debian|pop|linuxmint)
             apt-get update -qq
@@ -118,31 +152,27 @@ install_system_deps() {
                 build-essential pkg-config \
                 llvm clang libelf-dev \
                 protobuf-compiler \
-                curl wget git \
-                2>/dev/null || true
+                curl wget git
             ;;
         arch|manjaro|endeavouros)
             pacman -Sy --noconfirm --needed \
                 base-devel llvm clang libelf \
                 protobuf \
-                curl wget git \
-                2>/dev/null || true
+                curl wget git
             ;;
         opensuse*|sles)
             zypper install -y \
                 gcc make pkg-config \
                 llvm clang libelf-devel \
                 protobuf-devel \
-                curl wget git \
-                2>/dev/null || true
+                curl wget git
             ;;
         alpine)
             apk add \
                 build-base musl-dev linux-headers \
                 llvm clang libelf-dev \
                 protobuf \
-                curl wget git \
-                2>/dev/null || true
+                curl wget git
             ;;
         *)
             log_warn "Unknown distro '$distro' — install manually: gcc, llvm, clang, libelf-dev, curl, git"
@@ -169,76 +199,162 @@ install_system_deps() {
 # RUST TOOLCHAIN DETECTION & SETUP
 # =============================================================================
 
+cargo_bin_candidates() {
+    # SUDO_USER's home is common when Rust was installed before running sudo.
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local sudo_home
+        sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
+        [[ -n "$sudo_home" ]] && echo "$sudo_home/.cargo/bin"
+    fi
+
+    [[ -n "${HOME:-}" ]] && echo "$HOME/.cargo/bin"
+
+    for d in /home/*/.cargo/bin; do
+        [[ -d "$d" ]] && echo "$d"
+    done
+
+    echo "/root/.cargo/bin"
+}
+
+activate_cargo_bin_dir() {
+    local cbd="$1"
+    local home_dir
+
+    export PATH="$cbd:$PATH"
+
+    home_dir="${cbd%/.cargo/bin}"
+    if [[ -d "$home_dir/.cargo" ]]; then
+        export CARGO_HOME="$home_dir/.cargo"
+    fi
+    if [[ -d "$home_dir/.rustup" ]]; then
+        export RUSTUP_HOME="$home_dir/.rustup"
+    fi
+
+    hash -r 2>/dev/null || true
+}
+
+source_rust_envs() {
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local sudo_home
+        sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
+        [[ -f "$sudo_home/.cargo/env" ]] && # shellcheck disable=SC1091
+            source "$sudo_home/.cargo/env"
+    fi
+
+    [[ -f "${HOME:-}/.cargo/env" ]] && # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+    [[ -f /root/.cargo/env ]] && # shellcheck disable=SC1091
+        source /root/.cargo/env
+
+    hash -r 2>/dev/null || true
+}
+
 find_cargo() {
     # Already in PATH?
     if command -v cargo &>/dev/null; then
         return 0
     fi
 
-    # Build a list of candidate directories
-    local candidates=()
-
-    # 1. SUDO_USER's home (most common case: user installed rustup, runs sudo)
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        local sudo_home
-        sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
-        [[ -n "$sudo_home" ]] && candidates+=("$sudo_home/.cargo/bin")
-    fi
-
-    # 2. Current $HOME
-    [[ -d "$HOME/.cargo/bin" ]] && candidates+=("$HOME/.cargo/bin")
-
-    # 3. Scan /home/*
-    for d in /home/*/.cargo/bin; do
-        [[ -d "$d" ]] && candidates+=("$d")
-    done
-
-    # 4. Root's cargo
-    [[ -d /root/.cargo/bin ]] && candidates+=("/root/.cargo/bin")
-
-    # Try each candidate
-    for cbd in "${candidates[@]}"; do
+    local cbd
+    while IFS= read -r cbd; do
         if [[ -x "$cbd/cargo" ]]; then
             log_info "Found cargo in: $cbd"
-            export PATH="$cbd:$PATH"
-
-            # Also set RUSTUP_HOME + CARGO_HOME so rustup works correctly
-            local home_dir
-            home_dir="${cbd%/.cargo/bin}"
-            if [[ -d "$home_dir/.rustup" ]]; then
-                export RUSTUP_HOME="$home_dir/.rustup"
-                export CARGO_HOME="$home_dir/.cargo"
-            fi
+            activate_cargo_bin_dir "$cbd"
             return 0
         fi
-    done
+    done < <(cargo_bin_candidates)
 
     return 1
 }
 
-ensure_rust_installed() {
-    if ! find_cargo; then
-        log_info "Rust not found. Installing via rustup..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-        # Source the new environment
-        if [[ -n "${SUDO_USER:-}" ]]; then
-            local sudo_home
-            sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
-            [[ -f "$sudo_home/.cargo/env" ]] && source "$sudo_home/.cargo/env"
-        fi
-        [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+find_rustup() {
+    if command -v rustup &>/dev/null; then
+        return 0
+    fi
 
-        if ! find_cargo; then
-            log_error "Rust installation succeeded but cargo still not found"
-            log_info "Try: source ~/.cargo/env && sudo env PATH=\$PATH ./install.sh"
-            return 1
+    local cbd
+    while IFS= read -r cbd; do
+        if [[ -x "$cbd/rustup" ]]; then
+            log_info "Found rustup in: $cbd"
+            activate_cargo_bin_dir "$cbd"
+            return 0
+        fi
+    done < <(cargo_bin_candidates)
+
+    return 1
+}
+
+prefer_rustup_cargo_proxy() {
+    local rustup_path rustup_dir
+
+    rustup_path=$(command -v rustup 2>/dev/null || true)
+    if [[ -n "$rustup_path" ]]; then
+        rustup_dir=$(dirname "$rustup_path")
+        if [[ -x "$rustup_dir/cargo" ]]; then
+            activate_cargo_bin_dir "$rustup_dir"
         fi
     fi
+}
+
+install_rustup() {
+    log_info "Installing Rust via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    source_rust_envs
+
+    if ! find_rustup; then
+        log_error "rustup installation finished but rustup is still not in PATH"
+        log_info "Try: source ~/.cargo/env && sudo env PATH=\$PATH ./install.sh"
+        return 1
+    fi
+
+    prefer_rustup_cargo_proxy
+}
+
+ensure_rust_installed() {
+    source_rust_envs
+
+    local cargo_found=false
+    if find_cargo; then
+        cargo_found=true
+    fi
+
+    if ! find_rustup; then
+        if $cargo_found; then
+            log_warn "cargo exists, but rustup is missing. Fedora's cargo package cannot install nightly toolchains."
+        else
+            log_info "Rust not found."
+        fi
+        install_rustup
+    fi
+
+    prefer_rustup_cargo_proxy
+
+    if ! find_cargo; then
+        log_error "Rust installation succeeded but cargo still not found"
+        log_info "Try: source ~/.cargo/env && sudo env PATH=\$PATH ./install.sh"
+        return 1
+    fi
+
+    if ! cargo --version &>/dev/null; then
+        log_info "Installing default stable Rust toolchain..."
+        rustup toolchain install stable
+        rustup default stable
+    fi
+
     log_ok "cargo: $(cargo --version)"
+    log_ok "rustup: $(rustup --version | head -n1)"
 }
 
 ensure_rust_toolchain() {
     log_step "Setting up Rust toolchain for eBPF..."
+
+    if ! find_rustup; then
+        log_error "rustup is required to install nightly and rust-src"
+        log_info "Install rustup, then re-run: sudo ./install.sh"
+        return 1
+    fi
+
+    prefer_rustup_cargo_proxy
 
     # Nightly toolchain
     if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
@@ -258,10 +374,16 @@ ensure_rust_toolchain() {
         }
     fi
 
+    if ! cargo +nightly --version &>/dev/null; then
+        log_error "cargo is not the rustup proxy, so 'cargo +nightly' will fail"
+        log_info "Try: sudo env PATH=\"\$HOME/.cargo/bin:\$PATH\" ./install.sh"
+        return 1
+    fi
+
     # bpf-linker
     if ! command -v bpf-linker &>/dev/null; then
         log_info "Installing bpf-linker (this may take several minutes)..."
-        cargo install bpf-linker || {
+        cargo +nightly install bpf-linker || {
             log_error "Failed to install bpf-linker"
             log_info "Common fix: ensure llvm and clang are installed"
             log_info "Manual: cargo +nightly install bpf-linker"
@@ -721,10 +843,10 @@ run_checks() {
     local errors=0
 
     # Kernel
-    check_kernel_version || ((errors++))
+    check_kernel_version || ((++errors))
 
     # BPF filesystem
-    check_bpf_fs || ((errors++))
+    check_bpf_fs || ((++errors))
 
     # System tools
     local tools=("gcc" "clang" "llvm-config" "curl" "git")
@@ -733,13 +855,19 @@ run_checks() {
             log_ok "$tool: $(command -v "$tool")"
         else
             log_error "$tool: NOT FOUND"
-            ((errors++))
+            ((++errors))
         fi
     done
 
     # Rust
     if find_cargo; then
         log_ok "cargo: $(cargo --version)"
+
+        if find_rustup; then
+            log_ok "rustup: $(rustup --version | head -n1)"
+        else
+            log_warn "rustup: NOT installed (will be auto-installed)"
+        fi
 
         # Nightly
         if rustup toolchain list 2>/dev/null | grep -q nightly; then
@@ -757,7 +885,7 @@ run_checks() {
     else
         log_error "cargo: NOT FOUND"
         log_info "Install: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        ((errors++))
+        ((++errors))
     fi
 
     echo ""
@@ -958,7 +1086,13 @@ main() {
     install_default_config
     install_completions
     install_geoip_db
-    install_systemd_timer
+    if ! $skip_service && [[ "$init_system" == "systemd" ]]; then
+        install_systemd_timer
+    elif $skip_service; then
+        log_info "Skipping feed timer because --skip-service was requested"
+    else
+        log_info "Skipping systemd feed timer for init system: $init_system"
+    fi
     install_logrotate
 
     # Init service
@@ -975,4 +1109,6 @@ main() {
     show_usage
 }
 
-main "$@"
+if [[ "${AEGIS_INSTALLER_SOURCE_ONLY:-false}" != "true" ]]; then
+    main "$@"
+fi
