@@ -115,6 +115,56 @@ fn read_blocklist_ips() -> Vec<String> {
         Err(_) => vec![],
     }
 }
+// ── Softnet / NAPI Stats Reader ─────────────────────────────────────────
+
+struct SoftnetStats {
+    processed: u64,
+    dropped: u64,
+    time_squeeze: u64,
+    backlog_len: u64,
+}
+
+/// Parse /proc/net/softnet_stat — kernel NAPI counters (hex, per-CPU)
+/// Format: each line = one CPU, columns are hex counters separated by spaces
+/// Col 0: total frames processed  Col 1: dropped  Col 2: time_squeeze
+fn read_softnet_stats() -> Option<SoftnetStats> {
+    let content = std::fs::read_to_string("/proc/net/softnet_stat").ok()?;
+    let mut total = SoftnetStats {
+        processed: 0,
+        dropped: 0,
+        time_squeeze: 0,
+        backlog_len: 0,
+    };
+
+    for line in content.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 3 {
+            total.processed += u64::from_str_radix(cols[0], 16).unwrap_or(0);
+            total.dropped += u64::from_str_radix(cols[1], 16).unwrap_or(0);
+            total.time_squeeze += u64::from_str_radix(cols[2], 16).unwrap_or(0);
+        }
+        // Column 11 (0-indexed) is backlog_len on kernels >= 4.x
+        if cols.len() > 11 {
+            total.backlog_len += u64::from_str_radix(cols[11], 16).unwrap_or(0);
+        }
+    }
+
+    Some(total)
+}
+
+/// Count current CONN_TRACK entries (LRU map utilization)
+fn read_conntrack_count() -> u64 {
+    let path = "/sys/fs/bpf/aegis/CONN_TRACK";
+    let md = match aya::maps::MapData::from_pin(path) {
+        Ok(md) => md,
+        Err(_) => return 0,
+    };
+    let map = aya::maps::Map::LruHashMap(md);
+    match aya::maps::HashMap::<_, aegis_common::ConnTrackKey, aegis_common::ConnTrackState>::try_from(map) {
+        Ok(hm) => hm.keys().count() as u64,
+        Err(_) => 0,
+    }
+}
 
 // ── Prometheus Renderer ─────────────────────────────────────────────────
 
@@ -194,6 +244,49 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
     writeln!(buf, "# HELP aegis_up Aegis firewall running (1 = up)").ok();
     writeln!(buf, "# TYPE aegis_up gauge").ok();
     writeln!(buf, "aegis_up {}", if stats.is_some() { 1 } else { 0 }).ok();
+
+    // NAPI / softnet_stat metrics — critical for XDP performance monitoring
+    if let Some(softnet) = read_softnet_stats() {
+        writeln!(
+            buf,
+            "# HELP aegis_softnet_processed_total Packets processed via NAPI (per-CPU sum)"
+        )
+        .ok();
+        writeln!(buf, "# TYPE aegis_softnet_processed_total counter").ok();
+        writeln!(buf, "aegis_softnet_processed_total {}", softnet.processed).ok();
+
+        writeln!(
+            buf,
+            "# HELP aegis_softnet_dropped_total Packets dropped due to full backlog"
+        )
+        .ok();
+        writeln!(buf, "# TYPE aegis_softnet_dropped_total counter").ok();
+        writeln!(buf, "aegis_softnet_dropped_total {}", softnet.dropped).ok();
+
+        writeln!(
+            buf,
+            "# HELP aegis_softnet_time_squeeze_total Times softirq hit time limit (NAPI budget exhausted)"
+        )
+        .ok();
+        writeln!(buf, "# TYPE aegis_softnet_time_squeeze_total counter").ok();
+        writeln!(buf, "aegis_softnet_time_squeeze_total {}", softnet.time_squeeze).ok();
+
+        writeln!(
+            buf,
+            "# HELP aegis_softnet_backlog_len Current backlog queue length (sum across CPUs)"
+        )
+        .ok();
+        writeln!(buf, "# TYPE aegis_softnet_backlog_len gauge").ok();
+        writeln!(buf, "aegis_softnet_backlog_len {}", softnet.backlog_len).ok();
+    }
+
+    // Conntrack map utilization
+    let ct_count = read_conntrack_count();
+    if ct_count > 0 {
+        writeln!(buf, "# HELP aegis_conntrack_entries Current conntrack map entries").ok();
+        writeln!(buf, "# TYPE aegis_conntrack_entries gauge").ok();
+        writeln!(buf, "aegis_conntrack_entries {}", ct_count).ok();
+    }
 
     String::from_utf8(buf).unwrap_or_default()
 }
