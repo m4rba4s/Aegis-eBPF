@@ -5,11 +5,11 @@ members = [
     "aegis-ebpf",
     "aegis-tc",
     "aegis-cni",
+    "aegis-tower",
     "xtask",
 ]
 exclude = [
     "aegis-cli/fuzz",
-    "aegis-tower",  # Does not compile — tokio-stream sync feature missing
     "verification",
 ]
 default-members = ["aegis-cli", "aegis-cni", "xtask"]

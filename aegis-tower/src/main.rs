@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub mod fleet {
     tonic::include_proto!("aegis.fleet");
@@ -95,11 +95,10 @@ impl FleetControl for TowerState {
         let output_stream = BroadcastStream::new(rx).filter_map(move |res| {
             match res {
                 Ok(rule) => Some(Ok(rule)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
                     warn!(node_id = %client_id, lagged = n, "Agent is lagging behind stream");
                     None
                 }
-                Err(_) => None, // Closed
             }
         });
 
@@ -117,7 +116,7 @@ impl FleetControl for TowerState {
             node_id = %event.node_id,
             type_ = %event.event_type,
             src = %event.src_ip,
-            severity = ?EventSeverity::try_from(event.severity).unwrap_or(EventSeverity::Info),
+            severity = ?EventSeverity::from_i32(event.severity).unwrap_or(EventSeverity::Info),
             "Received Agent Event: {}", event.message
         );
 
