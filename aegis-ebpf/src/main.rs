@@ -152,9 +152,9 @@ static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_CONFIG, 0);
 #[map]
 static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(MAP_CAP_PORT_SCAN, 0);
 
-/// Connection tracking map: 5-tuple -> state
+/// Connection tracking map: 5-tuple -> state (LRU: prevents silent overflow)
 #[map]
-static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
+static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
 
 // ============================================================
 // IPv6 BPF MAPS
@@ -173,10 +173,10 @@ static ALLOWLIST_IPV6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(1024, 
 static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> =
     LpmTrie::with_max_entries(16384, 0);
 
-/// IPv6 Connection tracking
+/// IPv6 Connection tracking (LRU: prevents silent overflow)
 #[map]
-static CONN_TRACK_IPV6: HashMap<ConnTrackKeyIpv6, ConnTrackState> =
-    HashMap::with_max_entries(32768, 0);
+static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> =
+    LruHashMap::with_max_entries(32768, 0);
 
 /// IPv6 event log (separate due to larger struct size)
 #[map]

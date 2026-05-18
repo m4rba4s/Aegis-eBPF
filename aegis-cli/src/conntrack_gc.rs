@@ -68,7 +68,7 @@ fn gc_conntrack_v4() -> u32 {
     let Ok(md) = aya::maps::MapData::from_pin(path) else {
         return 0;
     };
-    let map = aya::maps::Map::HashMap(md);
+    let map = aya::maps::Map::LruHashMap(md);
     let Ok(mut hm) = HashMap::<_, ConnTrackKey, ConnTrackState>::try_from(map) else {
         return 0;
     };
@@ -118,7 +118,7 @@ fn gc_conntrack_v6() -> u32 {
     let Ok(md) = aya::maps::MapData::from_pin(path) else {
         return 0;
     };
-    let map = aya::maps::Map::HashMap(md);
+    let map = aya::maps::Map::LruHashMap(md);
     let Ok(mut hm) = HashMap::<_, ConnTrackKeyIpv6, ConnTrackState>::try_from(map) else {
         return 0;
     };
