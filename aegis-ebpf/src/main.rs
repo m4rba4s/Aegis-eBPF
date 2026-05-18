@@ -101,6 +101,15 @@ use aegis_common::{
     THREAT_SCAN_XMAS,
     // Rate limiting constants
     TOKENS_PER_SEC,
+    // Map capacity constants (ABI contract with TC)
+    MAP_CAP_BLOCKLIST,
+    MAP_CAP_ALLOWLIST,
+    MAP_CAP_CIDR,
+    MAP_CAP_CONNTRACK,
+    MAP_CAP_RATE_LIMIT,
+    MAP_CAP_PORT_SCAN,
+    MAP_CAP_CONFIG,
+    MAP_CAP_STATS,
 };
 
 // ============================================================
@@ -109,15 +118,15 @@ use aegis_common::{
 
 /// Exact match blocklist (manual blocks)
 #[map]
-static BLOCKLIST: HashMap<FlowKey, u32> = HashMap::with_max_entries(1024, 0);
+static BLOCKLIST: HashMap<FlowKey, u32> = HashMap::with_max_entries(MAP_CAP_BLOCKLIST, 0);
 
 /// Dynamic Allowlist (IPs that bypass all checks)
 #[map]
-static ALLOWLIST: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
+static ALLOWLIST: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_ALLOWLIST, 0);
 
 /// CIDR prefix blocklist using LPM Trie (for threat feeds)
 #[map]
-static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(65536, 0);
+static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(MAP_CAP_CIDR, 0);
 
 /// Perf event array for logging to userspace
 #[map]
@@ -125,7 +134,7 @@ static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
 
 /// Per-CPU health statistics
 #[map]
-static STATS: PerCpuArray<Stats> = PerCpuArray::with_max_entries(1, 0);
+static STATS: PerCpuArray<Stats> = PerCpuArray::with_max_entries(MAP_CAP_STATS, 0);
 
 /// DPI suspect queue — packets flagged for deep inspection
 #[map]
@@ -133,19 +142,19 @@ static DPI_EVENTS: PerfEventArray<DpiEvent> = PerfEventArray::new(0);
 
 /// Rate limit map: IP -> RateLimitState (LRU: evicts oldest on overflow)
 #[map]
-static RATE_LIMIT: LruHashMap<u32, RateLimitState> = LruHashMap::with_max_entries(65536, 0);
+static RATE_LIMIT: LruHashMap<u32, RateLimitState> = LruHashMap::with_max_entries(MAP_CAP_RATE_LIMIT, 0);
 
 /// Config map for runtime toggles
 #[map]
-static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_CONFIG, 0);
 
 /// Port Scan detection map: source IP -> PortScanState (LRU: evicts oldest on overflow)
 #[map]
-static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(65536, 0);
+static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(MAP_CAP_PORT_SCAN, 0);
 
 /// Connection tracking map: 5-tuple -> state
 #[map]
-static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(65536, 0);
+static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
 
 // ============================================================
 // IPv6 BPF MAPS

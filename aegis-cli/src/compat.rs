@@ -26,10 +26,14 @@ pub struct KernelCaps {
     pub has_xdp_driver: bool,
     /// LPM Trie maps (kernel >= 4.11)
     pub has_lpm_trie: bool,
+    /// LRU Hash maps (kernel >= 4.10) — used by RATE_LIMIT, PORT_SCAN
+    pub has_lru_hash: bool,
     /// Per-CPU arrays (kernel >= 4.6)
     pub has_percpu_array: bool,
     /// TC classifier (kernel >= 4.1)
     pub has_tc_clsact: bool,
+    /// CAP_BPF separate cap (kernel >= 5.8) — without this, needs CAP_SYS_ADMIN
+    pub has_cap_bpf: bool,
     /// Memory lock unlimited or kernel >= 5.11
     pub memlock_ok: bool,
 }
@@ -47,8 +51,10 @@ impl KernelCaps {
             has_xdp: version >= (4, 8, 0),
             has_xdp_driver: version >= (4, 12, 0),
             has_lpm_trie: version >= (4, 11, 0),
+            has_lru_hash: version >= (4, 10, 0),
             has_percpu_array: version >= (4, 6, 0),
             has_tc_clsact: version >= (4, 1, 0),
+            has_cap_bpf: version >= (5, 8, 0),
             memlock_ok: version >= (5, 11, 0) || Self::check_memlock(),
         }
     }
@@ -84,6 +90,11 @@ impl KernelCaps {
             errors.push("LPM Trie maps not supported (requires kernel >= 4.11)".to_string());
         }
 
+        // Check LRU Hash (needed for RATE_LIMIT and PORT_SCAN maps)
+        if !self.has_lru_hash {
+            errors.push("LRU Hash maps not supported (requires kernel >= 4.10)".to_string());
+        }
+
         // Check memlock
         if !self.memlock_ok {
             errors.push("Insufficient locked memory. Run with: ulimit -l unlimited".to_string());
@@ -109,7 +120,9 @@ impl KernelCaps {
         println!("   {} XDP support", check(self.has_xdp));
         println!("   {} XDP driver mode", check(self.has_xdp_driver));
         println!("   {} LPM Trie maps", check(self.has_lpm_trie));
+        println!("   {} LRU Hash maps", check(self.has_lru_hash));
         println!("   {} TC clsact qdisc", check(self.has_tc_clsact));
+        println!("   {} CAP_BPF (5.8+)", check(self.has_cap_bpf));
         println!("   {} Memory lock", check(self.memlock_ok));
     }
 
