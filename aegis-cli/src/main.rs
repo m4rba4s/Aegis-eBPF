@@ -413,6 +413,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
             // Pin maps for external tools (status, allow CLI)
             let _ = std::fs::create_dir_all("/sys/fs/bpf/aegis");
+
+            // Clean stale maps from previous SIGKILL'd instances
+            if let Ok(entries) = std::fs::read_dir("/sys/fs/bpf/aegis") {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+                tracing::debug!("cleaned stale pinned maps from /sys/fs/bpf/aegis/");
+            }
+
             let maps_to_pin = [
                 "BLOCKLIST",
                 "ALLOWLIST",
@@ -650,6 +659,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
 
                 tracing::info!(iface = %iface_for_shutdown, "detaching programs");
+                // NOTE: pinned maps in /sys/fs/bpf/aegis/ survive shutdown.
+                // They are cleaned on next startup (before new pins are created).
+                // This is intentional — after privilege drop we can't unlink root-owned bpffs.
                 drop(tc_bpf); // TC first
                 drop(bpf); // Then XDP
                 tracing::info!("shutdown complete");

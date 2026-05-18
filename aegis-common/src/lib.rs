@@ -477,3 +477,29 @@ unsafe impl aya::Pod for ConnTrackKeyIpv6 {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for PacketLogIpv6 {}
+
+// ============================================================
+// MAP CAPACITY CONSTANTS (Single Source of Truth)
+// ============================================================
+// Both XDP and TC programs MUST use these values.
+// Mismatched max_entries between programs sharing pinned maps
+// will cause silent ABI failures at load time.
+
+/// Blocklist capacity (exact match)
+pub const MAP_CAP_BLOCKLIST: u32 = 8192;
+/// Allowlist capacity
+pub const MAP_CAP_ALLOWLIST: u32 = 1024;
+/// CIDR blocklist (LPM trie)
+pub const MAP_CAP_CIDR: u32 = 65536;
+/// Connection tracking (shared XDP ↔ TC)
+pub const MAP_CAP_CONNTRACK: u32 = 65536;
+/// Rate limiting (LRU, attacker-controlled)
+pub const MAP_CAP_RATE_LIMIT: u32 = 65536;
+/// Port scan detection (LRU, attacker-controlled)
+pub const MAP_CAP_PORT_SCAN: u32 = 65536;
+/// Config toggles
+pub const MAP_CAP_CONFIG: u32 = 16;
+/// Stats per-CPU array
+pub const MAP_CAP_STATS: u32 = 1;
+/// Egress blocklist (TC only)
+pub const MAP_CAP_EGRESS_BLOCKLIST: u32 = 8192;

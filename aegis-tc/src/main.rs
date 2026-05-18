@@ -47,6 +47,11 @@ use aegis_common::{
     THREAT_EGRESS_BLOCKED,
     // Threat types
     THREAT_NONE,
+    // Map capacity constants (ABI contract with XDP)
+    MAP_CAP_CONNTRACK,
+    MAP_CAP_EGRESS_BLOCKLIST,
+    MAP_CAP_CIDR,
+    MAP_CAP_CONFIG,
 };
 
 // ============================================================
@@ -55,20 +60,20 @@ use aegis_common::{
 
 /// Shared connection tracking map
 #[map]
-static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(65536, 0);
+static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
 
 /// Egress-specific blocklist (destination IPs we block outgoing to)
 #[map]
-static EGRESS_BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(8192, 0);
+static EGRESS_BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_EGRESS_BLOCKLIST, 0);
 
 /// CIDR-based egress blocklist (for C2/malware feeds)
 #[map]
 static EGRESS_CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> =
-    LpmTrie::with_max_entries(65536, 0);
+    LpmTrie::with_max_entries(MAP_CAP_CIDR, 0);
 
 /// Shared config map
 #[map]
-static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(16, 0);
+static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_CONFIG, 0);
 
 /// Shared perf event array for logging
 #[map]
