@@ -15,7 +15,7 @@ use aya_ebpf::{
     macros::{classifier, map},
     maps::{
         lpm_trie::{Key, LpmTrie},
-        HashMap, PerfEventArray,
+        HashMap, LruHashMap, PerfEventArray,
     },
     programs::TcContext,
 };
@@ -58,9 +58,9 @@ use aegis_common::{
 // BPF MAPS (Shared with XDP via pinning)
 // ============================================================
 
-/// Shared connection tracking map
+/// Shared connection tracking map (LRU: matches XDP definition)
 #[map]
-static CONN_TRACK: HashMap<ConnTrackKey, ConnTrackState> = HashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
+static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
 
 /// Egress-specific blocklist (destination IPs we block outgoing to)
 #[map]
