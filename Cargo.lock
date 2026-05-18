@@ -92,6 +92,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aegis-tower"
+version = "3.0.0"
+dependencies = [
+ "clap",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3817,6 +3833,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
