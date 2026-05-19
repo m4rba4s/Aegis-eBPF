@@ -65,8 +65,11 @@ impl FleetClient {
                     };
 
                     let mut req = Request::new(node_info);
-                    req.metadata_mut()
-                        .insert("authorization", token.parse().unwrap());
+                    let Ok(auth_val) = token.parse() else {
+                        error!("FleetClient: invalid auth token (non-ASCII?)");
+                        break;
+                    };
+                    req.metadata_mut().insert("authorization", auth_val);
 
                     // Start streaming
                     match client.subscribe_blocklist(req).await {
@@ -96,7 +99,9 @@ impl FleetClient {
                                     out_event = event_rx.recv() => {
                                         if let Some(event) = out_event {
                                             let mut req = Request::new(event);
-                                            req.metadata_mut().insert("authorization", token.parse().unwrap());
+                                            if let Ok(auth_val) = token.parse() {
+                                                req.metadata_mut().insert("authorization", auth_val);
+                                            }
                                             if let Err(e) = client.report_event(req).await {
                                                 error!("FleetClient: Failed to report event to Tower: {}", e);
                                             }
