@@ -83,6 +83,7 @@ fn read_bpf_stats() -> Option<Stats> {
 
 fn read_blocklist_count() -> u64 {
     use aya::maps::HashMap;
+    use aegis_common::FlowKey;
 
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let md = match aya::maps::MapData::from_pin(path) {
@@ -90,7 +91,7 @@ fn read_blocklist_count() -> u64 {
         Err(_) => return 0,
     };
     let map = aya::maps::Map::HashMap(md);
-    match HashMap::<_, u32, u32>::try_from(map) {
+    match HashMap::<_, FlowKey, u32>::try_from(map) {
         Ok(hm) => hm.keys().count() as u64,
         Err(_) => 0,
     }
@@ -98,6 +99,7 @@ fn read_blocklist_count() -> u64 {
 
 fn read_blocklist_ips() -> Vec<String> {
     use aya::maps::HashMap;
+    use aegis_common::FlowKey;
     use std::net::Ipv4Addr;
 
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
@@ -106,11 +108,11 @@ fn read_blocklist_ips() -> Vec<String> {
         Err(_) => return vec![],
     };
     let map = aya::maps::Map::HashMap(md);
-    match HashMap::<_, u32, u32>::try_from(map) {
+    match HashMap::<_, FlowKey, u32>::try_from(map) {
         Ok(hm) => hm
             .keys()
             .filter_map(|k| k.ok())
-            .map(|k| Ipv4Addr::from(u32::from_be(k)).to_string())
+            .map(|k| Ipv4Addr::from(u32::from_be(k.src_ip)).to_string())
             .collect(),
         Err(_) => vec![],
     }
@@ -397,6 +399,7 @@ fn json_geo(ip_str: &str) -> String {
 
 fn block_ip(ip_str: &str) -> String {
     use std::net::Ipv4Addr;
+    use aegis_common::FlowKey;
 
     let ip: Ipv4Addr = match ip_str.trim().parse() {
         Ok(ip) => ip,
@@ -409,12 +412,17 @@ fn block_ip(ip_str: &str) -> String {
         Err(e) => return format!(r#"{{"error":"cannot open BLOCKLIST: {}"}}"#, e),
     };
     let map = aya::maps::Map::HashMap(md);
-    let mut hm = match aya::maps::HashMap::<_, u32, u32>::try_from(map) {
+    let mut hm = match aya::maps::HashMap::<_, FlowKey, u32>::try_from(map) {
         Ok(hm) => hm,
         Err(e) => return format!(r#"{{"error":"map type error: {}"}}"#, e),
     };
 
-    let key = u32::from(ip).to_be();
+    let key = FlowKey {
+        src_ip: u32::from(ip).to_be(),
+        dst_port: 0,
+        proto: 0,
+        _pad: 0,
+    };
     match hm.insert(key, 1, 0) {
         Ok(()) => format!(r#"{{"ok":true,"blocked":"{}"}}"#, ip),
         Err(e) => format!(r#"{{"error":"insert failed: {}"}}"#, e),
@@ -423,6 +431,7 @@ fn block_ip(ip_str: &str) -> String {
 
 fn unblock_ip(ip_str: &str) -> String {
     use std::net::Ipv4Addr;
+    use aegis_common::FlowKey;
 
     let ip: Ipv4Addr = match ip_str.trim().parse() {
         Ok(ip) => ip,
@@ -435,12 +444,17 @@ fn unblock_ip(ip_str: &str) -> String {
         Err(e) => return format!(r#"{{"error":"cannot open BLOCKLIST: {}"}}"#, e),
     };
     let map = aya::maps::Map::HashMap(md);
-    let mut hm = match aya::maps::HashMap::<_, u32, u32>::try_from(map) {
+    let mut hm = match aya::maps::HashMap::<_, FlowKey, u32>::try_from(map) {
         Ok(hm) => hm,
         Err(e) => return format!(r#"{{"error":"map type error: {}"}}"#, e),
     };
 
-    let key = u32::from(ip).to_be();
+    let key = FlowKey {
+        src_ip: u32::from(ip).to_be(),
+        dst_port: 0,
+        proto: 0,
+        _pad: 0,
+    };
     match hm.remove(&key) {
         Ok(()) => format!(r#"{{"ok":true,"unblocked":"{}"}}"#, ip),
         Err(e) => format!(r#"{{"error":"remove failed: {}"}}"#, e),
@@ -558,38 +572,64 @@ pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAd
                     return;
                 }
 
-                // Enforce 8KB limit (8192 bytes)
+                // Enforce 8KB limit (8192 bytes) + 5s timeout per connection
+                let read_result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    async {
+                        let mut total_read = 0usize;
+                        let mut req_str = String::new();
 
-                let mut total_read = 0;
-                let mut req_str = String::new();
+                        loop {
+                            let mut chunk = [0u8; 1024];
+                            match stream.read(&mut chunk).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    total_read += n;
+                                    if total_read > 8192 {
+                                        let resp = http_json(413, r#"{"error":"payload too large"}"#);
+                                        let _ = stream.write_all(&resp).await;
+                                        return String::new(); // signal: already responded
+                                    }
+                                    req_str.push_str(&String::from_utf8_lossy(&chunk[..n]));
 
-                loop {
-                    let mut chunk = [0u8; 1024];
-                    match stream.read(&mut chunk).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            total_read += n;
-                            if total_read > 8192 {
-                                let resp = http_json(413, r#"{"error":"payload too large"}"#);
-                                let _ = stream.write_all(&resp).await;
-                                return;
+                                    // Check if we have complete headers
+                                    if let Some(header_end) = req_str.find("\r\n\r\n") {
+                                        if req_str.starts_with("GET") || req_str.starts_with("HEAD") {
+                                            break; // GET/HEAD: no body expected
+                                        }
+                                        // POST: parse Content-Length and read body
+                                        let headers = &req_str[..header_end];
+                                        let content_len: usize = headers
+                                            .lines()
+                                            .find_map(|l| {
+                                                let lower = l.to_ascii_lowercase();
+                                                if lower.starts_with("content-length:") {
+                                                    lower["content-length:".len()..].trim().parse().ok()
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .unwrap_or(0);
+
+                                        let body_start = header_end + 4;
+                                        let body_received = req_str.len() - body_start;
+                                        if body_received >= content_len {
+                                            break; // Full body received
+                                        }
+                                        // else: continue reading more body chunks
+                                    }
+                                }
+                                Err(_) => return String::new(),
                             }
-                            req_str.push_str(&String::from_utf8_lossy(&chunk[..n]));
-                            // Minimal check: if we have full headers and body (or just GET headers), break.
-                            // For simplicity in this raw HTTP parser, if it contains "\r\n\r\n" and Method is GET, break early.
-                            if req_str.contains("\r\n\r\n") && req_str.starts_with("GET") {
-                                break;
-                            }
-                            // If POST, we might need more body, but we have a hard limit at 8192 anyway.
-                            // In a real server, parse Content-Length. Here we just rely on EOF or limit.
                         }
-                        Err(_) => return,
+                        req_str
                     }
-                }
+                ).await;
 
-                if req_str.is_empty() {
-                    return;
-                }
+                let req_str = match read_result {
+                    Ok(s) if !s.is_empty() => s,
+                    _ => return, // timeout or empty = already responded or dead connection
+                };
                 let first_line = req_str.lines().next().unwrap_or("");
 
                 let response = route_request(first_line, &req_str, &cache).await;

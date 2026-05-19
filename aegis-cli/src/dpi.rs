@@ -110,6 +110,7 @@ fn analyze_payload(event: &DpiEvent, yara_engine: Option<&YaraEngine>) -> (u8, S
 
 pub fn auto_block_ip(ip: u32) -> bool {
     use aya::maps::HashMap;
+    use aegis_common::FlowKey;
 
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let md = match aya::maps::MapData::from_pin(path) {
@@ -117,12 +118,18 @@ pub fn auto_block_ip(ip: u32) -> bool {
         Err(_) => return false,
     };
     let map = aya::maps::Map::HashMap(md);
-    let mut hm = match HashMap::<_, u32, u32>::try_from(map) {
+    let mut hm = match HashMap::<_, FlowKey, u32>::try_from(map) {
         Ok(hm) => hm,
         Err(_) => return false,
     };
 
-    let key = ip.to_be();
+    // ip is already in network byte order from eBPF — no extra to_be()
+    let key = FlowKey {
+        src_ip: ip,
+        dst_port: 0,
+        proto: 0,
+        _pad: 0,
+    };
     hm.insert(key, 1, 0).is_ok()
 }
 
