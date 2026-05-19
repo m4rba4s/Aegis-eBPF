@@ -91,8 +91,8 @@ use aegis_common::{
     REASON_WHITELIST,
     THREAT_BLOCKLIST,
     THREAT_FLOOD_SYN,
-    THREAT_HIGH_ENTROPY,
     THREAT_IPV6_EXT_CHAIN,
+    THREAT_IPV6_FRAGMENT,
     // Threat types - IPv4
     THREAT_NONE,
     THREAT_SCAN_NULL,
@@ -373,6 +373,20 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     let frag_off = u16::from_be(unsafe { (*ipv4_hdr).frag_off });
     if (frag_off & 0x3FFF) != 0 {
         return Ok(xdp_action::XDP_DROP);
+    }
+
+    // W-2: L4 Length Validation
+    // Ensure total_len covers at least the IP header (20) + min L4 header
+    if proto == 6 {
+        // TCP: min 20 bytes
+        if total_len < 40 {
+            return Ok(xdp_action::XDP_DROP);
+        }
+    } else if proto == 17 {
+        // UDP: min 8 bytes
+        if total_len < 28 {
+            return Ok(xdp_action::XDP_DROP);
+        }
     }
 
     let l4_offset = l4_base_offset;
@@ -729,84 +743,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         }
     }
 
-    // --- CIDR BLOCKLIST (Threat feeds) ---
-    if is_module_enabled(CFG_THREAT_FEEDS) {
-        let cidr_key = Key::new(
-            32,
-            LpmKeyIpv4 {
-                prefix_len: 32,
-                addr: src_addr,
-            },
-        );
-
-        if let Some(_entry) = CIDR_BLOCKLIST.get(&cidr_key) {
-            stats_inc_block_cidr();
-            return log_and_return(
-                &ctx,
-                src_addr,
-                dst_addr,
-                src_port,
-                dst_port,
-                proto,
-                tcp_flags,
-                ACTION_DROP,
-                REASON_CIDR_FEED,
-                THREAT_BLOCKLIST,
-                total_len,
-            );
-        }
-    }
-
-    // --- EXACT MATCH BLOCKLIST (Manual blocks) ---
-    let key_exact = FlowKey {
-        src_ip: src_addr,
-        dst_port,
-        proto,
-        _pad: 0,
-    };
-
-    if let Some(_action) = unsafe { BLOCKLIST.get(&key_exact) } {
-        stats_inc_block_manual();
-        return log_and_return(
-            &ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            proto,
-            tcp_flags,
-            ACTION_DROP,
-            REASON_MANUAL_BLOCK,
-            THREAT_BLOCKLIST,
-            total_len,
-        );
-    }
-
-    // Wildcard port/proto lookup
-    let key_wildcard = FlowKey {
-        src_ip: src_addr,
-        dst_port: 0,
-        proto: 0,
-        _pad: 0,
-    };
-
-    if let Some(_action) = unsafe { BLOCKLIST.get(&key_wildcard) } {
-        stats_inc_block_manual();
-        return log_and_return(
-            &ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            proto,
-            tcp_flags,
-            ACTION_DROP,
-            REASON_MANUAL_BLOCK,
-            THREAT_BLOCKLIST,
-            total_len,
-        );
-    }
-
     // --- DPI / TLS FINGERPRINTING: DEFERRED TO v2 ---
     // Moved to dedicated TC ingress program (separate stack frame).
     // DPI_EVENTS map and DpiEvent struct remain in aegis-common for reuse.
@@ -919,10 +855,12 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 break;
             }
             NEXTHDR_FRAGMENT => {
-                let frag_hdr: *const Ipv6FragHdr = ptr_at(ctx, l4_offset)?;
-                current_nh = unsafe { (*frag_hdr).next_header };
-                l4_offset += Ipv6FragHdr::LEN;
-                ext_hdr_count += 1;
+                // W-1: Drop all IPv6 fragments at XDP
+                stats_inc_ipv6_drop();
+                return log_ipv6_drop(
+                    ctx, &src_addr, &dst_addr, 0, 0, current_nh, 0,
+                    REASON_IPV6_POLICY, THREAT_IPV6_FRAGMENT, payload_len, ext_hdr_count,
+                );
             }
             NEXTHDR_AUTH => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(ctx, l4_offset)?;
@@ -1007,34 +945,6 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // --- IPv6 CONNECTION TRACKING ---
-    let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
-
-    // Check reverse direction for established connections
-    let conn_key = ConnTrackKeyIpv6 {
-        src_ip: dst_addr,
-        dst_ip: src_addr,
-        src_port: dst_port,
-        dst_port: src_port,
-        proto: next_header,
-        _pad: [0u8; 3],
-    };
-
-    if is_module_enabled(CFG_CONN_TRACK) {
-        if let Some(state) = unsafe { CONN_TRACK_IPV6.get(&conn_key) } {
-            if state.state == CONN_ESTABLISHED {
-                let mut updated = *state;
-                updated.last_seen = now_ns;
-                updated.packets = updated.packets.saturating_add(1);
-                updated.bytes = updated.bytes.saturating_add(payload_len as u32);
-                let _ = CONN_TRACK_IPV6.insert(&conn_key, &updated, 0);
-                stats_inc_ipv6_pass();
-                stats_inc_conntrack();
-                return Ok(xdp_action::XDP_PASS);
-            }
-        }
-    }
-
     // --- IPv6 CIDR BLOCKLIST ---
     if is_module_enabled(CFG_THREAT_FEEDS) {
         let cidr_key = Key::new(
@@ -1116,6 +1026,34 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         );
     }
 
+    // --- IPv6 CONNECTION TRACKING ---
+    let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+    // Check reverse direction for established connections
+    let conn_key = ConnTrackKeyIpv6 {
+        src_ip: dst_addr,
+        dst_ip: src_addr,
+        src_port: dst_port,
+        dst_port: src_port,
+        proto: next_header,
+        _pad: [0u8; 3],
+    };
+
+    if is_module_enabled(CFG_CONN_TRACK) {
+        if let Some(state) = unsafe { CONN_TRACK_IPV6.get(&conn_key) } {
+            if state.state == CONN_ESTABLISHED {
+                let mut updated = *state;
+                updated.last_seen = now_ns;
+                updated.packets = updated.packets.saturating_add(1);
+                updated.bytes = updated.bytes.saturating_add(payload_len as u32);
+                let _ = CONN_TRACK_IPV6.insert(&conn_key, &updated, 0);
+                stats_inc_ipv6_pass();
+                stats_inc_conntrack();
+                return Ok(xdp_action::XDP_PASS);
+            }
+        }
+    }
+
     // --- TCP SCAN DETECTION for IPv6 ---
     if is_module_enabled(CFG_SCAN_DETECT) && next_header == NEXTHDR_TCP {
         let fin = tcp_flags & 0x01 != 0;
@@ -1183,15 +1121,8 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         let syn = tcp_flags & 0x02 != 0;
         let ack = tcp_flags & 0x10 != 0;
 
+        // Incoming SYN-ACK = response to our SYN = ESTABLISHED
         if syn && ack {
-            let new_conn = ConnTrackState {
-                state: CONN_ESTABLISHED,
-                direction: 0,
-                _pad: [0u8; 2],
-                last_seen: now_ns,
-                packets: 1,
-                bytes: payload_len as u32,
-            };
             let out_key = ConnTrackKeyIpv6 {
                 src_ip: dst_addr,
                 dst_ip: src_addr,
@@ -1200,7 +1131,16 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 proto: next_header,
                 _pad: [0u8; 3],
             };
-            let _ = CONN_TRACK_IPV6.insert(&out_key, &new_conn, 0);
+            if let Some(existing) = unsafe { CONN_TRACK_IPV6.get(&out_key) } {
+                if existing.state == aegis_common::CONN_SYN_SENT {
+                    let mut promoted = *existing;
+                    promoted.state = aegis_common::CONN_ESTABLISHED;
+                    promoted.last_seen = now_ns;
+                    promoted.packets = promoted.packets.saturating_add(1);
+                    promoted.bytes = promoted.bytes.saturating_add(payload_len as u32);
+                    let _ = CONN_TRACK_IPV6.insert(&out_key, &promoted, 0);
+                }
+            }
         }
     } else if next_header == NEXTHDR_UDP {
         let new_conn = ConnTrackState {

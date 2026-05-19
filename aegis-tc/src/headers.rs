@@ -31,3 +31,19 @@ impl Ipv4Hdr {
 }
 
 pub const ETH_P_IP: u16 = 0x0800;
+pub const ETH_P_IPV6: u16 = 0x86DD;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Ipv6Hdr {
+    pub ver_tc_fl: [u8; 4],
+    pub payload_len: u16,
+    pub next_header: u8,
+    pub hop_limit: u8,
+    pub src_addr: [u8; 16],
+    pub dst_addr: [u8; 16],
+}
+
+impl Ipv6Hdr {
+    pub const LEN: usize = 40;
+}

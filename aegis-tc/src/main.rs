@@ -19,7 +19,7 @@ use aya_ebpf::{
     },
     programs::TcContext,
 };
-use headers::{EthHdr, Ipv4Hdr, ETH_P_IP};
+use headers::{EthHdr, Ipv4Hdr, Ipv6Hdr, ETH_P_IP, ETH_P_IPV6};
 use parsing::ptr_at;
 
 // ============================================================
@@ -28,30 +28,25 @@ use parsing::ptr_at;
 use aegis_common::{
     CidrBlockEntry,
     ConnTrackKey,
+    ConnTrackKeyIpv6,
     ConnTrackState,
     LpmKeyIpv4,
-    // Structures
     PacketLog,
     ACTION_DROP,
-    // Actions
     ACTION_PASS,
-    // Config keys
     CFG_INTERFACE_MODE,
     CONN_FIN_WAIT,
-    // Connection states
     CONN_SYN_SENT,
-    // Hook points
     HOOK_TC_EGRESS,
-    // Verdict reasons
     REASON_EGRESS_BLOCK,
     THREAT_EGRESS_BLOCKED,
-    // Threat types
     THREAT_NONE,
-    // Map capacity constants (ABI contract with XDP)
     MAP_CAP_CONNTRACK,
     MAP_CAP_EGRESS_BLOCKLIST,
     MAP_CAP_CIDR,
     MAP_CAP_CONFIG,
+    NEXTHDR_TCP,
+    NEXTHDR_UDP,
 };
 
 // ============================================================
@@ -61,6 +56,10 @@ use aegis_common::{
 /// Shared connection tracking map (LRU: matches XDP definition)
 #[map]
 static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
+
+/// IPv6 Connection tracking
+#[map]
+static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> = LruHashMap::with_max_entries(32768, 0);
 
 /// Egress-specific blocklist (destination IPs we block outgoing to)
 #[map]
@@ -91,6 +90,78 @@ pub fn tc_egress(ctx: TcContext) -> i32 {
     }
 }
 
+#[inline(always)]
+fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
+    let ipv6_hdr: *const Ipv6Hdr = ptr_at(&ctx, ip_offset)?;
+    let src_addr = unsafe { (*ipv6_hdr).src_addr };
+    let dst_addr = unsafe { (*ipv6_hdr).dst_addr };
+    let next_header = unsafe { (*ipv6_hdr).next_header };
+    let payload_len = u16::from_be(unsafe { (*ipv6_hdr).payload_len });
+
+    let l4_offset = ip_offset + Ipv6Hdr::LEN;
+    let mut src_port = 0u16;
+    let mut dst_port = 0u16;
+
+    if next_header == NEXTHDR_TCP {
+        let sp: *const u16 = ptr_at(&ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *sp });
+        let dp: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
+        dst_port = u16::from_be(unsafe { *dp });
+        let flags: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
+        let tcp_flags = unsafe { *flags };
+
+        let syn = tcp_flags & 0x02 != 0;
+        let ack = tcp_flags & 0x10 != 0;
+
+        if syn && !ack {
+            let conn_key = ConnTrackKeyIpv6 {
+                src_ip: src_addr,
+                dst_ip: dst_addr,
+                src_port,
+                dst_port,
+                proto: next_header,
+                _pad: [0u8; 3],
+            };
+            let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+            let new_state = ConnTrackState {
+                state: CONN_SYN_SENT,
+                direction: 0,
+                _pad: [0u8; 2],
+                last_seen: now_ns,
+                packets: 1,
+                bytes: payload_len as u32,
+            };
+            let _ = CONN_TRACK_IPV6.insert(&conn_key, &new_state, 0);
+        }
+    } else if next_header == NEXTHDR_UDP {
+        let sp: *const u16 = ptr_at(&ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *sp });
+        let dp: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
+        dst_port = u16::from_be(unsafe { *dp });
+
+        let conn_key = ConnTrackKeyIpv6 {
+            src_ip: src_addr,
+            dst_ip: dst_addr,
+            src_port,
+            dst_port,
+            proto: next_header,
+            _pad: [0u8; 3],
+        };
+        let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+        let new_state = ConnTrackState {
+            state: CONN_SYN_SENT,
+            direction: 0,
+            _pad: [0u8; 2],
+            last_seen: now_ns,
+            packets: 1,
+            bytes: payload_len as u32,
+        };
+        let _ = CONN_TRACK_IPV6.insert(&conn_key, &new_state, 0);
+    }
+
+    Ok(TC_ACT_OK)
+}
+
 fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     // Get interface mode (L2 vs L3)
     let is_l3_mode = unsafe { CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1 };
@@ -100,8 +171,11 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     } else {
         // Check ether_type for L2
         let eth_hdr: *const EthHdr = ptr_at(&ctx, 0)?;
-        let ether_type = unsafe { (*eth_hdr).ether_type };
-        if u16::from_be(ether_type) != ETH_P_IP {
+        let ether_type = u16::from_be(unsafe { (*eth_hdr).ether_type });
+        if ether_type == ETH_P_IPV6 {
+            return try_tc_ipv6(ctx, EthHdr::LEN);
+        }
+        if ether_type != ETH_P_IP {
             return Ok(TC_ACT_OK);
         }
         EthHdr::LEN
@@ -112,6 +186,24 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     let dst_addr = unsafe { (*ipv4_hdr).dst_addr };
     let proto = unsafe { (*ipv4_hdr).proto };
     let total_len = u16::from_be(unsafe { (*ipv4_hdr).tot_len });
+
+    // L3 mode IPv6 detection
+    if is_l3_mode {
+        let version = unsafe { (*ipv4_hdr).version_ihl >> 4 };
+        if version == 6 {
+            return try_tc_ipv6(ctx, 0);
+        }
+    }
+
+    // W-3: Fail-closed on IP options/fragments (Parity with XDP)
+    let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
+    if ip_ihl != 5 {
+        return Ok(TC_ACT_SHOT);
+    }
+    let frag_off = u16::from_be(unsafe { (*ipv4_hdr).frag_off });
+    if (frag_off & 0x3FFF) != 0 {
+        return Ok(TC_ACT_SHOT);
+    }
 
     // L4 parsing
     let l4_offset = ip_offset + 20;

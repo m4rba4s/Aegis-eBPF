@@ -244,7 +244,7 @@ pub fn handle_status_command() -> anyhow::Result<()> {
     let block_path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let block_count = if let Ok(md) = aya::maps::MapData::from_pin(block_path) {
         let map = aya::maps::Map::HashMap(md);
-        if let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) {
+        if let Ok(hm) = HashMap::<_, aegis_common::FlowKey, u32>::try_from(map) {
             hm.keys().count()
         } else {
             0

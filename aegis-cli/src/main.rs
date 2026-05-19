@@ -421,7 +421,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
                 tracing::debug!("cleaned stale pinned maps from /sys/fs/bpf/aegis/");
             }
-
             let maps_to_pin = [
                 "BLOCKLIST",
                 "ALLOWLIST",
@@ -511,6 +510,12 @@ async fn main() -> Result<(), anyhow::Error> {
             let stats: aya::maps::PerCpuArray<_, aegis_common::Stats> =
                 aya::maps::PerCpuArray::try_from(stats_map)?;
             let stats_arc = Arc::new(Mutex::new(stats));
+
+            // Create pre-opened handles for metrics server (must be before privdrop)
+            let shared_handles = Arc::new(crate::metrics::SharedHandles {
+                stats: stats_arc.clone(),
+                blocklist: blocklist_arc.clone(),
+            });
 
             // Shared Logs
             let logs_arc = Arc::new(Mutex::new(VecDeque::new()));
@@ -613,7 +618,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 }
 
-                match metrics::spawn_metrics_server(None).await {
+                match metrics::spawn_metrics_server(None, shared_handles.clone()).await {
                     Ok(addr) => tracing::info!(%addr, "prometheus /metrics endpoint started"),
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to start metrics endpoint (non-fatal)")
