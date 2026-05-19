@@ -402,38 +402,44 @@ install_systemd_service() {
     cat > /etc/systemd/system/aegis@.service << 'EOF'
 [Unit]
 Description=Aegis eBPF Firewall on %i
+Documentation=https://github.com/m4rba4s/Aegis-Portable-Demo
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/aegis-cli -i %i daemon
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 LimitMEMLOCK=infinity
-
-# Logging
-StandardOutput=append:/var/log/aegis/aegis.log
-StandardError=append:/var/log/aegis/aegis.log
+LimitNOFILE=65536
 
 # Security hardening
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=read-only
 PrivateTmp=true
-NoNewPrivileges=true
+PrivateDevices=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
+NoNewPrivileges=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+PrivateUsers=false
+RestrictNamespaces=cgroup ipc pid user uts
+SystemCallFilter=@system-service @network-io bpf perf_event_open
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Capability restrictions
 CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-
-# Additional hardening
-MemoryDenyWriteExecute=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-ProtectClock=true
-ProtectKernelLogs=true
 
 [Install]
 WantedBy=multi-user.target

@@ -9,6 +9,12 @@
 
 use crate::config::WebhooksConfig;
 use tracing::{info, warn};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
+
+/// Global rate limiter for webhooks (prevents flood during attacks)
+static LAST_ALERT: AtomicU64 = AtomicU64::new(0);
+const ALERT_COOLDOWN_SECS: u64 = 5; 
 
 /// Severity levels for alert filtering
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -57,6 +63,14 @@ pub fn dispatch(config: &WebhooksConfig, alert: Alert) {
         return;
     }
 
+    // W-6: Simple alert rate limiting using SystemTime for simplicity in no_std-like context
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let last = LAST_ALERT.load(Ordering::Relaxed);
+    if now < last + ALERT_COOLDOWN_SECS {
+        return;
+    }
+    LAST_ALERT.store(now, Ordering::Relaxed);
+
     let min_severity = Severity::from_str(&config.min_severity);
     if alert.severity < min_severity {
         return;
@@ -100,8 +114,9 @@ async fn send_slack(url: &str, alert: &Alert) {
         Severity::Low => "🔵",
     };
 
-    let payload = format!(
-        r#"{{"text":"{} *Aegis Alert [{}]*\n*{}*\n{}\nSource: `{}`\n{}"}}"#,
+    // W-6: Use proper JSON builder for Slack payload
+    let text = format!(
+        "{} *Aegis Alert [{}]*\n*{}*\n{}\nSource: `{}`\n{}",
         emoji,
         alert.severity.as_str().to_uppercase(),
         alert.title,
@@ -109,11 +124,11 @@ async fn send_slack(url: &str, alert: &Alert) {
         alert.source_ip,
         alert.details,
     );
+    let payload = serde_json::json!({ "text": text });
 
     match reqwest::Client::new()
         .post(url)
-        .header("Content-Type", "application/json")
-        .body(payload)
+        .json(&payload)
         .send()
         .await
     {

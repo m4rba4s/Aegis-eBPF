@@ -186,15 +186,24 @@ pub fn record_dpi_hit(ip: u32) {
 
 fn is_on_blocklist(ip: u32) -> bool {
     use aya::maps::HashMap;
+    use aegis_common::FlowKey;
+
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let Ok(md) = aya::maps::MapData::from_pin(path) else {
         return false;
     };
     let map = aya::maps::Map::HashMap(md);
-    let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) else {
+    let Ok(hm) = HashMap::<_, FlowKey, u32>::try_from(map) else {
         return false;
     };
-    hm.get(&ip, 0).is_ok()
+
+    let key = FlowKey {
+        src_ip: ip.to_be(),
+        dst_port: 0,
+        proto: 0,
+        _pad: 0,
+    };
+    hm.get(&key, 0).is_ok()
 }
 
 fn is_on_allowlist(ip: u32) -> bool {
@@ -207,7 +216,7 @@ fn is_on_allowlist(ip: u32) -> bool {
     let Ok(hm) = HashMap::<_, u32, u32>::try_from(map) else {
         return false;
     };
-    hm.get(&ip, 0).is_ok()
+    hm.get(&ip.to_be(), 0).is_ok()
 }
 
 fn is_on_cidr_feed(ip: u32) -> bool {
@@ -228,7 +237,7 @@ fn is_on_cidr_feed(ip: u32) -> bool {
         32,
         LpmKeyIpv4 {
             prefix_len: 32,
-            addr: ip, // Already in network byte order from caller
+            addr: ip.to_be(), // Convert to network byte order
         },
     );
     trie.get(&key, 0).is_ok()

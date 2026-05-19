@@ -12,7 +12,7 @@
 //!   - POST /api/unblock     — remove IP from blocklist
 //!   - GET  /                — embedded web dashboard
 
-use std::io::Write;
+use std::fmt::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +26,18 @@ use crate::dashboard;
 
 /// Default bind address (localhost only — security)
 const DEFAULT_ADDR: &str = "127.0.0.1:9100";
+
+// ── Pre-opened BPF Map Handles (passed before privdrop) ─────────────────
+
+use aya::maps::{MapData, PerCpuArray};
+use aegis_common::FlowKey;
+
+/// Shared handles to BPF maps opened before privilege drop.
+/// Without these, metrics/API cannot read maps after setresuid(1000).
+pub struct SharedHandles {
+    pub stats: Arc<std::sync::Mutex<PerCpuArray<MapData, Stats>>>,
+    pub blocklist: Arc<std::sync::Mutex<aya::maps::HashMap<MapData, FlowKey, u32>>>,
+}
 
 // ── Cached Stats (1s TTL) ───────────────────────────────────────────────
 
@@ -48,23 +60,17 @@ impl CachedStats {
         self.updated_at.elapsed() > Duration::from_secs(1)
     }
 
-    fn refresh(&mut self) {
-        self.stats = read_bpf_stats();
-        self.blocklist_count = read_blocklist_count();
+    fn refresh(&mut self, handles: &SharedHandles) {
+        self.stats = read_bpf_stats_shared(handles);
+        self.blocklist_count = read_blocklist_count_shared(handles);
         self.updated_at = Instant::now();
     }
 }
 
-// ── BPF Map Readers ─────────────────────────────────────────────────────
+// ── BPF Map Readers (via pre-opened handles) ───────────────────────────
 
-fn read_bpf_stats() -> Option<Stats> {
-    use aya::maps::PerCpuArray;
-
-    let map_path = "/sys/fs/bpf/aegis/STATS";
-    let md = aya::maps::MapData::from_pin(map_path).ok()?;
-    let map = aya::maps::Map::PerCpuArray(md);
-    let array = PerCpuArray::<_, Stats>::try_from(map).ok()?;
-
+fn read_bpf_stats_shared(handles: &SharedHandles) -> Option<Stats> {
+    let array = handles.stats.lock().ok()?;
     let values = array.get(&0, 0).ok()?;
     let mut total = Stats::default();
     for stat in values.iter() {
@@ -81,34 +87,17 @@ fn read_bpf_stats() -> Option<Stats> {
     Some(total)
 }
 
-fn read_blocklist_count() -> u64 {
-    use aya::maps::HashMap;
-    use aegis_common::FlowKey;
-
-    let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let md = match aya::maps::MapData::from_pin(path) {
-        Ok(md) => md,
-        Err(_) => return 0,
-    };
-    let map = aya::maps::Map::HashMap(md);
-    match HashMap::<_, FlowKey, u32>::try_from(map) {
+fn read_blocklist_count_shared(handles: &SharedHandles) -> u64 {
+    match handles.blocklist.lock() {
         Ok(hm) => hm.keys().count() as u64,
         Err(_) => 0,
     }
 }
 
-fn read_blocklist_ips() -> Vec<String> {
-    use aya::maps::HashMap;
-    use aegis_common::FlowKey;
+fn read_blocklist_ips_shared(handles: &SharedHandles) -> Vec<String> {
     use std::net::Ipv4Addr;
 
-    let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let md = match aya::maps::MapData::from_pin(path) {
-        Ok(md) => md,
-        Err(_) => return vec![],
-    };
-    let map = aya::maps::Map::HashMap(md);
-    match HashMap::<_, FlowKey, u32>::try_from(map) {
+    match handles.blocklist.lock() {
         Ok(hm) => hm
             .keys()
             .filter_map(|k| k.ok())
@@ -117,6 +106,7 @@ fn read_blocklist_ips() -> Vec<String> {
         Err(_) => vec![],
     }
 }
+
 // ── Softnet / NAPI Stats Reader ─────────────────────────────────────────
 
 struct SoftnetStats {
@@ -171,126 +161,66 @@ fn read_conntrack_count() -> u64 {
 // ── Prometheus Renderer ─────────────────────────────────────────────────
 
 fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
-    let mut buf = Vec::with_capacity(2048);
+    let mut buf = String::with_capacity(2048);
 
     if let Some(s) = stats {
-        writeln!(
-            buf,
-            "# HELP aegis_packets_total Total packets processed by category"
-        )
-        .ok();
-        writeln!(buf, "# TYPE aegis_packets_total counter").ok();
-        writeln!(
-            buf,
-            "aegis_packets_total{{action=\"seen\"}} {}",
-            s.pkts_seen
-        )
-        .ok();
-        writeln!(
-            buf,
-            "aegis_packets_total{{action=\"drop\"}} {}",
-            s.pkts_drop
-        )
-        .ok();
-        writeln!(
-            buf,
-            "aegis_packets_total{{action=\"pass\"}} {}",
-            s.pkts_pass
-        )
-        .ok();
+        let _ = writeln!(buf, "# HELP aegis_packets_seen_total Total packets seen");
+        let _ = writeln!(buf, "# TYPE aegis_packets_seen_total counter");
+        let _ = writeln!(buf, "aegis_packets_seen_total {}", s.pkts_seen);
 
-        writeln!(buf, "# HELP aegis_blocks_total Blocks by source").ok();
-        writeln!(buf, "# TYPE aegis_blocks_total counter").ok();
-        writeln!(
-            buf,
-            "aegis_blocks_total{{source=\"manual\"}} {}",
-            s.block_manual
-        )
-        .ok();
-        writeln!(
-            buf,
-            "aegis_blocks_total{{source=\"cidr_feed\"}} {}",
-            s.block_cidr
-        )
-        .ok();
+        let _ = writeln!(buf, "# HELP aegis_packets_drop_total Total packets dropped");
+        let _ = writeln!(buf, "# TYPE aegis_packets_drop_total counter");
+        let _ = writeln!(buf, "aegis_packets_drop_total {}", s.pkts_drop);
 
-        writeln!(buf, "# HELP aegis_portscan_hits_total Port scan detections").ok();
-        writeln!(buf, "# TYPE aegis_portscan_hits_total counter").ok();
-        writeln!(buf, "aegis_portscan_hits_total {}", s.portscan_hits).ok();
+        let _ = writeln!(buf, "# HELP aegis_packets_pass_total Total packets passed");
+        let _ = writeln!(buf, "# TYPE aegis_packets_pass_total counter");
+        let _ = writeln!(buf, "aegis_packets_pass_total {}", s.pkts_pass);
 
-        writeln!(
-            buf,
-            "# HELP aegis_conntrack_hits_total Connection tracking cache hits"
-        )
-        .ok();
-        writeln!(buf, "# TYPE aegis_conntrack_hits_total counter").ok();
-        writeln!(buf, "aegis_conntrack_hits_total {}", s.conntrack_hits).ok();
+        let _ = writeln!(buf, "# HELP aegis_block_manual_total Manual block hits");
+        let _ = writeln!(buf, "# TYPE aegis_block_manual_total counter");
+        let _ = writeln!(buf, "aegis_block_manual_total {}", s.block_manual);
 
-        writeln!(buf, "# HELP aegis_events_total eBPF perf events").ok();
-        writeln!(buf, "# TYPE aegis_events_total counter").ok();
-        writeln!(buf, "aegis_events_total{{status=\"ok\"}} {}", s.events_ok).ok();
-        writeln!(
-            buf,
-            "aegis_events_total{{status=\"fail\"}} {}",
-            s.events_fail
-        )
-        .ok();
+        let _ = writeln!(buf, "# HELP aegis_block_cidr_total CIDR feed block hits");
+        let _ = writeln!(buf, "# TYPE aegis_block_cidr_total counter");
+        let _ = writeln!(buf, "aegis_block_cidr_total {}", s.block_cidr);
+
+        let _ = writeln!(buf, "# HELP aegis_portscan_hits_total Port scan detections");
+        let _ = writeln!(buf, "# TYPE aegis_portscan_hits_total counter");
+        let _ = writeln!(buf, "aegis_portscan_hits_total {}", s.portscan_hits);
+
+        let _ = writeln!(buf, "# HELP aegis_conntrack_hits_total Conntrack fast-path hits");
+        let _ = writeln!(buf, "# TYPE aegis_conntrack_hits_total counter");
+        let _ = writeln!(buf, "aegis_conntrack_hits_total {}", s.conntrack_hits);
     } else {
-        writeln!(buf, "# aegis: BPF maps not available (is aegis running?)").ok();
+        let _ = writeln!(buf, "# aegis: BPF maps not available (is aegis running?)");
     }
 
-    writeln!(buf, "# HELP aegis_blocklist_entries Current blocklist size").ok();
-    writeln!(buf, "# TYPE aegis_blocklist_entries gauge").ok();
-    writeln!(buf, "aegis_blocklist_entries {}", blocklist_count).ok();
+    let _ = writeln!(buf, "# HELP aegis_blocklist_entries Current blocklist size");
+    let _ = writeln!(buf, "# TYPE aegis_blocklist_entries gauge");
+    let _ = writeln!(buf, "aegis_blocklist_entries {}", blocklist_count);
 
-    writeln!(buf, "# HELP aegis_up Aegis firewall running (1 = up)").ok();
-    writeln!(buf, "# TYPE aegis_up gauge").ok();
-    writeln!(buf, "aegis_up {}", if stats.is_some() { 1 } else { 0 }).ok();
+    let _ = writeln!(buf, "# HELP aegis_up Aegis firewall running (1 = up)");
+    let _ = writeln!(buf, "# TYPE aegis_up gauge");
+    let _ = writeln!(buf, "aegis_up {}", if stats.is_some() { 1 } else { 0 });
 
-    // NAPI / softnet_stat metrics — critical for XDP performance monitoring
     if let Some(softnet) = read_softnet_stats() {
-        writeln!(
-            buf,
-            "# HELP aegis_softnet_processed_total Packets processed via NAPI (per-CPU sum)"
-        )
-        .ok();
-        writeln!(buf, "# TYPE aegis_softnet_processed_total counter").ok();
-        writeln!(buf, "aegis_softnet_processed_total {}", softnet.processed).ok();
+        let _ = writeln!(buf, "# HELP aegis_softnet_processed_total Packets processed via NAPI");
+        let _ = writeln!(buf, "# TYPE aegis_softnet_processed_total counter");
+        let _ = writeln!(buf, "aegis_softnet_processed_total {}", softnet.processed);
 
-        writeln!(
-            buf,
-            "# HELP aegis_softnet_dropped_total Packets dropped due to full backlog"
-        )
-        .ok();
-        writeln!(buf, "# TYPE aegis_softnet_dropped_total counter").ok();
-        writeln!(buf, "aegis_softnet_dropped_total {}", softnet.dropped).ok();
-
-        writeln!(
-            buf,
-            "# HELP aegis_softnet_time_squeeze_total Times softirq hit time limit (NAPI budget exhausted)"
-        )
-        .ok();
-        writeln!(buf, "# TYPE aegis_softnet_time_squeeze_total counter").ok();
-        writeln!(buf, "aegis_softnet_time_squeeze_total {}", softnet.time_squeeze).ok();
-
-        writeln!(
-            buf,
-            "# HELP aegis_softnet_backlog_len Current backlog queue length (sum across CPUs)"
-        )
-        .ok();
-        writeln!(buf, "# TYPE aegis_softnet_backlog_len gauge").ok();
-        writeln!(buf, "aegis_softnet_backlog_len {}", softnet.backlog_len).ok();
+        let _ = writeln!(buf, "# HELP aegis_softnet_dropped_total Packets dropped (full backlog)");
+        let _ = writeln!(buf, "# TYPE aegis_softnet_dropped_total counter");
+        let _ = writeln!(buf, "aegis_softnet_dropped_total {}", softnet.dropped);
     }
 
-    // Conntrack map utilization
     let ct_count = read_conntrack_count();
     if ct_count > 0 {
-        writeln!(buf, "# HELP aegis_conntrack_entries Current conntrack map entries").ok();
-        writeln!(buf, "# TYPE aegis_conntrack_entries gauge").ok();
-        writeln!(buf, "aegis_conntrack_entries {}", ct_count).ok();
+        let _ = writeln!(buf, "# HELP aegis_conntrack_entries Current conntrack map entries");
+        let _ = writeln!(buf, "# TYPE aegis_conntrack_entries gauge");
+        let _ = writeln!(buf, "aegis_conntrack_entries {}", ct_count);
     }
 
-    String::from_utf8(buf).unwrap_or_default()
+    buf
 }
 
 // ── JSON Renderers ──────────────────────────────────────────────────────
@@ -314,8 +244,8 @@ fn json_stats(stats: &Option<Stats>, blocklist_count: u64) -> String {
     }
 }
 
-fn json_blocklist() -> String {
-    let ips = read_blocklist_ips();
+fn json_blocklist(handles: &SharedHandles) -> String {
+    let ips = read_blocklist_ips_shared(handles);
     let entries: Vec<String> = ips.iter().map(|ip| format!(r#""{}""#, ip)).collect();
     format!(
         r#"{{"count":{},"ips":[{}]}}"#,
@@ -397,7 +327,7 @@ fn json_geo(ip_str: &str) -> String {
 
 // ── Block / Unblock via BPF Map ─────────────────────────────────────────
 
-fn block_ip(ip_str: &str) -> String {
+fn block_ip(handles: &SharedHandles, ip_str: &str) -> String {
     use std::net::Ipv4Addr;
     use aegis_common::FlowKey;
 
@@ -406,30 +336,24 @@ fn block_ip(ip_str: &str) -> String {
         Err(_) => return format!(r#"{{"error":"invalid IPv4: {}"}}"#, ip_str),
     };
 
-    let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let md = match aya::maps::MapData::from_pin(path) {
-        Ok(md) => md,
-        Err(e) => return format!(r#"{{"error":"cannot open BLOCKLIST: {}"}}"#, e),
-    };
-    let map = aya::maps::Map::HashMap(md);
-    let mut hm = match aya::maps::HashMap::<_, FlowKey, u32>::try_from(map) {
-        Ok(hm) => hm,
-        Err(e) => return format!(r#"{{"error":"map type error: {}"}}"#, e),
-    };
-
-    let key = FlowKey {
-        src_ip: u32::from(ip).to_be(),
-        dst_port: 0,
-        proto: 0,
-        _pad: 0,
-    };
-    match hm.insert(key, 1, 0) {
-        Ok(()) => format!(r#"{{"ok":true,"blocked":"{}"}}"#, ip),
-        Err(e) => format!(r#"{{"error":"insert failed: {}"}}"#, e),
+    match handles.blocklist.lock() {
+        Ok(mut hm) => {
+            let key = FlowKey {
+                src_ip: u32::from(ip).to_be(),
+                dst_port: 0,
+                proto: 0,
+                _pad: 0,
+            };
+            match hm.insert(key, 1, 0) {
+                Ok(()) => format!(r#"{{"ok":true,"blocked":"{}"}}"#, ip),
+                Err(e) => format!(r#"{{"error":"insert failed: {}"}}"#, e),
+            }
+        }
+        Err(e) => format!(r#"{{"error":"BLOCKLIST lock error: {}"}}"#, e),
     }
 }
 
-fn unblock_ip(ip_str: &str) -> String {
+fn unblock_ip(handles: &SharedHandles, ip_str: &str) -> String {
     use std::net::Ipv4Addr;
     use aegis_common::FlowKey;
 
@@ -438,26 +362,20 @@ fn unblock_ip(ip_str: &str) -> String {
         Err(_) => return format!(r#"{{"error":"invalid IPv4: {}"}}"#, ip_str),
     };
 
-    let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let md = match aya::maps::MapData::from_pin(path) {
-        Ok(md) => md,
-        Err(e) => return format!(r#"{{"error":"cannot open BLOCKLIST: {}"}}"#, e),
-    };
-    let map = aya::maps::Map::HashMap(md);
-    let mut hm = match aya::maps::HashMap::<_, FlowKey, u32>::try_from(map) {
-        Ok(hm) => hm,
-        Err(e) => return format!(r#"{{"error":"map type error: {}"}}"#, e),
-    };
-
-    let key = FlowKey {
-        src_ip: u32::from(ip).to_be(),
-        dst_port: 0,
-        proto: 0,
-        _pad: 0,
-    };
-    match hm.remove(&key) {
-        Ok(()) => format!(r#"{{"ok":true,"unblocked":"{}"}}"#, ip),
-        Err(e) => format!(r#"{{"error":"remove failed: {}"}}"#, e),
+    match handles.blocklist.lock() {
+        Ok(mut hm) => {
+            let key = FlowKey {
+                src_ip: u32::from(ip).to_be(),
+                dst_port: 0,
+                proto: 0,
+                _pad: 0,
+            };
+            match hm.remove(&key) {
+                Ok(()) => format!(r#"{{"ok":true,"unblocked":"{}"}}"#, ip),
+                Err(e) => format!(r#"{{"error":"remove failed: {}"}}"#, e),
+            }
+        }
+        Err(e) => format!(r#"{{"error":"BLOCKLIST lock error: {}"}}"#, e),
     }
 }
 
@@ -543,7 +461,10 @@ fn http_text(body: &str) -> Vec<u8> {
 
 // ── Main Server ─────────────────────────────────────────────────────────
 
-pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAddr> {
+pub async fn spawn_metrics_server(
+    addr: Option<&str>,
+    handles: Arc<SharedHandles>,
+) -> anyhow::Result<SocketAddr> {
     let bind_addr: SocketAddr = addr
         .unwrap_or(DEFAULT_ADDR)
         .parse()
@@ -562,6 +483,7 @@ pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAd
             };
 
             let cache = cache.clone();
+            let handles = handles.clone();
 
             tokio::spawn(async move {
                 // API Rate Limiting (per-IP token bucket)
@@ -572,67 +494,65 @@ pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAd
                     return;
                 }
 
-                // Enforce 8KB limit (8192 bytes) + 5s timeout per connection
+                // C-3: Robust HTTP reading with Content-Length and Payload limits
                 let read_result = tokio::time::timeout(
                     Duration::from_secs(5),
                     async {
-                        let mut total_read = 0usize;
-                        let mut req_str = String::new();
+                        let mut buffer = Vec::with_capacity(2048);
+                        let mut header_end = None;
+                        let mut content_length = 0;
 
                         loop {
                             let mut chunk = [0u8; 1024];
                             match stream.read(&mut chunk).await {
                                 Ok(0) => break,
                                 Ok(n) => {
-                                    total_read += n;
-                                    if total_read > 8192 {
+                                    buffer.extend_from_slice(&chunk[..n]);
+                                    if buffer.len() > 8192 {
+                                        // Payload too large
                                         let resp = http_json(413, r#"{"error":"payload too large"}"#);
                                         let _ = stream.write_all(&resp).await;
-                                        return String::new(); // signal: already responded
+                                        return None;
                                     }
-                                    req_str.push_str(&String::from_utf8_lossy(&chunk[..n]));
 
                                     // Check if we have complete headers
-                                    if let Some(header_end) = req_str.find("\r\n\r\n") {
-                                        if req_str.starts_with("GET") || req_str.starts_with("HEAD") {
-                                            break; // GET/HEAD: no body expected
-                                        }
-                                        // POST: parse Content-Length and read body
-                                        let headers = &req_str[..header_end];
-                                        let content_len: usize = headers
-                                            .lines()
-                                            .find_map(|l| {
-                                                let lower = l.to_ascii_lowercase();
-                                                if lower.starts_with("content-length:") {
-                                                    lower["content-length:".len()..].trim().parse().ok()
-                                                } else {
-                                                    None
+                                    if header_end.is_none() {
+                                        let req_str = String::from_utf8_lossy(&buffer);
+                                        if let Some(pos) = req_str.find("\r\n\r\n") {
+                                            header_end = Some(pos);
+                                            // For POST, parse Content-Length
+                                            if req_str.starts_with("POST") {
+                                                for line in req_str[..pos].lines() {
+                                                    let lower = line.to_ascii_lowercase();
+                                                    if lower.starts_with("content-length:") {
+                                                        content_length = lower["content-length:".len()..].trim().parse().unwrap_or(0);
+                                                    }
                                                 }
-                                            })
-                                            .unwrap_or(0);
-
-                                        let body_start = header_end + 4;
-                                        let body_received = req_str.len() - body_start;
-                                        if body_received >= content_len {
-                                            break; // Full body received
+                                            }
                                         }
-                                        // else: continue reading more body chunks
+                                    }
+
+                                    if let Some(pos) = header_end {
+                                        // We have headers, check if we have enough body
+                                        if buffer.len() >= pos + 4 + content_length {
+                                            break;
+                                        }
                                     }
                                 }
-                                Err(_) => return String::new(),
+                                Err(_) => return None,
                             }
                         }
-                        req_str
+                        if buffer.is_empty() { return None; }
+                        Some(String::from_utf8_lossy(&buffer).to_string())
                     }
                 ).await;
 
                 let req_str = match read_result {
-                    Ok(s) if !s.is_empty() => s,
-                    _ => return, // timeout or empty = already responded or dead connection
+                    Ok(Some(s)) => s,
+                    _ => return, // timeout, overflow, or empty
                 };
-                let first_line = req_str.lines().next().unwrap_or("");
 
-                let response = route_request(first_line, &req_str, &cache).await;
+                let response = route_request(&req_str, &cache, &handles).await;
                 let _ = stream.write_all(&response).await;
             });
         }
@@ -642,10 +562,11 @@ pub async fn spawn_metrics_server(addr: Option<&str>) -> anyhow::Result<SocketAd
 }
 
 async fn route_request(
-    first_line: &str,
     full_req: &str,
     cache: &Arc<RwLock<CachedStats>>,
+    handles: &SharedHandles,
 ) -> Vec<u8> {
+    let first_line = full_req.lines().next().unwrap_or("");
     // Parse method and path
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     let (method, path) = match parts.as_slice() {
@@ -661,7 +582,7 @@ async fn route_request(
         ("GET", "/metrics") => {
             let mut c = cache.write().await;
             if c.is_stale() {
-                c.refresh();
+                c.refresh(handles);
             }
             let body = render_prometheus(&c.stats, c.blocklist_count);
             http_text(&body)
@@ -674,14 +595,14 @@ async fn route_request(
         ("GET", "/api/stats") => {
             let mut c = cache.write().await;
             if c.is_stale() {
-                c.refresh();
+                c.refresh(handles);
             }
             let body = json_stats(&c.stats, c.blocklist_count);
             http_json(200, &body)
         }
 
         // ── API: Blocklist ──────────────────────────────
-        ("GET", "/api/blocklist") => http_json(200, &json_blocklist()),
+        ("GET", "/api/blocklist") => http_json(200, &json_blocklist(handles)),
 
         // ── API: Config ─────────────────────────────────
         ("GET", "/api/config") => http_json(200, &json_config()),
@@ -703,7 +624,7 @@ async fn route_request(
             // Extract body after \r\n\r\n
             let body = full_req.split("\r\n\r\n").nth(1).unwrap_or("");
             match extract_json_field(body, "ip") {
-                Some(ip) => http_json(200, &block_ip(ip)),
+                Some(ip) => http_json(200, &block_ip(handles, &ip)),
                 None => http_json(400, r#"{"error":"missing 'ip' field in JSON body"}"#),
             }
         }
@@ -715,7 +636,7 @@ async fn route_request(
             }
             let body = full_req.split("\r\n\r\n").nth(1).unwrap_or("");
             match extract_json_field(body, "ip") {
-                Some(ip) => http_json(200, &unblock_ip(ip)),
+                Some(ip) => http_json(200, &unblock_ip(handles, &ip)),
                 None => http_json(400, r#"{"error":"missing 'ip' field in JSON body"}"#),
             }
         }
