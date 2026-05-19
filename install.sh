@@ -420,12 +420,12 @@ StandardError=append:/var/log/aegis/aegis.log
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-NoNewPrivileges=false
+NoNewPrivileges=true
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
 
 # Capability restrictions
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON
-AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
 
 # Additional hardening
 MemoryDenyWriteExecute=true
