@@ -375,6 +375,17 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // Load eBPF (only for commands that need it)
+    // Clean stale pinned maps from previous runs (prevents EPERM on map type mismatch)
+    let pin_dir = std::path::Path::new("/sys/fs/bpf/aegis");
+    if pin_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(pin_dir) {
+            for entry in entries.flatten() {
+                if let Err(e) = std::fs::remove_file(entry.path()) {
+                    tracing::debug!(path = %entry.path().display(), error = %e, "stale pin cleanup skipped");
+                }
+            }
+        }
+    }
     // Try embedded bytecode first, fallback to file
     let mut bpf = loader::load_xdp_program(&opt.ebpf_path)?;
 
