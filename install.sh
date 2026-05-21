@@ -5,6 +5,7 @@
 #
 # Usage:
 #   sudo ./install.sh              # Full build + install
+#   sudo ./install.sh --update     # Update to latest version
 #   sudo ./install.sh --check      # Dry-run: validate all prerequisites
 #   sudo ./install.sh --install-only  # Install pre-built binaries only
 #   sudo ./install.sh --uninstall  # Remove Aegis completely
@@ -985,6 +986,109 @@ uninstall_aegis() {
 }
 
 # =============================================================================
+# UPDATE (in-place upgrade, preserves config)
+# =============================================================================
+
+update_aegis() {
+    show_banner
+
+    if [[ $EUID -ne 0 ]]; then
+        log_error "This script must be run as root (sudo)"
+        exit 1
+    fi
+
+    # Get current version
+    local old_version="unknown"
+    if command -v aegis-cli &>/dev/null; then
+        old_version=$(aegis-cli --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+    log_info "Current version: $old_version"
+
+    # Pull latest source
+    cd "$SCRIPT_DIR"
+    if [[ -d ".git" ]]; then
+        log_step "Pulling latest changes..."
+        local before_hash after_hash
+        before_hash=$(git rev-parse HEAD 2>/dev/null || echo "none")
+
+        if ! git pull --ff-only 2>/dev/null; then
+            log_warn "Fast-forward pull failed, trying rebase..."
+            git pull --rebase || {
+                log_error "Git pull failed. Resolve conflicts manually."
+                exit 1
+            }
+        fi
+
+        after_hash=$(git rev-parse HEAD 2>/dev/null || echo "none")
+        if [[ "$before_hash" == "$after_hash" ]]; then
+            log_info "Already up-to-date ($before_hash)"
+            read -rp "  Force rebuild anyway? [y/N] " ans
+            if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+                log_ok "Nothing to do."
+                exit 0
+            fi
+        else
+            log_ok "Updated: ${before_hash:0:8} → ${after_hash:0:8}"
+            git log --oneline "${before_hash}..${after_hash}" 2>/dev/null | head -10
+        fi
+    else
+        log_warn "Not a git repo — downloading latest tarball..."
+        local tmpdir
+        tmpdir=$(mktemp -d /tmp/aegis-update.XXXXXX)
+        if curl -fsSL "$AEGIS_TARBALL_URL" | tar -xz -C "$tmpdir" --strip-components=1; then
+            # Copy new source files over (preserve local config)
+            rsync -a --exclude='.git' --exclude='target' "$tmpdir/" "$SCRIPT_DIR/"
+            rm -rf "$tmpdir"
+            log_ok "Source updated from tarball"
+        else
+            rm -rf "$tmpdir"
+            log_error "Failed to download update"
+            exit 1
+        fi
+    fi
+
+    # Validate kernel
+    check_kernel_version
+    check_bpf_fs
+
+    # Stop running instances
+    stop_running_services
+    # Also kill any manual aegis-cli processes
+    killall -9 aegis-cli 2>/dev/null || true
+    sleep 1
+
+    # Clean stale BPF pins (map definitions may have changed)
+    cleanup_old_install
+
+    # Rebuild
+    build_and_install
+
+    # Restart services
+    restart_services
+
+    # Show result
+    local new_version="unknown"
+    if command -v aegis-cli &>/dev/null; then
+        new_version=$(aegis-cli --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  ✅ AEGIS UPDATED"
+    echo "  Old: $old_version"
+    echo "  New: $new_version"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Config preserved: /etc/aegis/config.toml"
+    echo "  GeoIP preserved:  /var/lib/aegis/"
+    echo ""
+    echo "  Restart manually if needed:"
+    echo "    sudo systemctl restart aegis@eth0"
+    echo "    sudo aegis-cli -i eth0 tui"
+    echo ""
+}
+
+# =============================================================================
 # USAGE BANNER
 # =============================================================================
 
@@ -1032,11 +1136,13 @@ main() {
             --skip-service) skip_service=true; shift ;;
             --check)        check_only=true; shift ;;
             --uninstall)    uninstall_aegis; exit 0 ;;
+            --update)       update_aegis; exit 0 ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
                 echo "  (no args)        Full build from source + install"
+                echo "  --update         Update to latest version (preserves config)"
                 echo "  --check          Dry-run: validate prerequisites"
                 echo "  --install-only   Install pre-built binaries only"
                 echo "  --skip-service   Don't install init service"
