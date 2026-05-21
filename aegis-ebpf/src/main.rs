@@ -721,8 +721,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             let idx_ts: u32 = 1;
             let mut global_drop = false;
 
-            if let Some(syn_count) = unsafe { GLOBAL_SYN_CTR.get_ptr_mut(idx_count) } {
-                if let Some(window_ts) = unsafe { GLOBAL_SYN_CTR.get_ptr_mut(idx_ts) } {
+            if let Some(syn_count) = GLOBAL_SYN_CTR.get_ptr_mut(idx_count) {
+                if let Some(window_ts) = GLOBAL_SYN_CTR.get_ptr_mut(idx_ts) {
                     let count = unsafe { &mut *syn_count };
                     let ts = unsafe { &mut *window_ts };
 
