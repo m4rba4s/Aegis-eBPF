@@ -22,13 +22,8 @@ struct Args {
     #[arg(short, long, default_value = "0.0.0.0:50051")]
     bind: String,
 
-    /// Static Bearer token for Agent auth
-    #[arg(
-        short,
-        long,
-        env = "AEGIS_TOWER_TOKEN",
-        default_value = "secret-tower-token-auth"
-    )]
+    /// Static Bearer token for Agent auth. Required via --token or AEGIS_TOWER_TOKEN.
+    #[arg(short, long, env = "AEGIS_TOWER_TOKEN")]
     token: String,
 }
 
@@ -52,13 +47,22 @@ impl TowerState {
         }
     }
 
-    fn check_auth<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        match req.metadata().get("authorization") {
-            Some(t) if t == &format!("Bearer {}", self.auth_token) => Ok(()),
-            _ => {
-                warn!("Unauthorized gRPC connection attempt");
-                Err(Status::unauthenticated("Invalid or missing Bearer token"))
-            }
+    fn check_auth<T>(&self, req: &Request<T>) -> bool {
+        let Some(token) = req
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+        else {
+            warn!("Unauthorized gRPC connection attempt");
+            return false;
+        };
+
+        let expected = format!("Bearer {}", self.auth_token);
+        if token == expected {
+            true
+        } else {
+            warn!("Unauthorized gRPC connection attempt");
+            false
         }
     }
 }
@@ -73,7 +77,9 @@ impl FleetControl for TowerState {
         &self,
         request: Request<NodeInfo>,
     ) -> Result<Response<Self::SubscribeBlocklistStream>, Status> {
-        self.check_auth(&request)?;
+        if !self.check_auth(&request) {
+            return Err(Status::unauthenticated("Invalid or missing Bearer token"));
+        }
 
         let node_info = request.into_inner();
         let client_id = node_info.node_id.clone();
@@ -92,13 +98,11 @@ impl FleetControl for TowerState {
         let rx = self.tx.subscribe();
 
         // Wrap broadcast receiver in a tokio Stream
-        let output_stream = BroadcastStream::new(rx).filter_map(move |res| {
-            match res {
-                Ok(rule) => Some(Ok(rule)),
-                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                    warn!(node_id = %client_id, lagged = n, "Agent is lagging behind stream");
-                    None
-                }
+        let output_stream = BroadcastStream::new(rx).filter_map(move |res| match res {
+            Ok(rule) => Some(Ok(rule)),
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                warn!(node_id = %client_id, lagged = n, "Agent is lagging behind stream");
+                None
             }
         });
 
@@ -108,7 +112,9 @@ impl FleetControl for TowerState {
     }
 
     async fn report_event(&self, request: Request<EventMsg>) -> Result<Response<Ack>, Status> {
-        self.check_auth(&request)?;
+        if !self.check_auth(&request) {
+            return Err(Status::unauthenticated("Invalid or missing Bearer token"));
+        }
 
         let event = request.into_inner();
 
@@ -155,6 +161,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
+    let token = args.token.trim();
+    if token.is_empty() || token == "secret-tower-token-auth" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AEGIS_TOWER_TOKEN/--token must be set to a non-default secret",
+        )
+        .into());
+    }
+
     let addr = args.bind.parse()?;
     info!(
         "🏰 Starting Aegis Tower (gRPC Fleet Controller) on {}",
@@ -162,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     info!("Auth token configuration loaded.");
 
-    let state = TowerState::new(args.token);
+    let state = TowerState::new(token.to_string());
 
     Server::builder()
         .add_service(FleetControlServer::new(state))

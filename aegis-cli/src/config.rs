@@ -405,9 +405,9 @@ level = "debug"
         let path = write_temp_file(toml.as_bytes(), "test_valid_toml.toml");
         let config = AegisConfig::load(Some(&path));
         assert_eq!(config.interface, "eth1");
-        assert_eq!(config.modules.port_scan, false);
+        assert!(!config.modules.port_scan);
         assert_eq!(config.logging.level, "debug");
-        assert_eq!(config.modules.rate_limit, true); // default
+        assert!(config.modules.rate_limit); // default
         std::fs::remove_file(path).unwrap();
     }
 

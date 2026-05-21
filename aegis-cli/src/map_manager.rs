@@ -56,11 +56,7 @@ pub fn setup_config_map(
     config.insert(aegis_common::CFG_ENTROPY, sys_cfg.modules.entropy as u32, 0)?;
 
     // DPI (Deep Packet Inspection) — TLS fingerprinting, YARA, entropy analysis
-    config.insert(
-        aegis_common::CFG_DPI_ENABLED,
-        sys_cfg.dpi.enabled as u32,
-        0,
-    )?;
+    config.insert(aegis_common::CFG_DPI_ENABLED, sys_cfg.dpi.enabled as u32, 0)?;
 
     // Skip RFC1918/loopback whitelist on public-facing interfaces.
     // On non-loopback/non-virtual interfaces, RFC1918 sources are spoofed.
@@ -72,7 +68,10 @@ pub fn setup_config_map(
     let skip_wl: u32 = if !is_virtual { 1 } else { 0 };
     config.insert(aegis_common::CFG_SKIP_WHITELIST, skip_wl, 0)?;
     if skip_wl == 1 {
-        tracing::info!(iface = iface, "RFC1918 whitelist DISABLED (public interface)");
+        tracing::info!(
+            iface = iface,
+            "RFC1918 whitelist DISABLED (public interface)"
+        );
     }
 
     Ok(Arc::new(Mutex::new(config)))

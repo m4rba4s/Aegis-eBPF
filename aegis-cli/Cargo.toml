@@ -37,10 +37,11 @@ object = "0.36"
 const_format = "0.2"
 clap_complete = "4.5"
 toml = "0.8"
-maxminddb = "0.24"
+maxminddb = "0.27"
 
-# Pure Rust YARA Engine for DPI
-yara-x = "0.12.0"
+# Pure Rust YARA engine core. Keep default modules disabled: the PE/crypto
+# modules pull `rsa`, which has an unfixed timing-side-channel advisory.
+yara-x = { version = "1.16.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "inventory"] }
 
 # Structured logging
 tracing = "0.1"

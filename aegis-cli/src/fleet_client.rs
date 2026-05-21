@@ -33,8 +33,13 @@ impl FleetClient {
             error!("FleetClient: Refusing to start with default hardcoded token! Update fleet.token in config.");
             return None;
         }
-        if !config.fleet.endpoint.starts_with("https://") && !config.fleet.endpoint.contains("localhost") && !config.fleet.endpoint.contains("127.0.0.1") {
-            warn!("FleetClient: Using plaintext gRPC for remote endpoint! TLS is highly recommended.");
+        if !config.fleet.endpoint.starts_with("https://")
+            && !config.fleet.endpoint.contains("localhost")
+            && !config.fleet.endpoint.contains("127.0.0.1")
+        {
+            warn!(
+                "FleetClient: Using plaintext gRPC for remote endpoint! TLS is highly recommended."
+            );
         }
 
         let (tx, rx) = mpsc::channel(100);
