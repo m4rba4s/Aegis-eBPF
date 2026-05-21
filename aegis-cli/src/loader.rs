@@ -11,18 +11,24 @@ pub fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
             crate::EMBEDDED_XDP.len()
         );
         println!("📦 Loading embedded XDP program");
-        return Ok(EbpfLoader::new().load(crate::EMBEDDED_XDP)?);
+        return Ok(EbpfLoader::new()
+            .map_pin_path("/sys/fs/bpf/aegis")
+            .load(crate::EMBEDDED_XDP)?);
     }
 
     // Otherwise load from file
     if Path::new(path).exists() {
         println!("📁 Loading XDP program from: {}", path);
-        Ok(Ebpf::load_file(path)?)
+        Ok(EbpfLoader::new()
+            .map_pin_path("/sys/fs/bpf/aegis")
+            .load_file(path)?)
     } else {
         #[cfg(embedded_xdp)]
         {
             println!("⚠️  File {} not found, using embedded XDP", path);
-            return Ok(EbpfLoader::new().load(crate::EMBEDDED_XDP)?);
+            return Ok(EbpfLoader::new()
+                .map_pin_path("/sys/fs/bpf/aegis")
+                .load(crate::EMBEDDED_XDP)?);
         }
         #[cfg(not(embedded_xdp))]
         {

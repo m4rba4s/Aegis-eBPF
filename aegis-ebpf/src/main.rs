@@ -18,7 +18,7 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
-use headers::{EthHdr, Ipv4Hdr, Ipv6ExtHdr, Ipv6FragHdr, Ipv6Hdr, ETH_P_IP, ETH_P_IPV6};
+use headers::{EthHdr, Ipv4Hdr, Ipv6ExtHdr, Ipv6Hdr, ETH_P_IP, ETH_P_IPV6};
 use parsing::ptr_at;
 
 // ============================================================
@@ -42,7 +42,6 @@ use aegis_common::{
     PortScanState,
     RateLimitState,
     Stats,
-    ACTION_DPI,
     ACTION_DROP,
     // Actions
     ACTION_PASS,
@@ -81,7 +80,6 @@ use aegis_common::{
     REASON_CONNTRACK,
     // Verdict reasons
     REASON_DEFAULT,
-    REASON_ENTROPY,
     // IPv6 constants
     REASON_IPV6_POLICY,
     REASON_MANUAL_BLOCK,
@@ -128,9 +126,9 @@ static ALLOWLIST: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_ALLOWLIS
 #[map]
 static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(MAP_CAP_CIDR, 0);
 
-/// Perf event array for logging to userspace
+/// Perf event array for logging to userspace (pinned: shared with TC)
 #[map]
-static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
+static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::pinned(0);
 
 /// Per-CPU health statistics
 #[map]
@@ -144,17 +142,17 @@ static DPI_EVENTS: PerfEventArray<DpiEvent> = PerfEventArray::new(0);
 #[map]
 static RATE_LIMIT: LruHashMap<u32, RateLimitState> = LruHashMap::with_max_entries(MAP_CAP_RATE_LIMIT, 0);
 
-/// Config map for runtime toggles
+/// Config map for runtime toggles (pinned: shared with TC)
 #[map]
-static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_CONFIG, 0);
+static CONFIG: HashMap<u32, u32> = HashMap::pinned(MAP_CAP_CONFIG, 0);
 
 /// Port Scan detection map: source IP -> PortScanState (LRU: evicts oldest on overflow)
 #[map]
 static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(MAP_CAP_PORT_SCAN, 0);
 
-/// Connection tracking map: 5-tuple -> state (LRU: prevents silent overflow)
+/// Connection tracking map: 5-tuple -> state (pinned: shared with TC)
 #[map]
-static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
+static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::pinned(MAP_CAP_CONNTRACK, 0);
 
 // ============================================================
 // IPv6 BPF MAPS
@@ -173,10 +171,10 @@ static ALLOWLIST_IPV6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(1024, 
 static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> =
     LpmTrie::with_max_entries(16384, 0);
 
-/// IPv6 Connection tracking (LRU: prevents silent overflow)
+/// IPv6 Connection tracking (pinned: shared with TC)
 #[map]
 static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> =
-    LruHashMap::with_max_entries(32768, 0);
+    LruHashMap::pinned(32768, 0);
 
 /// IPv6 event log (separate due to larger struct size)
 #[map]
@@ -525,15 +523,25 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         _pad: [0u8; 3],
     };
 
-    // Check if this is an existing ESTABLISHED connection
-    if let Some(state) = unsafe { CONN_TRACK.get(&conn_key) } {
-        if state.state == CONN_ESTABLISHED {
-            let mut updated = *state;
-            updated.last_seen = now_ns;
-            updated.packets = updated.packets.saturating_add(1);
-            updated.bytes = updated.bytes.saturating_add(total_len as u32);
-            let _ = CONN_TRACK.insert(&conn_key, &updated, 0);
-            return Ok(xdp_action::XDP_PASS);
+    // Check if this is an existing ESTABLISHED connection (fast path)
+    if is_module_enabled(CFG_CONN_TRACK) {
+        if let Some(state) = unsafe { CONN_TRACK.get(&conn_key) } {
+            if state.state == CONN_ESTABLISHED {
+                // Validate timeout before refreshing
+                let age_ns = now_ns.saturating_sub(state.last_seen);
+                if age_ns > CONN_TIMEOUT_ESTABLISHED_NS {
+                    // Expired — remove and fall through to normal processing
+                    let _ = CONN_TRACK.remove(&conn_key);
+                } else {
+                    let mut updated = *state;
+                    updated.last_seen = now_ns;
+                    updated.packets = updated.packets.saturating_add(1);
+                    updated.bytes = updated.bytes.saturating_add(total_len as u32);
+                    let _ = CONN_TRACK.insert(&conn_key, &updated, 0);
+                    stats_inc_conntrack();
+                    return Ok(xdp_action::XDP_PASS);
+                }
+            }
         }
     }
 

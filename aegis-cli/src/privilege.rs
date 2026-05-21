@@ -70,7 +70,24 @@ pub fn drop_privileges() -> anyhow::Result<()> {
 
     caps::securebits::set_keepcaps(true)?;
 
+    let mut keep = CapsHashSet::new();
+    keep.insert(Capability::CAP_BPF);
+    keep.insert(Capability::CAP_NET_ADMIN);
+    keep.insert(Capability::CAP_PERFMON);
+
+    // Reduce bounding set BEFORE uid change (requires CAP_SETPCAP as root)
+    // Keep CAP_SETPCAP temporarily so we can modify caps after setresuid
+    for cap in caps::all() {
+        if !keep.contains(&cap) && cap != Capability::CAP_SETPCAP {
+            let _ = caps::drop(None, CapSet::Bounding, cap);
+        }
+    }
+
+    // Clear supplementary groups (prevents group-based access leaks)
     unsafe {
+        if libc::setgroups(0, std::ptr::null()) != 0 {
+            tracing::warn!("setgroups(0) failed — supplementary groups may persist");
+        }
         if libc::setresgid(gid, gid, gid) != 0 {
             anyhow::bail!("Failed to drop to GID {}", gid);
         }
@@ -79,13 +96,17 @@ pub fn drop_privileges() -> anyhow::Result<()> {
         }
     }
 
-    let mut keep = CapsHashSet::new();
-    keep.insert(Capability::CAP_BPF);
-    keep.insert(Capability::CAP_NET_ADMIN);
-    keep.insert(Capability::CAP_PERFMON);
-
+    // Set effective + permitted to minimum needed
     caps::set(None, CapSet::Effective, &keep)?;
     caps::set(None, CapSet::Permitted, &keep)?;
+
+    // Clear inheritable (no caps pass to child processes)
+    caps::set(None, CapSet::Inheritable, &CapsHashSet::new())?;
+
+    // Now drop CAP_SETPCAP from bounding set (no longer needed)
+    let _ = caps::drop(None, CapSet::Bounding, Capability::CAP_SETPCAP);
+
+    // Prevent regaining caps via execve
     caps::securebits::set_keepcaps(false).unwrap_or(());
 
     tracing::info!(

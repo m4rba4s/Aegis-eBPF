@@ -8,13 +8,13 @@
 //! Non-blocking: all webhook calls are fire-and-forget tokio tasks.
 
 use crate::config::WebhooksConfig;
-use tracing::{info, warn};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+use tracing::{info, warn};
 
 /// Global rate limiter for webhooks (prevents flood during attacks)
 static LAST_ALERT: AtomicU64 = AtomicU64::new(0);
-const ALERT_COOLDOWN_SECS: u64 = 5; 
+const ALERT_COOLDOWN_SECS: u64 = 5;
 
 /// Severity levels for alert filtering
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -64,7 +64,10 @@ pub fn dispatch(config: &WebhooksConfig, alert: Alert) {
     }
 
     // W-6: Simple alert rate limiting using SystemTime for simplicity in no_std-like context
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let last = LAST_ALERT.load(Ordering::Relaxed);
     if now < last + ALERT_COOLDOWN_SECS {
         return;
@@ -126,12 +129,7 @@ async fn send_slack(url: &str, alert: &Alert) {
     );
     let payload = serde_json::json!({ "text": text });
 
-    match reqwest::Client::new()
-        .post(url)
-        .json(&payload)
-        .send()
-        .await
-    {
+    match reqwest::Client::new().post(url).json(&payload).send().await {
         Ok(r) => info!(status = %r.status(), "Slack webhook sent"),
         Err(e) => warn!(error = %e, "Slack webhook failed"),
     }

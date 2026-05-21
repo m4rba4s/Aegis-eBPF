@@ -29,8 +29,8 @@ const DEFAULT_ADDR: &str = "127.0.0.1:9100";
 
 // ── Pre-opened BPF Map Handles (passed before privdrop) ─────────────────
 
-use aya::maps::{MapData, PerCpuArray};
 use aegis_common::FlowKey;
+use aya::maps::{MapData, PerCpuArray};
 
 /// Shared handles to BPF maps opened before privilege drop.
 /// Without these, metrics/API cannot read maps after setresuid(1000).
@@ -188,7 +188,10 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
         let _ = writeln!(buf, "# TYPE aegis_portscan_hits_total counter");
         let _ = writeln!(buf, "aegis_portscan_hits_total {}", s.portscan_hits);
 
-        let _ = writeln!(buf, "# HELP aegis_conntrack_hits_total Conntrack fast-path hits");
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_conntrack_hits_total Conntrack fast-path hits"
+        );
         let _ = writeln!(buf, "# TYPE aegis_conntrack_hits_total counter");
         let _ = writeln!(buf, "aegis_conntrack_hits_total {}", s.conntrack_hits);
     } else {
@@ -204,18 +207,27 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
     let _ = writeln!(buf, "aegis_up {}", if stats.is_some() { 1 } else { 0 });
 
     if let Some(softnet) = read_softnet_stats() {
-        let _ = writeln!(buf, "# HELP aegis_softnet_processed_total Packets processed via NAPI");
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_softnet_processed_total Packets processed via NAPI"
+        );
         let _ = writeln!(buf, "# TYPE aegis_softnet_processed_total counter");
         let _ = writeln!(buf, "aegis_softnet_processed_total {}", softnet.processed);
 
-        let _ = writeln!(buf, "# HELP aegis_softnet_dropped_total Packets dropped (full backlog)");
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_softnet_dropped_total Packets dropped (full backlog)"
+        );
         let _ = writeln!(buf, "# TYPE aegis_softnet_dropped_total counter");
         let _ = writeln!(buf, "aegis_softnet_dropped_total {}", softnet.dropped);
     }
 
     let ct_count = read_conntrack_count();
     if ct_count > 0 {
-        let _ = writeln!(buf, "# HELP aegis_conntrack_entries Current conntrack map entries");
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_conntrack_entries Current conntrack map entries"
+        );
         let _ = writeln!(buf, "# TYPE aegis_conntrack_entries gauge");
         let _ = writeln!(buf, "aegis_conntrack_entries {}", ct_count);
     }
@@ -328,8 +340,8 @@ fn json_geo(ip_str: &str) -> String {
 // ── Block / Unblock via BPF Map ─────────────────────────────────────────
 
 fn block_ip(handles: &SharedHandles, ip_str: &str) -> String {
-    use std::net::Ipv4Addr;
     use aegis_common::FlowKey;
+    use std::net::Ipv4Addr;
 
     let ip: Ipv4Addr = match ip_str.trim().parse() {
         Ok(ip) => ip,
@@ -354,8 +366,8 @@ fn block_ip(handles: &SharedHandles, ip_str: &str) -> String {
 }
 
 fn unblock_ip(handles: &SharedHandles, ip_str: &str) -> String {
-    use std::net::Ipv4Addr;
     use aegis_common::FlowKey;
+    use std::net::Ipv4Addr;
 
     let ip: Ipv4Addr = match ip_str.trim().parse() {
         Ok(ip) => ip,
@@ -495,57 +507,60 @@ pub async fn spawn_metrics_server(
                 }
 
                 // C-3: Robust HTTP reading with Content-Length and Payload limits
-                let read_result = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    async {
-                        let mut buffer = Vec::with_capacity(2048);
-                        let mut header_end = None;
-                        let mut content_length = 0;
+                let read_result = tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut buffer = Vec::with_capacity(2048);
+                    let mut header_end = None;
+                    let mut content_length = 0;
 
-                        loop {
-                            let mut chunk = [0u8; 1024];
-                            match stream.read(&mut chunk).await {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    buffer.extend_from_slice(&chunk[..n]);
-                                    if buffer.len() > 8192 {
-                                        // Payload too large
-                                        let resp = http_json(413, r#"{"error":"payload too large"}"#);
-                                        let _ = stream.write_all(&resp).await;
-                                        return None;
-                                    }
+                    loop {
+                        let mut chunk = [0u8; 1024];
+                        match stream.read(&mut chunk).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buffer.extend_from_slice(&chunk[..n]);
+                                if buffer.len() > 8192 {
+                                    // Payload too large
+                                    let resp = http_json(413, r#"{"error":"payload too large"}"#);
+                                    let _ = stream.write_all(&resp).await;
+                                    return None;
+                                }
 
-                                    // Check if we have complete headers
-                                    if header_end.is_none() {
-                                        let req_str = String::from_utf8_lossy(&buffer);
-                                        if let Some(pos) = req_str.find("\r\n\r\n") {
-                                            header_end = Some(pos);
-                                            // For POST, parse Content-Length
-                                            if req_str.starts_with("POST") {
-                                                for line in req_str[..pos].lines() {
-                                                    let lower = line.to_ascii_lowercase();
-                                                    if lower.starts_with("content-length:") {
-                                                        content_length = lower["content-length:".len()..].trim().parse().unwrap_or(0);
-                                                    }
+                                // Check if we have complete headers
+                                if header_end.is_none() {
+                                    let req_str = String::from_utf8_lossy(&buffer);
+                                    if let Some(pos) = req_str.find("\r\n\r\n") {
+                                        header_end = Some(pos);
+                                        // For POST, parse Content-Length
+                                        if req_str.starts_with("POST") {
+                                            for line in req_str[..pos].lines() {
+                                                let lower = line.to_ascii_lowercase();
+                                                if let Some(value) =
+                                                    lower.strip_prefix("content-length:")
+                                                {
+                                                    content_length =
+                                                        value.trim().parse().unwrap_or(0);
                                                 }
                                             }
                                         }
                                     }
+                                }
 
-                                    if let Some(pos) = header_end {
-                                        // We have headers, check if we have enough body
-                                        if buffer.len() >= pos + 4 + content_length {
-                                            break;
-                                        }
+                                if let Some(pos) = header_end {
+                                    // We have headers, check if we have enough body
+                                    if buffer.len() >= pos + 4 + content_length {
+                                        break;
                                     }
                                 }
-                                Err(_) => return None,
                             }
+                            Err(_) => return None,
                         }
-                        if buffer.is_empty() { return None; }
-                        Some(String::from_utf8_lossy(&buffer).to_string())
                     }
-                ).await;
+                    if buffer.is_empty() {
+                        return None;
+                    }
+                    Some(String::from_utf8_lossy(&buffer).to_string())
+                })
+                .await;
 
                 let req_str = match read_result {
                     Ok(Some(s)) => s,
@@ -624,7 +639,7 @@ async fn route_request(
             // Extract body after \r\n\r\n
             let body = full_req.split("\r\n\r\n").nth(1).unwrap_or("");
             match extract_json_field(body, "ip") {
-                Some(ip) => http_json(200, &block_ip(handles, &ip)),
+                Some(ip) => http_json(200, &block_ip(handles, ip)),
                 None => http_json(400, r#"{"error":"missing 'ip' field in JSON body"}"#),
             }
         }
@@ -636,7 +651,7 @@ async fn route_request(
             }
             let body = full_req.split("\r\n\r\n").nth(1).unwrap_or("");
             match extract_json_field(body, "ip") {
-                Some(ip) => http_json(200, &unblock_ip(handles, &ip)),
+                Some(ip) => http_json(200, &unblock_ip(handles, ip)),
                 None => http_json(400, r#"{"error":"missing 'ip' field in JSON body"}"#),
             }
         }

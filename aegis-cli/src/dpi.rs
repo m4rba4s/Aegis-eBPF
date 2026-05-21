@@ -109,8 +109,8 @@ fn analyze_payload(event: &DpiEvent, yara_engine: Option<&YaraEngine>) -> (u8, S
 // ── Auto-Block via BPF Map ──────────────────────────────────────────
 
 pub fn auto_block_ip(ip: u32) -> bool {
-    use aya::maps::HashMap;
     use aegis_common::FlowKey;
+    use aya::maps::HashMap;
 
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let md = match aya::maps::MapData::from_pin(path) {

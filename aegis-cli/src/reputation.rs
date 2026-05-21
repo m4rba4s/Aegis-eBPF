@@ -185,8 +185,8 @@ pub fn record_dpi_hit(ip: u32) {
 // ── BPF Map Checks ──────────────────────────────────────────────────
 
 fn is_on_blocklist(ip: u32) -> bool {
-    use aya::maps::HashMap;
     use aegis_common::FlowKey;
+    use aya::maps::HashMap;
 
     let path = "/sys/fs/bpf/aegis/BLOCKLIST";
     let Ok(md) = aya::maps::MapData::from_pin(path) else {
@@ -221,14 +221,15 @@ fn is_on_allowlist(ip: u32) -> bool {
 
 fn is_on_cidr_feed(ip: u32) -> bool {
     // LPM Trie lookup from pinned CIDR_BLOCKLIST map
-    use aegis_common::LpmKeyIpv4;
+    use aegis_common::{CidrBlockEntry, LpmKeyIpv4};
 
     let path = "/sys/fs/bpf/aegis/CIDR_BLOCKLIST";
     let Ok(md) = aya::maps::MapData::from_pin(path) else {
         return false;
     };
     let map = aya::maps::Map::LpmTrie(md);
-    let Ok(trie) = aya::maps::lpm_trie::LpmTrie::<_, LpmKeyIpv4, u32>::try_from(map) else {
+    let Ok(trie) = aya::maps::lpm_trie::LpmTrie::<_, LpmKeyIpv4, CidrBlockEntry>::try_from(map)
+    else {
         return false;
     };
 

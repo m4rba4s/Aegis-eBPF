@@ -53,13 +53,13 @@ use aegis_common::{
 // BPF MAPS (Shared with XDP via pinning)
 // ============================================================
 
-/// Shared connection tracking map (LRU: matches XDP definition)
+/// Shared connection tracking map (pinned: shared with XDP)
 #[map]
-static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::with_max_entries(MAP_CAP_CONNTRACK, 0);
+static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::pinned(MAP_CAP_CONNTRACK, 0);
 
-/// IPv6 Connection tracking
+/// IPv6 Connection tracking (pinned: shared with XDP)
 #[map]
-static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> = LruHashMap::with_max_entries(32768, 0);
+static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> = LruHashMap::pinned(32768, 0);
 
 /// Egress-specific blocklist (destination IPs we block outgoing to)
 #[map]
@@ -70,13 +70,13 @@ static EGRESS_BLOCKLIST: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_E
 static EGRESS_CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> =
     LpmTrie::with_max_entries(MAP_CAP_CIDR, 0);
 
-/// Shared config map
+/// Shared config map (pinned: shared with XDP)
 #[map]
-static CONFIG: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_CONFIG, 0);
+static CONFIG: HashMap<u32, u32> = HashMap::pinned(MAP_CAP_CONFIG, 0);
 
-/// Shared perf event array for logging
+/// Shared perf event array for logging (pinned: shared with XDP)
 #[map]
-static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::new(0);
+static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::pinned(0);
 
 // ============================================================
 // TC ENTRY POINT
@@ -99,14 +99,12 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
     let payload_len = u16::from_be(unsafe { (*ipv6_hdr).payload_len });
 
     let l4_offset = ip_offset + Ipv6Hdr::LEN;
-    let mut src_port = 0u16;
-    let mut dst_port = 0u16;
 
     if next_header == NEXTHDR_TCP {
         let sp: *const u16 = ptr_at(&ctx, l4_offset)?;
-        src_port = u16::from_be(unsafe { *sp });
+        let src_port = u16::from_be(unsafe { *sp });
         let dp: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
-        dst_port = u16::from_be(unsafe { *dp });
+        let dst_port = u16::from_be(unsafe { *dp });
         let flags: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
         let tcp_flags = unsafe { *flags };
 
@@ -135,9 +133,9 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
         }
     } else if next_header == NEXTHDR_UDP {
         let sp: *const u16 = ptr_at(&ctx, l4_offset)?;
-        src_port = u16::from_be(unsafe { *sp });
+        let src_port = u16::from_be(unsafe { *sp });
         let dp: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
-        dst_port = u16::from_be(unsafe { *dp });
+        let dst_port = u16::from_be(unsafe { *dp });
 
         let conn_key = ConnTrackKeyIpv6 {
             src_ip: src_addr,

@@ -44,21 +44,17 @@ impl GeoLookup {
 
     /// Look up an IP address — returns (country_code, city, isp)
     pub fn lookup(&self, ip: IpAddr) -> Option<GeoResult> {
-        let city: geoip2::City = self.reader.lookup::<geoip2::City>(ip).ok()?;
+        let lookup = self.reader.lookup(ip).ok()?;
+        let city: geoip2::City = lookup.decode().ok()??;
 
-        let country_code = city
-            .country
-            .as_ref()
-            .and_then(|c| c.iso_code)
-            .unwrap_or("??")
-            .to_string();
+        let country_code = city.country.iso_code.unwrap_or("??").to_string();
 
         let city_name = city
             .city
-            .as_ref()
-            .and_then(|c| c.names.as_ref())
-            .and_then(|n| n.get("en").map(|s| s.to_string()))
-            .unwrap_or_else(|| "".to_string());
+            .names
+            .english
+            .map(str::to_string)
+            .unwrap_or_default();
 
         Some(GeoResult {
             country_code,
