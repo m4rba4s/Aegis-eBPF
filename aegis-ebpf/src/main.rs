@@ -99,6 +99,7 @@ use aegis_common::{
     THREAT_SCAN_XMAS,
     // Rate limiting constants
     TOKENS_PER_SEC,
+    GLOBAL_SYN_RATE_THRESHOLD,
     // Map capacity constants (ABI contract with TC)
     MAP_CAP_BLOCKLIST,
     MAP_CAP_ALLOWLIST,
@@ -141,6 +142,11 @@ static DPI_EVENTS: PerfEventArray<DpiEvent> = PerfEventArray::new(0);
 /// Rate limit map: IP -> RateLimitState (LRU: evicts oldest on overflow)
 #[map]
 static RATE_LIMIT: LruHashMap<u32, RateLimitState> = LruHashMap::with_max_entries(MAP_CAP_RATE_LIMIT, 0);
+
+/// Global SYN flood counter: [0]=syn_count, [1]=window_start_ns (PerCpuArray)
+/// Detects distributed SYN floods from random sources where per-IP limiting fails
+#[map]
+static GLOBAL_SYN_CTR: PerCpuArray<u64> = PerCpuArray::with_max_entries(2, 0);
 
 /// Config map for runtime toggles (pinned: shared with TC)
 #[map]
@@ -710,6 +716,48 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         let ack = tcp_flags & 0x10 != 0;
 
         if syn && !ack {
+            // === Global SYN rate detection (catches --rand-source floods) ===
+            let idx_count: u32 = 0;
+            let idx_ts: u32 = 1;
+            let mut global_drop = false;
+
+            if let Some(syn_count) = unsafe { GLOBAL_SYN_CTR.get_ptr_mut(idx_count) } {
+                if let Some(window_ts) = unsafe { GLOBAL_SYN_CTR.get_ptr_mut(idx_ts) } {
+                    let count = unsafe { &mut *syn_count };
+                    let ts = unsafe { &mut *window_ts };
+
+                    let elapsed_ns = now_ns.saturating_sub(*ts);
+
+                    if elapsed_ns >= 1_000_000_000 {
+                        // New 1-second window
+                        *count = 1;
+                        *ts = now_ns;
+                    } else {
+                        *count = count.saturating_add(1);
+                        if *count > GLOBAL_SYN_RATE_THRESHOLD as u64 {
+                            global_drop = true;
+                        }
+                    }
+                }
+            }
+
+            if global_drop {
+                return log_and_return(
+                    &ctx,
+                    src_addr,
+                    dst_addr,
+                    src_port,
+                    dst_port,
+                    proto,
+                    tcp_flags,
+                    ACTION_DROP,
+                    REASON_RATELIMIT,
+                    THREAT_FLOOD_SYN,
+                    total_len,
+                );
+            }
+
+            // === Per-IP SYN rate limiting (catches single-source floods) ===
             if let Some(state) = RATE_LIMIT.get_ptr_mut(&src_addr) {
                 let state = unsafe { &mut *state };
 
