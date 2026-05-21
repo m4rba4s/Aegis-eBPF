@@ -375,7 +375,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // Load eBPF (only for commands that need it)
-    // Clean stale pinned maps from previous runs (prevents EPERM on map type mismatch)
+    // Ensure pin directory exists and clean stale maps from previous runs
     let pin_dir = std::path::Path::new("/sys/fs/bpf/aegis");
     if pin_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(pin_dir) {
@@ -385,6 +385,10 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             }
         }
+    } else {
+        std::fs::create_dir_all(pin_dir).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to create BPF pin directory");
+        });
     }
     // Try embedded bytecode first, fallback to file
     let mut bpf = loader::load_xdp_program(&opt.ebpf_path)?;
