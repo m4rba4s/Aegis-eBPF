@@ -320,8 +320,9 @@ pub const PROTO_UDP: u8 = 17;
 // RATE LIMITING DEFAULTS
 // ============================================================
 
-pub const TOKENS_PER_SEC: u32 = 100; // SYN packets/sec allowed
-pub const MAX_TOKENS: u32 = 200; // Burst capacity
+pub const TOKENS_PER_SEC: u32 = 100; // SYN packets/sec allowed (per-IP)
+pub const MAX_TOKENS: u32 = 200; // Burst capacity (per-IP)
+pub const GLOBAL_SYN_RATE_THRESHOLD: u32 = 10000; // Global SYN/sec threshold (all sources)
 
 // ============================================================
 // PORT SCAN DEFAULTS
