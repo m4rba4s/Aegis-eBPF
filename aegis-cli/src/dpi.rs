@@ -1,18 +1,19 @@
 //! Deep Packet Inspection (DPI) Userspace Worker
 //!
-//! Reads suspect packets from the DPI_EVENTS perf buffer,
+//! Reads suspect packets from the DPI_EVENTS ring buffer,
 //! applies pattern matching heuristics, and optionally auto-blocks
 //! high-confidence threats by inserting into the BLOCKLIST BPF map.
 //!
 //! This module is non-blocking: the XDP program passes the packet
 //! regardless. DPI operates as an async observer.
 
-use aya::maps::perf::AsyncPerfEventArray;
-use aya::util::online_cpus;
+use aya::maps::RingBuf;
 use aya::Ebpf;
-use bytes::BytesMut;
+use std::mem;
 use std::net::Ipv4Addr;
+use std::ptr;
 use std::sync::Arc;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::Sender;
 use tracing::{info, warn};
 
@@ -136,7 +137,7 @@ pub fn auto_block_ip(ip: u32) -> bool {
 // ── Main DPI Worker ─────────────────────────────────────────────────
 
 /// Spawn the DPI worker as a tokio task.
-/// Reads DPI_EVENTS perf buffer and processes suspect packets.
+/// Reads DPI_EVENTS ring buffer and processes suspect packets.
 pub fn spawn_dpi_worker(
     bpf: &mut Ebpf,
     config: &AegisConfig,
@@ -146,142 +147,142 @@ pub fn spawn_dpi_worker(
         .take_map("DPI_EVENTS")
         .ok_or_else(|| anyhow::anyhow!("DPI_EVENTS map not found — is DPI enabled in eBPF?"))?;
 
-    let mut perf_array = AsyncPerfEventArray::try_from(dpi_map)?;
+    let ring_buf = RingBuf::try_from(dpi_map)?;
 
     // Load YARA engine from configured path
     let yara_engine = YaraEngine::load_from_directory(&config.dpi.rules_path)?.map(Arc::new);
 
-    let cpus = online_cpus().map_err(|e| anyhow::anyhow!("failed to get online CPUs: {:?}", e))?;
+    let yara_engine = yara_engine.clone();
+    let fleet_tx = fleet_tx.clone();
+    let threshold = config.dpi.auto_block_threshold;
 
-    for cpu_id in cpus {
-        let mut buf = perf_array.open(cpu_id, Some(256))?;
-        let yara_engine = yara_engine.clone();
-        let fleet_tx = fleet_tx.clone();
-        let threshold = config.dpi.auto_block_threshold;
-
-        tokio::spawn(async move {
-            let mut buffers = (0..16)
-                .map(|_| BytesMut::with_capacity(std::mem::size_of::<DpiEvent>()))
-                .collect::<Vec<_>>();
-
-            loop {
-                let events = match buf.read_events(&mut buffers).await {
-                    Ok(events) => events,
-                    Err(e) => {
-                        warn!(cpu = cpu_id, error = %e, "DPI perf read error");
-                        continue;
-                    }
-                };
-
-                for buf in buffers.iter().take(events.read) {
-                    if buf.len() < std::mem::size_of::<DpiEvent>() {
-                        continue;
-                    }
-
-                    let event: DpiEvent =
-                        unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const DpiEvent) };
-
-                    let src = Ipv4Addr::from(u32::from_be(event.src_ip));
-                    let dst = Ipv4Addr::from(u32::from_be(event.dst_ip));
-                    let reason = reason_str(event.dpi_reason);
-
-                    let (confidence, detection) = analyze_payload(&event, yara_engine.as_deref());
-
-                    // TLS ClientHello: process through JA3 fingerprint engine
-                    if event.dpi_reason == DPI_REASON_TLS_HELLO {
-                        let actual_len =
-                            (event.payload_len as usize).min(event.payload_snippet.len());
-                        let _snippet = &event.payload_snippet[..actual_len];
-                        // Decode TLS version from entropy_score field
-                        let tls_major = (event.entropy_score >> 4) & 0x0F;
-                        let tls_minor = event.entropy_score & 0x0F;
-                        let tls_version = ((tls_major as u16) << 8) | (tls_minor as u16);
-
-                        // Build minimal TlsClientHello for JA3 computation
-                        let hello = crate::tls_fingerprint::TlsClientHello {
-                            src_ip: event.src_ip,
-                            tls_version,
-                            cipher_suites: vec![], // Full extraction requires larger snippet
-                            extensions: vec![],
-                            elliptic_curves: vec![],
-                            ec_point_formats: vec![],
-                        };
-
-                        if let Some(entry) = crate::tls_fingerprint::process_hello(&hello) {
-                            if entry.match_name.is_some() {
-                                // Known-bad JA3 match — high severity
-                                warn!(
-                                    src_ip = %src,
-                                    ja3 = %entry.ja3_hash,
-                                    match_name = ?entry.match_name,
-                                    tls_version = %format!("0x{:04x}", tls_version),
-                                    "🔒 TLS ClientHello: KNOWN-BAD JA3 fingerprint"
-                                );
-                                // Auto-block known-bad TLS fingerprint
-                                let blocked = auto_block_ip(event.src_ip);
-                                if blocked {
-                                    warn!(src_ip = %src, "⛔ AUTO-BLOCKED (bad JA3 fingerprint)");
-                                }
-                            } else {
-                                info!(
-                                    src_ip = %src,
-                                    ja3 = %entry.ja3_hash,
-                                    tls_version = %format!("0x{:04x}", tls_version),
-                                    "🔒 TLS ClientHello fingerprinted"
-                                );
-                            }
-                        }
-                        continue; // TLS events don't go through normal DPI pipeline
-                    }
-
-                    if confidence >= threshold {
-                        // High confidence — auto-block
-                        let blocked = auto_block_ip(event.src_ip);
-                        warn!(
-                            src_ip = %src,
-                            dst_ip = %dst,
-                            src_port = event.src_port,
-                            dst_port = event.dst_port,
-                            proto = event.proto,
-                            trigger = reason,
-                            detection = %detection,
-                            confidence = confidence,
-                            auto_blocked = blocked,
-                            "🔴 DPI: HIGH CONFIDENCE THREAT — AUTO-BLOCKED"
-                        );
-
-                        // Broadcast to Fleet Controller
-                        if let Some(tx) = &fleet_tx {
-                            let msg = EventMsg {
-                                node_id: sysinfo::System::host_name().unwrap_or_default(),
-                                event_type: "DPI".to_string(),
-                                src_ip: src.to_string(),
-                                dst_ip: dst.to_string(),
-                                message: format!(
-                                    "Detection: {}, Reason: {}, Confidence: {}",
-                                    detection, reason, confidence
-                                ),
-                                severity: EventSeverity::Critical.into(),
-                            };
-                            let _ = tx.try_send(msg);
-                        }
-                    } else if confidence >= 40 {
-                        // Medium confidence — alert only
-                        info!(
-                            src_ip = %src,
-                            dst_ip = %dst,
-                            dst_port = event.dst_port,
-                            trigger = reason,
-                            detection = %detection,
-                            confidence = confidence,
-                            "🟡 DPI: SUSPECT TRAFFIC"
-                        );
-                    }
-                    // Low confidence (<40) — silently ignore
-                }
+    tokio::spawn(async move {
+        let mut ring_buf = match AsyncFd::new(ring_buf) {
+            Ok(ring_buf) => ring_buf,
+            Err(e) => {
+                warn!(error = %e, "DPI ringbuf async setup failed");
+                return;
             }
-        });
-    }
+        };
+
+        loop {
+            let mut guard = match ring_buf.readable_mut().await {
+                Ok(guard) => guard,
+                Err(e) => {
+                    warn!(error = %e, "DPI ringbuf poll error");
+                    break;
+                }
+            };
+
+            let ring = guard.get_inner_mut();
+            while let Some(item) = ring.next() {
+                if item.len() < mem::size_of::<DpiEvent>() {
+                    continue;
+                }
+
+                let event: DpiEvent =
+                    unsafe { ptr::read_unaligned(item.as_ptr() as *const DpiEvent) };
+
+                let src = Ipv4Addr::from(u32::from_be(event.src_ip));
+                let dst = Ipv4Addr::from(u32::from_be(event.dst_ip));
+                let reason = reason_str(event.dpi_reason);
+
+                let (confidence, detection) = analyze_payload(&event, yara_engine.as_deref());
+
+                // TLS ClientHello: process through JA3 fingerprint engine
+                if event.dpi_reason == DPI_REASON_TLS_HELLO {
+                    let actual_len = (event.payload_len as usize).min(event.payload_snippet.len());
+                    let _snippet = &event.payload_snippet[..actual_len];
+                    // Decode TLS version from entropy_score field
+                    let tls_major = (event.entropy_score >> 4) & 0x0F;
+                    let tls_minor = event.entropy_score & 0x0F;
+                    let tls_version = ((tls_major as u16) << 8) | (tls_minor as u16);
+
+                    // Build minimal TlsClientHello for JA3 computation
+                    let hello = crate::tls_fingerprint::TlsClientHello {
+                        src_ip: event.src_ip,
+                        tls_version,
+                        cipher_suites: vec![], // Full extraction requires larger snippet
+                        extensions: vec![],
+                        elliptic_curves: vec![],
+                        ec_point_formats: vec![],
+                    };
+
+                    if let Some(entry) = crate::tls_fingerprint::process_hello(&hello) {
+                        if entry.match_name.is_some() {
+                            // Known-bad JA3 match — high severity
+                            warn!(
+                                src_ip = %src,
+                                ja3 = %entry.ja3_hash,
+                                match_name = ?entry.match_name,
+                                tls_version = %format!("0x{:04x}", tls_version),
+                                "🔒 TLS ClientHello: KNOWN-BAD JA3 fingerprint"
+                            );
+                            // Auto-block known-bad TLS fingerprint
+                            let blocked = auto_block_ip(event.src_ip);
+                            if blocked {
+                                warn!(src_ip = %src, "⛔ AUTO-BLOCKED (bad JA3 fingerprint)");
+                            }
+                        } else {
+                            info!(
+                                src_ip = %src,
+                                ja3 = %entry.ja3_hash,
+                                tls_version = %format!("0x{:04x}", tls_version),
+                                "🔒 TLS ClientHello fingerprinted"
+                            );
+                        }
+                    }
+                    continue; // TLS events don't go through normal DPI pipeline
+                }
+
+                if confidence >= threshold {
+                    // High confidence — auto-block
+                    let blocked = auto_block_ip(event.src_ip);
+                    warn!(
+                        src_ip = %src,
+                        dst_ip = %dst,
+                        src_port = event.src_port,
+                        dst_port = event.dst_port,
+                        proto = event.proto,
+                        trigger = reason,
+                        detection = %detection,
+                        confidence = confidence,
+                        auto_blocked = blocked,
+                        "🔴 DPI: HIGH CONFIDENCE THREAT — AUTO-BLOCKED"
+                    );
+
+                    // Broadcast to Fleet Controller
+                    if let Some(tx) = &fleet_tx {
+                        let msg = EventMsg {
+                            node_id: sysinfo::System::host_name().unwrap_or_default(),
+                            event_type: "DPI".to_string(),
+                            src_ip: src.to_string(),
+                            dst_ip: dst.to_string(),
+                            message: format!(
+                                "Detection: {}, Reason: {}, Confidence: {}",
+                                detection, reason, confidence
+                            ),
+                            severity: EventSeverity::Critical.into(),
+                        };
+                        let _ = tx.try_send(msg);
+                    }
+                } else if confidence >= 40 {
+                    // Medium confidence — alert only
+                    info!(
+                        src_ip = %src,
+                        dst_ip = %dst,
+                        dst_port = event.dst_port,
+                        trigger = reason,
+                        detection = %detection,
+                        confidence = confidence,
+                        "🟡 DPI: SUSPECT TRAFFIC"
+                    );
+                }
+                // Low confidence (<40) — silently ignore
+            }
+            guard.clear_ready();
+        }
+    });
 
     info!("🔬 DPI worker started — monitoring suspect packet queue");
     Ok(())

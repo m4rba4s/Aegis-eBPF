@@ -2,7 +2,7 @@
 //!
 //! Computes JA3 fingerprints from TLS ClientHello metadata.
 //! The eBPF program extracts TLS version + cipher suite count + extension IDs
-//! from the ClientHello (first ~100 bytes after TCP), sends them via perf buffer.
+//! from the ClientHello (first ~100 bytes after TCP), sends them via BPF ring buffer.
 //! This module hashes them into JA3 strings and checks against known-bad signatures.
 //!
 //! JA3 format: SSLVersion,Ciphers,Extensions,EllipticCurves,EllipticCurvePointFormats

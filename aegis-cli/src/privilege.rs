@@ -73,7 +73,6 @@ pub fn drop_privileges() -> anyhow::Result<()> {
     let mut keep = CapsHashSet::new();
     keep.insert(Capability::CAP_BPF);
     keep.insert(Capability::CAP_NET_ADMIN);
-    keep.insert(Capability::CAP_PERFMON);
 
     // Reduce bounding set BEFORE uid change (requires CAP_SETPCAP as root)
     // Keep CAP_SETPCAP temporarily so we can modify caps after setresuid
