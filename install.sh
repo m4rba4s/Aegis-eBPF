@@ -439,8 +439,8 @@ SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Capability restrictions
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target

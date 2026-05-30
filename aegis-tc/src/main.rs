@@ -15,7 +15,7 @@ use aya_ebpf::{
     macros::{classifier, map},
     maps::{
         lpm_trie::{Key, LpmTrie},
-        HashMap, LruHashMap, PerfEventArray,
+        HashMap, LruHashMap, RingBuf,
     },
     programs::TcContext,
 };
@@ -32,21 +32,29 @@ use aegis_common::{
     ConnTrackState,
     LpmKeyIpv4,
     PacketLog,
+    PortScanState,
     ACTION_DROP,
     ACTION_PASS,
     CFG_INTERFACE_MODE,
+    CFG_PORT_SCAN,
     CONN_FIN_WAIT,
     CONN_SYN_SENT,
     HOOK_TC_EGRESS,
     REASON_EGRESS_BLOCK,
+    REASON_PORTSCAN,
     THREAT_EGRESS_BLOCKED,
     THREAT_NONE,
+    THREAT_SCAN_PORT,
     MAP_CAP_CONNTRACK,
     MAP_CAP_EGRESS_BLOCKLIST,
     MAP_CAP_CIDR,
     MAP_CAP_CONFIG,
+    MAP_CAP_EVENT_RING_BYTES,
+    MAP_CAP_PORT_SCAN,
     NEXTHDR_TCP,
     NEXTHDR_UDP,
+    PORT_SCAN_THRESHOLD,
+    PORT_SCAN_WINDOW_NS,
 };
 
 // ============================================================
@@ -59,7 +67,7 @@ static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::pinned
 
 /// IPv6 Connection tracking (pinned: shared with XDP)
 #[map]
-static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> = LruHashMap::pinned(32768, 0);
+static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> = LruHashMap::pinned(MAP_CAP_CONNTRACK, 0);
 
 /// Egress-specific blocklist (destination IPs we block outgoing to)
 #[map]
@@ -74,13 +82,22 @@ static EGRESS_CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> =
 #[map]
 static CONFIG: HashMap<u32, u32> = HashMap::pinned(MAP_CAP_CONFIG, 0);
 
-/// Shared perf event array for logging (pinned: shared with XDP)
+/// Shared ring buffer for logging (pinned: shared with XDP)
 #[map]
-static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::pinned(0);
+static EVENTS: RingBuf = RingBuf::pinned(MAP_CAP_EVENT_RING_BYTES, 0);
+
+/// TC-owned port scan detection map.
+#[map]
+static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(MAP_CAP_PORT_SCAN, 0);
 
 // ============================================================
 // TC ENTRY POINT
 // ============================================================
+
+#[inline(always)]
+fn is_module_enabled(key: u32) -> bool {
+    unsafe { CONFIG.get(&key).copied().unwrap_or(1) == 1 }
+}
 
 #[classifier]
 pub fn tc_egress(ctx: TcContext) -> i32 {
@@ -232,7 +249,16 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     // 1. Exact IP match
     if let Some(_) = unsafe { EGRESS_BLOCKLIST.get(&dst_addr) } {
         log_and_drop(
-            &ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len,
+            &ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            tcp_flags,
+            total_len,
+            REASON_EGRESS_BLOCK,
+            THREAT_EGRESS_BLOCKED,
         );
         return Ok(TC_ACT_SHOT);
     }
@@ -247,14 +273,80 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     );
     if let Some(_) = EGRESS_CIDR_BLOCKLIST.get(&cidr_key) {
         log_and_drop(
-            &ctx, src_addr, dst_addr, src_port, dst_port, proto, tcp_flags, total_len,
+            &ctx,
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            tcp_flags,
+            total_len,
+            REASON_EGRESS_BLOCK,
+            THREAT_EGRESS_BLOCKED,
         );
         return Ok(TC_ACT_SHOT);
     }
 
-    // --- CONNECTION STATE TRACKING ---
     let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
+    // --- PORT SCAN DETECTION ---
+    if is_module_enabled(CFG_PORT_SCAN) && proto == 6 {
+        let syn = tcp_flags & 0x02 != 0;
+        let ack = tcp_flags & 0x10 != 0;
+
+        if syn && !ack {
+            let port_index = (dst_port & 0xFF) as usize;
+            let bitmap_index = port_index / 32;
+            let bit_position = port_index % 32;
+
+            if let Some(state) = PORT_SCAN.get_ptr_mut(&src_addr) {
+                let state_ref = unsafe { &mut *state };
+
+                if now_ns.saturating_sub(state_ref.first_seen) > PORT_SCAN_WINDOW_NS {
+                    state_ref.port_bitmap = [0u32; 8];
+                    state_ref.port_count = 0;
+                    state_ref.first_seen = now_ns;
+                }
+
+                if bitmap_index < 8 {
+                    let bit_mask = 1u32 << bit_position;
+                    if state_ref.port_bitmap[bitmap_index] & bit_mask == 0 {
+                        state_ref.port_bitmap[bitmap_index] |= bit_mask;
+                        state_ref.port_count = state_ref.port_count.saturating_add(1);
+                    }
+
+                    if state_ref.port_count > PORT_SCAN_THRESHOLD {
+                        log_and_drop(
+                            &ctx,
+                            src_addr,
+                            dst_addr,
+                            src_port,
+                            dst_port,
+                            proto,
+                            tcp_flags,
+                            total_len,
+                            REASON_PORTSCAN,
+                            THREAT_SCAN_PORT,
+                        );
+                        return Ok(TC_ACT_SHOT);
+                    }
+                }
+            } else {
+                let mut new_state = PortScanState {
+                    port_bitmap: [0u32; 8],
+                    port_count: 1,
+                    first_seen: now_ns,
+                    _pad: [0u8; 6],
+                };
+                if bitmap_index < 8 {
+                    new_state.port_bitmap[bitmap_index] = 1u32 << bit_position;
+                }
+                let _ = PORT_SCAN.insert(&src_addr, &new_state, 0);
+            }
+        }
+    }
+
+    // --- CONNECTION STATE TRACKING ---
     if proto == 6 {
         // TCP
         let syn = tcp_flags & 0x02 != 0;
@@ -334,13 +426,9 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     Ok(TC_ACT_OK)
 }
 
-// ============================================================
-// LOGGING HELPERS
-// ============================================================
-
 #[inline(always)]
 fn log_and_drop(
-    ctx: &TcContext,
+    _ctx: &TcContext,
     src_ip: u32,
     dst_ip: u32,
     src_port: u16,
@@ -348,6 +436,8 @@ fn log_and_drop(
     proto: u8,
     tcp_flags: u8,
     packet_len: u16,
+    reason: u8,
+    threat_type: u8,
 ) {
     let timestamp = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
 
@@ -359,18 +449,18 @@ fn log_and_drop(
         proto,
         tcp_flags,
         action: ACTION_DROP,
-        reason: REASON_EGRESS_BLOCK,
-        threat_type: THREAT_EGRESS_BLOCKED,
+        reason,
+        threat_type,
         hook: HOOK_TC_EGRESS,
         packet_len,
         timestamp,
     };
-    EVENTS.output(ctx, &log_entry, 0);
+    let _ = EVENTS.output(&log_entry, 0);
 }
 
 #[inline(always)]
 fn log_pass(
-    ctx: &TcContext,
+    _ctx: &TcContext,
     src_ip: u32,
     dst_ip: u32,
     src_port: u16,
@@ -395,10 +485,9 @@ fn log_pass(
         packet_len,
         timestamp,
     };
-    EVENTS.output(ctx, &log_entry, 0);
+    let _ = EVENTS.output(&log_entry, 0);
 }
 
-#[cfg(not(test))]
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {

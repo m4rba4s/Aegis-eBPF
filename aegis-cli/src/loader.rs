@@ -41,7 +41,7 @@ pub fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
 }
 
 /// Load TC eBPF program - uses embedded bytecode if available and path is default.
-/// Uses map_pin_path to reuse XDP's pinned maps (CONN_TRACK, CONFIG, EVENTS).
+/// Uses map_pin_path to reuse pinned maps/ring buffers such as CONFIG and EVENTS.
 pub fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
     // If embedded and using default path, use embedded bytecode
     #[cfg(embedded_tc)]
@@ -50,7 +50,7 @@ pub fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
             "📦 Loading embedded TC program ({} bytes)",
             crate::EMBEDDED_TC.len()
         );
-        // Reuse XDP's pinned maps so TC shares CONN_TRACK/CONFIG/EVENTS
+        // Reuse pinned maps so TC shares CONFIG/EVENTS and owns its conntrack maps.
         return Ok(EbpfLoader::new()
             .map_pin_path("/sys/fs/bpf/aegis")
             .load(crate::EMBEDDED_TC)?);

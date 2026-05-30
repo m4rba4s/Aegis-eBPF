@@ -391,40 +391,49 @@ fn unblock_ip(handles: &SharedHandles, ip_str: &str) -> String {
     }
 }
 
-// ── Auth Check ──────────────────────────────────────────────────────────
+// ── RBAC Check for Map Updates ──────────────────────────────────────────
 
-fn check_auth(req: &str) -> bool {
-    // Read token from env or /etc/aegis/api_token
+fn header_value<'a>(req: &'a str, name: &str) -> Option<&'a str> {
+    req.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then_some(value.trim())
+    })
+}
+
+fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
+    if provided.len() != expected.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (a, b) in provided.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn check_map_write_auth(req: &str) -> bool {
+    // Write endpoints fail closed: a token plus an explicit role is required.
     let token = std::env::var("AEGIS_API_TOKEN")
         .ok()
         .or_else(|| std::fs::read_to_string("/etc/aegis/api_token").ok())
         .map(|t| t.trim().to_string());
 
-    match token {
-        Some(expected) if !expected.is_empty() => {
-            // Look for X-Aegis-Token header in raw request
-            for line in req.lines() {
-                if let Some(val) = line
-                    .strip_prefix("X-Aegis-Token:")
-                    .or_else(|| line.strip_prefix("x-aegis-token:"))
-                {
-                    let provided = val.trim().as_bytes();
-                    let expected_b = expected.as_bytes();
-                    // Constant-time comparison
-                    if provided.len() != expected_b.len() {
-                        return false;
-                    }
-                    let mut diff = 0u8;
-                    for (a, b) in provided.iter().zip(expected_b.iter()) {
-                        diff |= a ^ b;
-                    }
-                    return diff == 0;
-                }
-            }
-            false
-        }
-        _ => true, // No token configured = open (localhost only anyway)
+    let Some(expected) = token.filter(|t| !t.is_empty()) else {
+        return false;
+    };
+
+    let Some(provided) = header_value(req, "X-Aegis-Token") else {
+        return false;
+    };
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        return false;
     }
+
+    matches!(
+        header_value(req, "X-Aegis-Role"),
+        Some("admin") | Some("map-writer")
+    )
 }
 
 // ── Request Body Extraction ─────────────────────────────────────────────
@@ -633,7 +642,7 @@ async fn route_request(
 
         // ── API: Block (POST, auth required) ────────────
         ("POST", "/api/block") => {
-            if !check_auth(full_req) {
+            if !check_map_write_auth(full_req) {
                 return http_json(401, r#"{"error":"unauthorized"}"#);
             }
             // Extract body after \r\n\r\n
@@ -646,7 +655,7 @@ async fn route_request(
 
         // ── API: Unblock (POST, auth required) ──────────
         ("POST", "/api/unblock") => {
-            if !check_auth(full_req) {
+            if !check_map_write_auth(full_req) {
                 return http_json(401, r#"{"error":"unauthorized"}"#);
             }
             let body = full_req.split("\r\n\r\n").nth(1).unwrap_or("");

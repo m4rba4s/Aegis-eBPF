@@ -25,6 +25,8 @@ mod tui;
 pub mod yara_engine;
 
 use aya::maps::HashMap;
+use aya::programs::tc::SchedClassifierLinkId;
+use aya::programs::xdp::XdpLinkId;
 use aya::programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags};
 use aya::Ebpf;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -158,6 +160,37 @@ pub enum AllowAction {
     },
     /// List allowed IPs
     List,
+}
+
+fn detach_loaded_programs(
+    bpf: &mut Ebpf,
+    xdp_link_id: &mut Option<XdpLinkId>,
+    tc_bpf: &mut Option<Ebpf>,
+    tc_link_id: &mut Option<SchedClassifierLinkId>,
+) {
+    if let Some(link_id) = tc_link_id.take() {
+        if let Some(tc) = tc_bpf.as_mut() {
+            if let Some(program) = tc.program_mut("tc_egress") {
+                let classifier: Result<&mut SchedClassifier, _> = program.try_into();
+                if let Ok(classifier) = classifier {
+                    if let Err(e) = classifier.detach(link_id) {
+                        tracing::warn!(error = %e, "failed to detach TC egress link");
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(link_id) = xdp_link_id.take() {
+        if let Some(program) = bpf.program_mut("xdp_firewall") {
+            let xdp: Result<&mut Xdp, _> = program.try_into();
+            if let Ok(xdp) = xdp {
+                if let Err(e) = xdp.detach(link_id) {
+                    tracing::warn!(error = %e, "failed to detach XDP link");
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -400,30 +433,33 @@ async fn main() -> Result<(), anyhow::Error> {
             return Ok(());
         }
         Commands::Load | Commands::Tui | Commands::Daemon => {
-            let program: &mut Xdp = bpf.program_mut("xdp_firewall").unwrap().try_into()?;
-            program.load()?;
+            let mut xdp_link_id = {
+                let program: &mut Xdp = bpf.program_mut("xdp_firewall").unwrap().try_into()?;
+                program.load()?;
 
-            // XDP attach with automatic fallback: Driver Mode -> SKB Mode
-            let _link_id = match program.attach(&opt.iface, XdpFlags::default()) {
-                Ok(id) => {
-                    tracing::info!(iface = %opt.iface, link_id = ?id, mode = "driver", "XDP attached");
-                    id
-                }
-                Err(driver_err) => {
-                    // Driver mode failed (common for virtual/wireless interfaces)
-                    // Fallback to SKB (generic) mode
-                    tracing::info!(iface = %opt.iface, "driver mode unavailable, falling back to SKB");
-                    match program.attach(&opt.iface, XdpFlags::SKB_MODE) {
-                        Ok(id) => {
-                            tracing::info!(iface = %opt.iface, link_id = ?id, mode = "skb", "XDP attached");
-                            id
-                        }
-                        Err(skb_err) => {
-                            tracing::error!(iface = %opt.iface, driver_err = %driver_err, skb_err = %skb_err, "XDP attach failed on both modes");
-                            return Err(skb_err.into());
+                // XDP attach with automatic fallback: Driver Mode -> SKB Mode
+                let link_id = match program.attach(&opt.iface, XdpFlags::default()) {
+                    Ok(id) => {
+                        tracing::info!(iface = %opt.iface, link_id = ?id, mode = "driver", "XDP attached");
+                        id
+                    }
+                    Err(driver_err) => {
+                        // Driver mode failed (common for virtual/wireless interfaces)
+                        // Fallback to SKB (generic) mode
+                        tracing::info!(iface = %opt.iface, "driver mode unavailable, falling back to SKB");
+                        match program.attach(&opt.iface, XdpFlags::SKB_MODE) {
+                            Ok(id) => {
+                                tracing::info!(iface = %opt.iface, link_id = ?id, mode = "skb", "XDP attached");
+                                id
+                            }
+                            Err(skb_err) => {
+                                tracing::error!(iface = %opt.iface, driver_err = %driver_err, skb_err = %skb_err, "XDP attach failed on both modes");
+                                return Err(skb_err.into());
+                            }
                         }
                     }
-                }
+                };
+                Some(link_id)
             };
 
             // Pin maps for external tools (status, allow CLI)
@@ -460,6 +496,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
             // --- TC EGRESS PROGRAM ---
             let mut tc_bpf: Option<Ebpf> = None;
+            let mut tc_link_id: Option<SchedClassifierLinkId> = None;
             if !opt.no_tc {
                 match loader::load_tc_program(&opt.tc_path) {
                     Ok(mut tc) => {
@@ -477,8 +514,9 @@ async fn main() -> Result<(), anyhow::Error> {
                             .expect("tc_egress not found")
                             .try_into()?;
                         tc_prog.load()?;
-                        tc_prog.attach(&opt.iface, TcAttachType::Egress)?;
+                        let link_id = tc_prog.attach(&opt.iface, TcAttachType::Egress)?;
                         tracing::info!(iface = %opt.iface, "TC egress attached");
+                        tc_link_id = Some(link_id);
                         tc_bpf = Some(tc);
                     }
                     Err(e) => {
@@ -573,7 +611,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 )
                 .await?;
                 println!("\n🔌 Detaching programs from {}...", opt.iface);
-                // Detach by dropping (forces cleanup)
+                detach_loaded_programs(&mut bpf, &mut xdp_link_id, &mut tc_bpf, &mut tc_link_id);
                 drop(tc_bpf); // TC first
                 drop(bpf); // Then XDP
                 println!("✅ Programs detached. Exiting Aegis...");
@@ -652,7 +690,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 // Spawn Fleet Controller RPC Client (Aegis Tower Sync)
                 let fleet_handle = fleet_client::FleetClient::spawn(sys_cfg.clone());
 
-                // Spawn DPI worker (reads DPI_EVENTS perf buffer)
+                // Spawn DPI worker (reads DPI_EVENTS ring buffer)
                 let fleet_tx = fleet_handle.map(|h| h.event_tx);
                 match dpi::spawn_dpi_worker(&mut bpf, &sys_cfg, fleet_tx) {
                     Ok(()) => tracing::info!("DPI suspect queue worker active (YARA enabled)"),
@@ -682,6 +720,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 // NOTE: pinned maps in /sys/fs/bpf/aegis/ survive shutdown.
                 // They are cleaned on next startup (before new pins are created).
                 // This is intentional — after privilege drop we can't unlink root-owned bpffs.
+                detach_loaded_programs(&mut bpf, &mut xdp_link_id, &mut tc_bpf, &mut tc_link_id);
                 drop(tc_bpf); // TC first
                 drop(bpf); // Then XDP
                 tracing::info!("shutdown complete");
@@ -741,6 +780,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 }
             }
+            println!("Detaching programs from {}...", opt.iface);
+            detach_loaded_programs(&mut bpf, &mut xdp_link_id, &mut tc_bpf, &mut tc_link_id);
         }
         Commands::Save { file: _ } => {
             println!("Please use the 'save' command inside the running 'load' session.");

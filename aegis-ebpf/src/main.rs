@@ -14,7 +14,7 @@ use aya_ebpf::{
     macros::{map, xdp},
     maps::{
         lpm_trie::{Key, LpmTrie},
-        HashMap, LruHashMap, PerCpuArray, PerfEventArray,
+        HashMap, LruHashMap, PerCpuArray, RingBuf,
     },
     programs::XdpContext,
 };
@@ -26,11 +26,6 @@ use parsing::ptr_at;
 // ============================================================
 use aegis_common::{
     CidrBlockEntry,
-    ConnTrackKey,
-    ConnTrackKeyIpv6,
-    ConnTrackState,
-    // DPI
-    DpiEvent,
     FlowKey,
     FlowKeyIpv6,
     LpmKeyIpv4,
@@ -39,27 +34,18 @@ use aegis_common::{
     PacketLog,
     // Structures - IPv6
     PacketLogIpv6,
-    PortScanState,
     RateLimitState,
     Stats,
     ACTION_DROP,
     // Actions
     ACTION_PASS,
-    CFG_CONN_TRACK,
-    // Config keys
     CFG_INTERFACE_MODE,
-    CFG_PORT_SCAN,
+    // Config keys
     CFG_RATE_LIMIT,
     CFG_SCAN_DETECT,
     CFG_SKIP_WHITELIST,
     CFG_THREAT_FEEDS,
     CFG_VERBOSE,
-    // Connection states
-    CONN_ESTABLISHED,
-    CONN_SYN_SENT,
-    // Connection timeouts
-    CONN_TIMEOUT_ESTABLISHED_NS,
-    CONN_TIMEOUT_OTHER_NS,
     // Hook points
     HOOK_XDP,
     MAX_TOKENS,
@@ -73,17 +59,12 @@ use aegis_common::{
     NEXTHDR_ROUTING,
     NEXTHDR_TCP,
     NEXTHDR_UDP,
-    // Port scan constants
-    PORT_SCAN_THRESHOLD,
-    PORT_SCAN_WINDOW_NS,
     REASON_CIDR_FEED,
-    REASON_CONNTRACK,
     // Verdict reasons
     REASON_DEFAULT,
     // IPv6 constants
     REASON_IPV6_POLICY,
     REASON_MANUAL_BLOCK,
-    REASON_PORTSCAN,
     REASON_RATELIMIT,
     REASON_TCP_ANOMALY,
     REASON_WHITELIST,
@@ -94,7 +75,6 @@ use aegis_common::{
     // Threat types - IPv4
     THREAT_NONE,
     THREAT_SCAN_NULL,
-    THREAT_SCAN_PORT,
     THREAT_SCAN_SYNFIN,
     THREAT_SCAN_XMAS,
     // Rate limiting constants
@@ -104,9 +84,9 @@ use aegis_common::{
     MAP_CAP_BLOCKLIST,
     MAP_CAP_ALLOWLIST,
     MAP_CAP_CIDR,
-    MAP_CAP_CONNTRACK,
+    MAP_CAP_DPI_RING_BYTES,
+    MAP_CAP_EVENT_RING_BYTES,
     MAP_CAP_RATE_LIMIT,
-    MAP_CAP_PORT_SCAN,
     MAP_CAP_CONFIG,
     MAP_CAP_STATS,
 };
@@ -127,9 +107,9 @@ static ALLOWLIST: HashMap<u32, u32> = HashMap::with_max_entries(MAP_CAP_ALLOWLIS
 #[map]
 static CIDR_BLOCKLIST: LpmTrie<LpmKeyIpv4, CidrBlockEntry> = LpmTrie::with_max_entries(MAP_CAP_CIDR, 0);
 
-/// Perf event array for logging to userspace (pinned: shared with TC)
+/// Ring buffer for packet events (pinned: shared with TC)
 #[map]
-static EVENTS: PerfEventArray<PacketLog> = PerfEventArray::pinned(0);
+static EVENTS: RingBuf = RingBuf::pinned(MAP_CAP_EVENT_RING_BYTES, 0);
 
 /// Per-CPU health statistics
 #[map]
@@ -137,7 +117,7 @@ static STATS: PerCpuArray<Stats> = PerCpuArray::with_max_entries(MAP_CAP_STATS, 
 
 /// DPI suspect queue — packets flagged for deep inspection
 #[map]
-static DPI_EVENTS: PerfEventArray<DpiEvent> = PerfEventArray::new(0);
+static DPI_EVENTS: RingBuf = RingBuf::with_byte_size(MAP_CAP_DPI_RING_BYTES, 0);
 
 /// Rate limit map: IP -> RateLimitState (LRU: evicts oldest on overflow)
 #[map]
@@ -151,14 +131,6 @@ static GLOBAL_SYN_CTR: PerCpuArray<u64> = PerCpuArray::with_max_entries(2, 0);
 /// Config map for runtime toggles (pinned: shared with TC)
 #[map]
 static CONFIG: HashMap<u32, u32> = HashMap::pinned(MAP_CAP_CONFIG, 0);
-
-/// Port Scan detection map: source IP -> PortScanState (LRU: evicts oldest on overflow)
-#[map]
-static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(MAP_CAP_PORT_SCAN, 0);
-
-/// Connection tracking map: 5-tuple -> state (pinned: shared with TC)
-#[map]
-static CONN_TRACK: LruHashMap<ConnTrackKey, ConnTrackState> = LruHashMap::pinned(MAP_CAP_CONNTRACK, 0);
 
 // ============================================================
 // IPv6 BPF MAPS
@@ -177,14 +149,9 @@ static ALLOWLIST_IPV6: HashMap<[u8; 16], u32> = HashMap::with_max_entries(1024, 
 static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> =
     LpmTrie::with_max_entries(16384, 0);
 
-/// IPv6 Connection tracking (pinned: shared with TC)
-#[map]
-static CONN_TRACK_IPV6: LruHashMap<ConnTrackKeyIpv6, ConnTrackState> =
-    LruHashMap::pinned(32768, 0);
-
 /// IPv6 event log (separate due to larger struct size)
 #[map]
-static EVENTS_IPV6: PerfEventArray<PacketLogIpv6> = PerfEventArray::new(0);
+static EVENTS_IPV6: RingBuf = RingBuf::with_byte_size(MAP_CAP_EVENT_RING_BYTES, 0);
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -234,24 +201,6 @@ fn stats_inc_event_ok() {
 }
 
 #[inline(always)]
-fn stats_inc_portscan() {
-    unsafe {
-        if let Some(s) = STATS.get_ptr_mut(0) {
-            (*s).portscan_hits = (*s).portscan_hits.wrapping_add(1);
-        }
-    }
-}
-
-#[inline(always)]
-fn stats_inc_conntrack() {
-    unsafe {
-        if let Some(s) = STATS.get_ptr_mut(0) {
-            (*s).conntrack_hits = (*s).conntrack_hits.wrapping_add(1);
-        }
-    }
-}
-
-#[inline(always)]
 fn stats_inc_block_manual() {
     unsafe {
         if let Some(s) = STATS.get_ptr_mut(0) {
@@ -292,6 +241,15 @@ fn stats_inc_ipv6_drop() {
     unsafe {
         if let Some(s) = STATS.get_ptr_mut(0) {
             (*s).ipv6_drop = (*s).ipv6_drop.wrapping_add(1);
+        }
+    }
+}
+
+#[inline(always)]
+fn stats_inc_event_fail() {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).events_fail = (*s).events_fail.wrapping_add(1);
         }
     }
 }
@@ -516,87 +474,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         }
     }
 
-    // --- CONNECTION TRACKING (Stateful Firewall) ---
+    // XDP stays stateless: stateful inspection/conntrack is owned by TC.
     let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
-
-    // Build connection key (incoming direction: swap src/dst for lookup)
-    let conn_key = ConnTrackKey {
-        src_ip: dst_addr,
-        dst_ip: src_addr,
-        src_port: dst_port,
-        dst_port: src_port,
-        proto,
-        _pad: [0u8; 3],
-    };
-
-    // Check if this is an existing ESTABLISHED connection (fast path)
-    if is_module_enabled(CFG_CONN_TRACK) {
-        if let Some(state) = unsafe { CONN_TRACK.get(&conn_key) } {
-            if state.state == CONN_ESTABLISHED {
-                // Validate timeout before refreshing
-                let age_ns = now_ns.saturating_sub(state.last_seen);
-                if age_ns > CONN_TIMEOUT_ESTABLISHED_NS {
-                    // Expired — remove and fall through to normal processing
-                    let _ = CONN_TRACK.remove(&conn_key);
-                } else {
-                    let mut updated = *state;
-                    updated.last_seen = now_ns;
-                    updated.packets = updated.packets.saturating_add(1);
-                    updated.bytes = updated.bytes.saturating_add(total_len as u32);
-                    let _ = CONN_TRACK.insert(&conn_key, &updated, 0);
-                    stats_inc_conntrack();
-                    return Ok(xdp_action::XDP_PASS);
-                }
-            }
-        }
-    }
-
-    // Check reverse direction
-    let conn_key_rev = ConnTrackKey {
-        src_ip: src_addr,
-        dst_ip: dst_addr,
-        src_port,
-        dst_port,
-        proto,
-        _pad: [0u8; 3],
-    };
-
-    if let Some(state) = unsafe { CONN_TRACK.get(&conn_key_rev) } {
-        let timeout = if state.state == CONN_ESTABLISHED {
-            CONN_TIMEOUT_ESTABLISHED_NS
-        } else {
-            CONN_TIMEOUT_OTHER_NS
-        };
-
-        let age_ns = now_ns.saturating_sub(state.last_seen);
-
-        if age_ns > timeout {
-            let _ = CONN_TRACK.remove(&conn_key_rev);
-        } else if state.state == CONN_ESTABLISHED && is_module_enabled(CFG_CONN_TRACK) {
-            let mut updated = *state;
-            updated.last_seen = now_ns;
-            updated.packets = updated.packets.saturating_add(1);
-            updated.bytes = updated.bytes.saturating_add(total_len as u32);
-            let _ = CONN_TRACK.insert(&conn_key_rev, &updated, 0);
-            stats_inc_conntrack();
-            if is_module_enabled(CFG_VERBOSE) {
-                log_packet(
-                    &ctx,
-                    src_addr,
-                    dst_addr,
-                    src_port,
-                    dst_port,
-                    proto,
-                    tcp_flags,
-                    ACTION_PASS,
-                    REASON_CONNTRACK,
-                    THREAT_NONE,
-                    total_len,
-                );
-            }
-            return Ok(xdp_action::XDP_PASS);
-        }
-    }
 
     // --- SCAN DETECTION (Xmas/Null/SYN+FIN) ---
     if is_module_enabled(CFG_SCAN_DETECT) && proto == 6 {
@@ -654,59 +533,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 THREAT_SCAN_SYNFIN,
                 total_len,
             );
-        }
-    }
-
-    // --- PORT SCAN DETECTION ---
-    if is_module_enabled(CFG_PORT_SCAN) && proto == 6 {
-        let port_index = (dst_port & 0xFF) as usize;
-        let bitmap_index = port_index / 32;
-        let bit_position = port_index % 32;
-
-        if let Some(state) = PORT_SCAN.get_ptr_mut(&src_addr) {
-            let state_ref = unsafe { &mut *state };
-
-            if now_ns - state_ref.first_seen > PORT_SCAN_WINDOW_NS {
-                state_ref.port_bitmap = [0u32; 8];
-                state_ref.port_count = 0;
-                state_ref.first_seen = now_ns;
-            }
-
-            if bitmap_index < 8 {
-                let bit_mask = 1u32 << bit_position;
-                if state_ref.port_bitmap[bitmap_index] & bit_mask == 0 {
-                    state_ref.port_bitmap[bitmap_index] |= bit_mask;
-                    state_ref.port_count += 1;
-                }
-
-                if state_ref.port_count > PORT_SCAN_THRESHOLD {
-                    stats_inc_portscan();
-                    return log_and_return(
-                        &ctx,
-                        src_addr,
-                        dst_addr,
-                        src_port,
-                        dst_port,
-                        proto,
-                        tcp_flags,
-                        ACTION_DROP,
-                        REASON_PORTSCAN,
-                        THREAT_SCAN_PORT,
-                        total_len,
-                    );
-                }
-            }
-        } else {
-            let mut new_state = PortScanState {
-                port_bitmap: [0u32; 8],
-                port_count: 1,
-                first_seen: now_ns,
-                _pad: [0u8; 6],
-            };
-            if bitmap_index < 8 {
-                new_state.port_bitmap[bitmap_index] = 1u32 << bit_position;
-            }
-            let _ = PORT_SCAN.insert(&src_addr, &new_state, 0);
         }
     }
 
@@ -802,57 +628,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // --- DPI / TLS FINGERPRINTING: DEFERRED TO v2 ---
     // Moved to dedicated TC ingress program (separate stack frame).
     // DPI_EVENTS map and DpiEvent struct remain in aegis-common for reuse.
-
-
-    // --- CREATE/UPDATE CONNECTION TRACKING ---
-    if proto == 6 {
-        // TCP
-        let syn = tcp_flags & 0x02 != 0;
-        let ack = tcp_flags & 0x10 != 0;
-
-        // Incoming SYN-ACK = response to our SYN = ESTABLISHED
-        // Only promote if TC egress recorded an outgoing SYN (SYN_SENT state).
-        // Without this check, spoofed SYN-ACK packets poison conntrack.
-        if syn && ack {
-            let out_key = ConnTrackKey {
-                src_ip: dst_addr,
-                dst_ip: src_addr,
-                src_port: dst_port,
-                dst_port: src_port,
-                proto,
-                _pad: [0u8; 3],
-            };
-            if let Some(existing) = unsafe { CONN_TRACK.get(&out_key) } {
-                if existing.state == CONN_SYN_SENT {
-                    let mut promoted = *existing;
-                    promoted.state = CONN_ESTABLISHED;
-                    promoted.last_seen = now_ns;
-                    promoted.packets = promoted.packets.saturating_add(1);
-                    promoted.bytes = promoted.bytes.saturating_add(total_len as u32);
-                    let _ = CONN_TRACK.insert(&out_key, &promoted, 0);
-                }
-            }
-        }
-    } else if proto == 17 {
-        // UDP
-        let new_conn = ConnTrackState {
-            state: CONN_ESTABLISHED,
-            direction: 0,
-            _pad: [0u8; 2],
-            last_seen: now_ns,
-            packets: 1,
-            bytes: total_len as u32,
-        };
-        let out_key = ConnTrackKey {
-            src_ip: dst_addr,
-            dst_ip: src_addr,
-            src_port: dst_port,
-            dst_port: src_port,
-            proto,
-            _pad: [0u8; 3],
-        };
-        let _ = CONN_TRACK.insert(&out_key, &new_conn, 0);
-    }
 
     // Verbose logging for normal pass
     if is_module_enabled(CFG_VERBOSE) {
@@ -1082,33 +857,7 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         );
     }
 
-    // --- IPv6 CONNECTION TRACKING ---
-    let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
-
-    // Check reverse direction for established connections
-    let conn_key = ConnTrackKeyIpv6 {
-        src_ip: dst_addr,
-        dst_ip: src_addr,
-        src_port: dst_port,
-        dst_port: src_port,
-        proto: next_header,
-        _pad: [0u8; 3],
-    };
-
-    if is_module_enabled(CFG_CONN_TRACK) {
-        if let Some(state) = unsafe { CONN_TRACK_IPV6.get(&conn_key) } {
-            if state.state == CONN_ESTABLISHED {
-                let mut updated = *state;
-                updated.last_seen = now_ns;
-                updated.packets = updated.packets.saturating_add(1);
-                updated.bytes = updated.bytes.saturating_add(payload_len as u32);
-                let _ = CONN_TRACK_IPV6.insert(&conn_key, &updated, 0);
-                stats_inc_ipv6_pass();
-                stats_inc_conntrack();
-                return Ok(xdp_action::XDP_PASS);
-            }
-        }
-    }
+    // XDP stays stateless for IPv6 as well; TC owns conntrack state.
 
     // --- TCP SCAN DETECTION for IPv6 ---
     if is_module_enabled(CFG_SCAN_DETECT) && next_header == NEXTHDR_TCP {
@@ -1172,52 +921,6 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         }
     }
 
-    // --- UPDATE IPv6 CONNECTION TRACKING ---
-    if next_header == NEXTHDR_TCP {
-        let syn = tcp_flags & 0x02 != 0;
-        let ack = tcp_flags & 0x10 != 0;
-
-        // Incoming SYN-ACK = response to our SYN = ESTABLISHED
-        if syn && ack {
-            let out_key = ConnTrackKeyIpv6 {
-                src_ip: dst_addr,
-                dst_ip: src_addr,
-                src_port: dst_port,
-                dst_port: src_port,
-                proto: next_header,
-                _pad: [0u8; 3],
-            };
-            if let Some(existing) = unsafe { CONN_TRACK_IPV6.get(&out_key) } {
-                if existing.state == aegis_common::CONN_SYN_SENT {
-                    let mut promoted = *existing;
-                    promoted.state = aegis_common::CONN_ESTABLISHED;
-                    promoted.last_seen = now_ns;
-                    promoted.packets = promoted.packets.saturating_add(1);
-                    promoted.bytes = promoted.bytes.saturating_add(payload_len as u32);
-                    let _ = CONN_TRACK_IPV6.insert(&out_key, &promoted, 0);
-                }
-            }
-        }
-    } else if next_header == NEXTHDR_UDP {
-        let new_conn = ConnTrackState {
-            state: CONN_ESTABLISHED,
-            direction: 0,
-            _pad: [0u8; 2],
-            last_seen: now_ns,
-            packets: 1,
-            bytes: payload_len as u32,
-        };
-        let out_key = ConnTrackKeyIpv6 {
-            src_ip: dst_addr,
-            dst_ip: src_addr,
-            src_port: dst_port,
-            dst_port: src_port,
-            proto: next_header,
-            _pad: [0u8; 3],
-        };
-        let _ = CONN_TRACK_IPV6.insert(&out_key, &new_conn, 0);
-    }
-
     stats_inc_ipv6_pass();
     Ok(xdp_action::XDP_PASS)
 }
@@ -1225,7 +928,7 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
 /// Log IPv6 drop event and return XDP_DROP
 #[inline(always)]
 fn log_ipv6_drop(
-    ctx: &XdpContext,
+    _ctx: &XdpContext,
     src_ip: &[u8; 16],
     dst_ip: &[u8; 16],
     src_port: u16,
@@ -1252,7 +955,11 @@ fn log_ipv6_drop(
         ext_hdr_count,
         _pad: [0u8; 3],
     };
-    EVENTS_IPV6.output(ctx, &log, 0);
+    if EVENTS_IPV6.output(&log, 0).is_ok() {
+        stats_inc_event_ok();
+    } else {
+        stats_inc_event_fail();
+    }
     Ok(xdp_action::XDP_DROP)
 }
 
@@ -1262,7 +969,7 @@ fn log_ipv6_drop(
 
 #[inline(always)]
 fn log_packet(
-    ctx: &XdpContext,
+    _ctx: &XdpContext,
     src_ip: u32,
     dst_ip: u32,
     src_port: u16,
@@ -1290,11 +997,15 @@ fn log_packet(
         packet_len,
         timestamp,
     };
-    EVENTS.output(ctx, &log_entry, 0);
+    if EVENTS.output(&log_entry, 0).is_ok() {
+        stats_inc_event_ok();
+    } else {
+        stats_inc_event_fail();
+    }
 }
 
 fn log_and_return(
-    ctx: &XdpContext,
+    _ctx: &XdpContext,
     src_ip: u32,
     dst_ip: u32,
     src_port: u16,
@@ -1322,8 +1033,11 @@ fn log_and_return(
         packet_len,
         timestamp,
     };
-    EVENTS.output(ctx, &log_entry, 0);
-    stats_inc_event_ok();
+    if EVENTS.output(&log_entry, 0).is_ok() {
+        stats_inc_event_ok();
+    } else {
+        stats_inc_event_fail();
+    }
 
     if action == ACTION_DROP {
         Ok(xdp_action::XDP_DROP)

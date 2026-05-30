@@ -6,9 +6,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
       - name: Unit Tests
         run: cargo test -p aegis-cli -p aegis-common -p aegis-cni -p xtask
       - name: Clippy
         run: cargo clippy -p aegis-cli -p aegis-common -p aegis-cni -p xtask -- -D warnings
       - name: Format Check
         run: cargo fmt --all -- --check
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
+      - name: Build eBPF Objects
+        run: cargo run -p xtask -- build-all --profile release
+      - name: Build Userspace Release
+        run: cargo build --release -p aegis-cli -p aegis-cni -p xtask

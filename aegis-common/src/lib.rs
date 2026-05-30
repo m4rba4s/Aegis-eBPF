@@ -504,3 +504,7 @@ pub const MAP_CAP_CONFIG: u32 = 16;
 pub const MAP_CAP_STATS: u32 = 1;
 /// Egress blocklist (TC only)
 pub const MAP_CAP_EGRESS_BLOCKLIST: u32 = 8192;
+/// Shared packet event ring buffer size. Must be a power-of-two byte size.
+pub const MAP_CAP_EVENT_RING_BYTES: u32 = 1 << 20;
+/// DPI suspect event ring buffer size. Must be a power-of-two byte size.
+pub const MAP_CAP_DPI_RING_BYTES: u32 = 1 << 18;
