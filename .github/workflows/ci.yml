@@ -6,9 +6,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly
-          components: rust-src
       - name: Unit Tests
         run: cargo test -p aegis-cli -p aegis-common -p aegis-cni -p xtask
       - name: Clippy

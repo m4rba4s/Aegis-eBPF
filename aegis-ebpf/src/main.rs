@@ -308,7 +308,16 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         return try_xdp_ipv6(&ctx, ip_offset);
     }
 
-    // Not IPv4? Pass through
+    // AEGIS-003: Fail-closed DROP for VLAN-tagged frames.
+    // VLAN headers shift the real EtherType, so tagged traffic would bypass
+    // all L3/L4 inspection. Drop until bounded VLAN parsing is implemented.
+    const ETH_P_8021Q: u16 = 0x8100;
+    const ETH_P_8021AD: u16 = 0x88A8;
+    if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    // Not IPv4? Pass through (ARP, LLDP, etc.)
     if ether_type != ETH_P_IP {
         return Ok(xdp_action::XDP_PASS);
     }

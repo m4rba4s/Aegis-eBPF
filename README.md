@@ -24,12 +24,14 @@
 | Feature | iptables/nftables | Aegis |
 |---------|-------------------|-------|
 | Packet processing | Kernel netfilter | XDP (driver level) |
-| Performance | ~1M pps | **10M+ pps** |
+| Performance | ~1M pps | **10M+ pps** ¹ |
 | Egress filtering | Yes | Yes (TC) |
 | Connection tracking | Conntrack module | **Native eBPF** |
 | Real-time TUI | No | **Yes** |
 | Memory safety | C | **Rust** |
 | Deployment | Multiple packages | **Single binary** |
+
+> ¹ *Theoretical throughput for XDP in NIC driver mode with minimal rule set. Actual performance depends on NIC driver, kernel version, rule complexity, and hardware. Independent benchmarks pending.*
 
 ## Features
 

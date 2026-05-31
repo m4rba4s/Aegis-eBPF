@@ -30,7 +30,9 @@ use aegis_common::{
     ConnTrackKey,
     ConnTrackKeyIpv6,
     ConnTrackState,
+    Ipv6Addr,
     LpmKeyIpv4,
+    LpmKeyIpv6,
     PacketLog,
     PortScanState,
     ACTION_DROP,
@@ -90,6 +92,15 @@ static EVENTS: RingBuf = RingBuf::pinned(MAP_CAP_EVENT_RING_BYTES, 0);
 #[map]
 static PORT_SCAN: LruHashMap<u32, PortScanState> = LruHashMap::with_max_entries(MAP_CAP_PORT_SCAN, 0);
 
+/// IPv6 egress blocklist (destination IPs we block outgoing to)
+#[map]
+static EGRESS_BLOCKLIST_IPV6: HashMap<Ipv6Addr, u32> = HashMap::with_max_entries(MAP_CAP_EGRESS_BLOCKLIST, 0);
+
+/// IPv6 CIDR-based egress blocklist
+#[map]
+static EGRESS_CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> =
+    LpmTrie::with_max_entries(MAP_CAP_CIDR, 0);
+
 // ============================================================
 // TC ENTRY POINT
 // ============================================================
@@ -114,6 +125,25 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
     let dst_addr = unsafe { (*ipv6_hdr).dst_addr };
     let next_header = unsafe { (*ipv6_hdr).next_header };
     let payload_len = u16::from_be(unsafe { (*ipv6_hdr).payload_len });
+
+    // --- AEGIS-004: IPv6 EGRESS BLOCKLIST CHECK ---
+    // 1. Exact IPv6 address match
+    if let Some(_) = unsafe { EGRESS_BLOCKLIST_IPV6.get(&dst_addr) } {
+        log_ipv6_egress_block(&dst_addr, payload_len);
+        return Ok(TC_ACT_SHOT);
+    }
+    // 2. CIDR/LPM match
+    let cidr_key = Key::new(
+        128,
+        LpmKeyIpv6 {
+            prefix_len: 128,
+            addr: dst_addr,
+        },
+    );
+    if let Some(_) = EGRESS_CIDR_BLOCKLIST_IPV6.get(&cidr_key) {
+        log_ipv6_egress_block(&dst_addr, payload_len);
+        return Ok(TC_ACT_SHOT);
+    }
 
     let l4_offset = ip_offset + Ipv6Hdr::LEN;
 
@@ -177,6 +207,32 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
     Ok(TC_ACT_OK)
 }
 
+/// Log IPv6 egress blocklist hit via shared EVENTS ring.
+/// Uses last 4 bytes of IPv6 dst as PacketLog.dst_ip for basic identification.
+#[inline(always)]
+fn log_ipv6_egress_block(dst_addr: &Ipv6Addr, payload_len: u16) {
+    let timestamp = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    // Extract last 4 bytes of IPv6 address for compact logging
+    let dst_ip_tail = u32::from_be_bytes([
+        dst_addr[12], dst_addr[13], dst_addr[14], dst_addr[15],
+    ]);
+    let log_entry = PacketLog {
+        src_ip: 0,
+        dst_ip: dst_ip_tail,
+        src_port: 0,
+        dst_port: 0,
+        proto: 0,
+        tcp_flags: 0,
+        action: ACTION_DROP,
+        reason: REASON_EGRESS_BLOCK,
+        threat_type: THREAT_EGRESS_BLOCKED,
+        hook: HOOK_TC_EGRESS,
+        packet_len: payload_len,
+        timestamp,
+    };
+    let _ = EVENTS.output(&log_entry, 0);
+}
+
 fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     // Get interface mode (L2 vs L3)
     let is_l3_mode = unsafe { CONFIG.get(&CFG_INTERFACE_MODE).copied().unwrap_or(0) == 1 };
@@ -189,6 +245,12 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
         let ether_type = u16::from_be(unsafe { (*eth_hdr).ether_type });
         if ether_type == ETH_P_IPV6 {
             return try_tc_ipv6(ctx, EthHdr::LEN);
+        }
+        // AEGIS-003: Fail-closed SHOT for VLAN-tagged frames.
+        const ETH_P_8021Q: u16 = 0x8100;
+        const ETH_P_8021AD: u16 = 0x88A8;
+        if ether_type == ETH_P_8021Q || ether_type == ETH_P_8021AD {
+            return Ok(TC_ACT_SHOT);
         }
         if ether_type != ETH_P_IP {
             return Ok(TC_ACT_OK);
