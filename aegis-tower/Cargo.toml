@@ -2,6 +2,7 @@
 name = "aegis-tower"
 version = "3.0.0"
 edition = "2021"
+license = "MIT"
 description = "gRPC Fleet Controller for Aegis eBPF Firewall"
 authors = ["m4rba4s <info@m4rba4s.com>"]
 
