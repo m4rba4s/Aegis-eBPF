@@ -52,7 +52,7 @@ spec:
               cp /usr/local/bin/aegis-cni /opt/cni/bin/aegis-cni
               chmod +x /opt/cni/bin/aegis-cni
               # Run daemon
-              exec aegis-cli --iface eth0 --daemon
+              exec aegis-cli --iface eth0 daemon
           ports:
             - containerPort: 9100
               name: metrics
