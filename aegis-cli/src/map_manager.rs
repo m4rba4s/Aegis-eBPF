@@ -1,5 +1,8 @@
+use aegis_common::{CidrBlockEntry, LpmKeyIpv4, LpmKeyIpv6, CAT_MANUAL};
+use aya::maps::lpm_trie::{Key, LpmTrie};
 use aya::maps::{HashMap, MapData};
 use aya::Ebpf;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
 
 /// Type alias to reduce type complexity (clippy::type_complexity)
@@ -118,4 +121,167 @@ pub fn load_threat_feeds(bpf: &mut Ebpf, cfg: &crate::config::Config) -> Result<
         Err(e) => println!("⚠️  Feed loading error: {}", e),
     }
     Ok(())
+}
+
+enum ParsedCidr {
+    V4 { addr: Ipv4Addr, prefix: u32 },
+    V6 { addr: Ipv6Addr, prefix: u32 },
+}
+
+fn parse_egress_cidr(cidr: &str) -> Result<ParsedCidr, anyhow::Error> {
+    let (addr, prefix) = cidr
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("egress CIDR '{cidr}' is missing '/' prefix length"))?;
+    let prefix: u32 = prefix
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid egress CIDR prefix in '{cidr}': {e}"))?;
+    let ip: IpAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid egress CIDR address in '{cidr}': {e}"))?;
+
+    match ip {
+        IpAddr::V4(addr) if prefix <= 32 => Ok(ParsedCidr::V4 { addr, prefix }),
+        IpAddr::V6(addr) if prefix <= 128 => Ok(ParsedCidr::V6 { addr, prefix }),
+        IpAddr::V4(_) => Err(anyhow::anyhow!(
+            "invalid IPv4 egress CIDR prefix in '{cidr}': {prefix}"
+        )),
+        IpAddr::V6(_) => Err(anyhow::anyhow!(
+            "invalid IPv6 egress CIDR prefix in '{cidr}': {prefix}"
+        )),
+    }
+}
+
+pub fn setup_egress_blocklists(
+    tc_bpf: &mut Ebpf,
+    cfg: &crate::config::Config,
+) -> Result<(), anyhow::Error> {
+    let drop_exact: Vec<IpAddr> = cfg
+        .egress_rules
+        .iter()
+        .filter(|rule| rule.action.eq_ignore_ascii_case("drop"))
+        .map(|rule| rule.ip)
+        .collect();
+    let drop_cidrs: Vec<ParsedCidr> = cfg
+        .egress_cidrs
+        .iter()
+        .filter(|rule| rule.action.eq_ignore_ascii_case("drop"))
+        .map(|rule| parse_egress_cidr(&rule.cidr))
+        .collect::<Result<_, _>>()?;
+
+    let has_v4_exact = drop_exact.iter().any(|ip| matches!(ip, IpAddr::V4(_)));
+    let has_v6_exact = drop_exact.iter().any(|ip| matches!(ip, IpAddr::V6(_)));
+    let has_v4_cidr = drop_cidrs
+        .iter()
+        .any(|cidr| matches!(cidr, ParsedCidr::V4 { .. }));
+    let has_v6_cidr = drop_cidrs
+        .iter()
+        .any(|cidr| matches!(cidr, ParsedCidr::V6 { .. }));
+
+    if has_v4_exact {
+        let map = tc_bpf
+            .take_map("EGRESS_BLOCKLIST")
+            .ok_or_else(|| anyhow::anyhow!("EGRESS_BLOCKLIST map not found"))?;
+        let mut egress: HashMap<_, u32, u32> = HashMap::try_from(map)?;
+        for ip in &drop_exact {
+            if let IpAddr::V4(ipv4) = ip {
+                egress.insert(u32::from(*ipv4).to_be(), 1, 0)?;
+            }
+        }
+    }
+
+    if has_v6_exact {
+        let map = tc_bpf
+            .take_map("EGRESS_BLOCKLIST_IPV6")
+            .ok_or_else(|| anyhow::anyhow!("EGRESS_BLOCKLIST_IPV6 map not found"))?;
+        let mut egress6: HashMap<_, [u8; 16], u32> = HashMap::try_from(map)?;
+        for ip in &drop_exact {
+            if let IpAddr::V6(ipv6) = ip {
+                egress6.insert(ipv6.octets(), 1, 0)?;
+            }
+        }
+    }
+
+    let entry = CidrBlockEntry {
+        category: CAT_MANUAL,
+        _pad: [0u8; 3],
+    };
+
+    if has_v4_cidr {
+        let map = tc_bpf
+            .take_map("EGRESS_CIDR_BLOCKLIST")
+            .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR_BLOCKLIST map not found"))?;
+        let mut cidr: LpmTrie<_, LpmKeyIpv4, CidrBlockEntry> = LpmTrie::try_from(map)?;
+        for cidr_rule in &drop_cidrs {
+            if let ParsedCidr::V4 { addr, prefix } = cidr_rule {
+                let key = Key::new(
+                    *prefix,
+                    LpmKeyIpv4 {
+                        prefix_len: *prefix,
+                        addr: u32::from(*addr).to_be(),
+                    },
+                );
+                cidr.insert(&key, entry, 0)?;
+            }
+        }
+    }
+
+    if has_v6_cidr {
+        let map = tc_bpf
+            .take_map("EGRESS_CIDR_BLOCKLIST_IPV6")
+            .ok_or_else(|| anyhow::anyhow!("EGRESS_CIDR_BLOCKLIST_IPV6 map not found"))?;
+        let mut cidr6: LpmTrie<_, LpmKeyIpv6, CidrBlockEntry> = LpmTrie::try_from(map)?;
+        for cidr_rule in &drop_cidrs {
+            if let ParsedCidr::V6 { addr, prefix } = cidr_rule {
+                let key = Key::new(
+                    *prefix,
+                    LpmKeyIpv6 {
+                        prefix_len: *prefix,
+                        addr: addr.octets(),
+                    },
+                );
+                cidr6.insert(&key, entry, 0)?;
+            }
+        }
+    }
+
+    let loaded = drop_exact.len() + drop_cidrs.len();
+    if loaded > 0 {
+        tracing::info!(rules = loaded, "loaded TC egress blocklist policy");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_egress_cidr, ParsedCidr};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn test_parse_egress_cidr_ipv4() {
+        match parse_egress_cidr("203.0.113.0/24").unwrap() {
+            ParsedCidr::V4 { addr, prefix } => {
+                assert_eq!(addr, Ipv4Addr::new(203, 0, 113, 0));
+                assert_eq!(prefix, 24);
+            }
+            ParsedCidr::V6 { .. } => panic!("expected IPv4 CIDR"),
+        }
+    }
+
+    #[test]
+    fn test_parse_egress_cidr_ipv6() {
+        match parse_egress_cidr("2001:db8::/32").unwrap() {
+            ParsedCidr::V6 { addr, prefix } => {
+                assert_eq!(addr, "2001:db8::".parse::<Ipv6Addr>().unwrap());
+                assert_eq!(prefix, 32);
+            }
+            ParsedCidr::V4 { .. } => panic!("expected IPv6 CIDR"),
+        }
+    }
+
+    #[test]
+    fn test_parse_egress_cidr_rejects_bad_prefix() {
+        assert!(parse_egress_cidr("203.0.113.0/33").is_err());
+        assert!(parse_egress_cidr("2001:db8::/129").is_err());
+    }
 }

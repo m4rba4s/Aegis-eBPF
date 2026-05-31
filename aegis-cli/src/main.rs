@@ -328,6 +328,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let config_path = "aegis.yaml";
     let cfg = config::Config::load(config_path).unwrap_or_else(|_| config::Config {
         rules: vec![],
+        egress_rules: vec![],
+        egress_cidrs: vec![],
         remote_log: None,
         blocked_countries: vec![],
     });
@@ -546,6 +548,21 @@ async fn main() -> Result<(), anyhow::Error> {
                         tracing::info!(iface = %opt.iface, "TC egress attached");
                         tc_link_id = Some(link_id);
                         tc_bpf = Some(tc);
+                        if let Some(tc) = tc_bpf.as_mut() {
+                            if let Err(e) = map_manager::setup_egress_blocklists(tc, &cfg) {
+                                tracing::error!(
+                                    error = %e,
+                                    "TC egress policy load failed; detaching programs before exit"
+                                );
+                                detach_loaded_programs(
+                                    &mut bpf,
+                                    &mut xdp_link_id,
+                                    &mut tc_bpf,
+                                    &mut tc_link_id,
+                                );
+                                return Err(e);
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!(

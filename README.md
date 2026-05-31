@@ -162,6 +162,23 @@ sudo aegis-cli -i eth0 load
 # save / restore
 ```
 
+### Rule File
+`aegis.yaml` supports ingress source blocks and TC egress destination blocks:
+```yaml
+rules:
+  - ip: 198.51.100.10
+    port: 443
+    proto: tcp
+
+egress_rules:
+  - ip: 203.0.113.20
+  - ip: 2001:db8::20
+
+egress_cidrs:
+  - cidr: 203.0.113.0/24
+  - cidr: 2001:db8:bad::/48
+```
+
 ### Override Embedded eBPF (Advanced)
 ```bash
 # Use custom eBPF objects instead of embedded

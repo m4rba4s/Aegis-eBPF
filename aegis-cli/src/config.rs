@@ -2,14 +2,19 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 /// Maximum config file size (1 MB) to prevent YAML bomb attacks
 const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub egress_rules: Vec<EgressRule>,
+    #[serde(default)]
+    pub egress_cidrs: Vec<EgressCidrRule>,
     #[serde(default)]
     pub remote_log: Option<String>,
     #[serde(default)]
@@ -27,6 +32,20 @@ pub struct Rule {
     pub advanced: AdvancedConfig,
     #[serde(default)]
     pub webhooks: WebhooksConfig,
+    #[serde(default = "default_action")]
+    pub action: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EgressRule {
+    pub ip: IpAddr,
+    #[serde(default = "default_action")]
+    pub action: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EgressCidrRule {
+    pub cidr: String,
     #[serde(default = "default_action")]
     pub action: String,
 }

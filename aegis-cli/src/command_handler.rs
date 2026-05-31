@@ -58,6 +58,8 @@ where
             }
             let cfg = config::Config {
                 rules,
+                egress_rules: vec![],
+                egress_cidrs: vec![],
                 remote_log: None,
                 blocked_countries: vec![],
             };
