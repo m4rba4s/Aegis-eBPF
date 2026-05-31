@@ -193,6 +193,49 @@ fn detach_loaded_programs(
     }
 }
 
+fn required_tc_error(iface: &str, operation: &str, error: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!(
+        "TC egress is required by default; {operation} failed on interface '{iface}': {error}. \
+         Use --no-tc only as an explicit ingress-only waiver."
+    )
+}
+
+fn is_existing_clsact_error(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("exists")
+}
+
+fn attach_tc_required(
+    iface: &str,
+    tc_path: &str,
+) -> Result<(Ebpf, SchedClassifierLinkId), anyhow::Error> {
+    let mut tc = loader::load_tc_program(tc_path)
+        .map_err(|e| required_tc_error(iface, "TC object load", e))?;
+
+    if let Err(e) = tc::qdisc_add_clsact(iface) {
+        let err_text = e.to_string();
+        if !is_existing_clsact_error(&err_text) {
+            return Err(required_tc_error(iface, "TC clsact qdisc setup", err_text));
+        }
+    }
+
+    let link_id = {
+        let program = tc
+            .program_mut("tc_egress")
+            .ok_or_else(|| required_tc_error(iface, "TC program lookup", "tc_egress not found"))?;
+        let tc_prog: &mut SchedClassifier = program
+            .try_into()
+            .map_err(|e| required_tc_error(iface, "TC program type conversion", e))?;
+        tc_prog
+            .load()
+            .map_err(|e| required_tc_error(iface, "TC program load", e))?;
+        tc_prog
+            .attach(iface, TcAttachType::Egress)
+            .map_err(|e| required_tc_error(iface, "TC egress attach", e))?
+    };
+
+    Ok((tc, link_id))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
@@ -498,33 +541,28 @@ async fn main() -> Result<(), anyhow::Error> {
             let mut tc_bpf: Option<Ebpf> = None;
             let mut tc_link_id: Option<SchedClassifierLinkId> = None;
             if !opt.no_tc {
-                match loader::load_tc_program(&opt.tc_path) {
-                    Ok(mut tc) => {
-                        // Add clsact qdisc (required for TC)
-                        if let Err(e) = tc::qdisc_add_clsact(&opt.iface) {
-                            // Ignore "already exists" error
-                            if !e.to_string().contains("exists") {
-                                tracing::warn!(error = %e, "TC qdisc setup warning");
-                            }
-                        }
-
-                        // Load and attach TC egress program
-                        let tc_prog: &mut SchedClassifier = tc
-                            .program_mut("tc_egress")
-                            .expect("tc_egress not found")
-                            .try_into()?;
-                        tc_prog.load()?;
-                        let link_id = tc_prog.attach(&opt.iface, TcAttachType::Egress)?;
+                match attach_tc_required(&opt.iface, &opt.tc_path) {
+                    Ok((tc, link_id)) => {
                         tracing::info!(iface = %opt.iface, "TC egress attached");
                         tc_link_id = Some(link_id);
                         tc_bpf = Some(tc);
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "TC program not loaded, egress filtering disabled");
+                        tracing::error!(
+                            error = %e,
+                            "required TC egress setup failed; detaching XDP before exit"
+                        );
+                        detach_loaded_programs(
+                            &mut bpf,
+                            &mut xdp_link_id,
+                            &mut tc_bpf,
+                            &mut tc_link_id,
+                        );
+                        return Err(e);
                     }
                 }
             } else {
-                tracing::info!("TC egress program disabled (--no-tc)");
+                tracing::warn!("TC egress program disabled by explicit --no-tc waiver");
             }
 
             // Take ownership of BLOCKLIST
@@ -805,6 +843,26 @@ async fn main() -> Result<(), anyhow::Error> {
 mod tests {
     #[cfg(embedded_xdp)]
     use super::EMBEDDED_XDP;
+
+    #[test]
+    fn test_required_tc_error_mentions_explicit_waiver() {
+        let message =
+            super::required_tc_error("eth0", "TC object load", "missing object").to_string();
+
+        assert!(message.contains("TC egress is required by default"));
+        assert!(message.contains("eth0"));
+        assert!(message.contains("--no-tc"));
+        assert!(message.contains("explicit ingress-only waiver"));
+    }
+
+    #[test]
+    fn test_existing_clsact_error_detection() {
+        assert!(super::is_existing_clsact_error(
+            "RTNETLINK answers: File exists"
+        ));
+        assert!(super::is_existing_clsact_error("already exists"));
+        assert!(!super::is_existing_clsact_error("operation not permitted"));
+    }
 
     #[test]
     #[cfg(embedded_xdp)]
