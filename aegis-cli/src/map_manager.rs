@@ -128,6 +128,37 @@ enum ParsedCidr {
     V6 { addr: Ipv6Addr, prefix: u32 },
 }
 
+fn normalize_ipv4_cidr(addr: Ipv4Addr, prefix: u32) -> Ipv4Addr {
+    let addr = u32::from(addr);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ipv4Addr::from(addr & mask)
+}
+
+fn normalize_ipv6_cidr(addr: Ipv6Addr, prefix: u32) -> Ipv6Addr {
+    let mut bytes = addr.octets();
+    let full_bytes = (prefix / 8) as usize;
+    let remaining_bits = (prefix % 8) as u8;
+
+    if full_bytes < bytes.len() {
+        if remaining_bits == 0 {
+            bytes[full_bytes] = 0;
+        } else {
+            bytes[full_bytes] &= u8::MAX << (8 - remaining_bits);
+        }
+        let mut i = full_bytes + 1;
+        while i < bytes.len() {
+            bytes[i] = 0;
+            i += 1;
+        }
+    }
+
+    Ipv6Addr::from(bytes)
+}
+
 fn parse_egress_cidr(cidr: &str) -> Result<ParsedCidr, anyhow::Error> {
     let (addr, prefix) = cidr
         .split_once('/')
@@ -140,8 +171,14 @@ fn parse_egress_cidr(cidr: &str) -> Result<ParsedCidr, anyhow::Error> {
         .map_err(|e| anyhow::anyhow!("invalid egress CIDR address in '{cidr}': {e}"))?;
 
     match ip {
-        IpAddr::V4(addr) if prefix <= 32 => Ok(ParsedCidr::V4 { addr, prefix }),
-        IpAddr::V6(addr) if prefix <= 128 => Ok(ParsedCidr::V6 { addr, prefix }),
+        IpAddr::V4(addr) if prefix <= 32 => Ok(ParsedCidr::V4 {
+            addr: normalize_ipv4_cidr(addr, prefix),
+            prefix,
+        }),
+        IpAddr::V6(addr) if prefix <= 128 => Ok(ParsedCidr::V6 {
+            addr: normalize_ipv6_cidr(addr, prefix),
+            prefix,
+        }),
         IpAddr::V4(_) => Err(anyhow::anyhow!(
             "invalid IPv4 egress CIDR prefix in '{cidr}': {prefix}"
         )),
@@ -216,7 +253,6 @@ pub fn setup_egress_blocklists(
                 let key = Key::new(
                     *prefix,
                     LpmKeyIpv4 {
-                        prefix_len: *prefix,
                         addr: u32::from(*addr).to_be(),
                     },
                 );
@@ -235,7 +271,6 @@ pub fn setup_egress_blocklists(
                 let key = Key::new(
                     *prefix,
                     LpmKeyIpv6 {
-                        prefix_len: *prefix,
                         addr: addr.octets(),
                     },
                 );
@@ -283,5 +318,24 @@ mod tests {
     fn test_parse_egress_cidr_rejects_bad_prefix() {
         assert!(parse_egress_cidr("203.0.113.0/33").is_err());
         assert!(parse_egress_cidr("2001:db8::/129").is_err());
+    }
+
+    #[test]
+    fn test_parse_egress_cidr_normalizes_host_bits() {
+        match parse_egress_cidr("198.51.100.20/24").unwrap() {
+            ParsedCidr::V4 { addr, prefix } => {
+                assert_eq!(addr, Ipv4Addr::new(198, 51, 100, 0));
+                assert_eq!(prefix, 24);
+            }
+            ParsedCidr::V6 { .. } => panic!("expected IPv4 CIDR"),
+        }
+
+        match parse_egress_cidr("2001:db8:dead:beef::20/48").unwrap() {
+            ParsedCidr::V6 { addr, prefix } => {
+                assert_eq!(addr, "2001:db8:dead::".parse::<Ipv6Addr>().unwrap());
+                assert_eq!(prefix, 48);
+            }
+            ParsedCidr::V4 { .. } => panic!("expected IPv6 CIDR"),
+        }
     }
 }

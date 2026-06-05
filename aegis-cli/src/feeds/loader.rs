@@ -31,7 +31,6 @@ pub fn load_feeds_to_map<T: std::borrow::BorrowMut<MapData>>(
                     let key = aya::maps::lpm_trie::Key::new(
                         entry.prefix_len as u32,
                         LpmKeyIpv4 {
-                            prefix_len: entry.prefix_len as u32,
                             addr: entry.addr, // Already in network byte order
                         },
                     );

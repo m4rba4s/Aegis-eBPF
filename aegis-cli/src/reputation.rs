@@ -237,7 +237,6 @@ fn is_on_cidr_feed(ip: u32) -> bool {
     let key = aya::maps::lpm_trie::Key::new(
         32,
         LpmKeyIpv4 {
-            prefix_len: 32,
             addr: ip.to_be(), // Convert to network byte order
         },
     );

@@ -145,13 +145,15 @@ pub const CONN_CLOSED: u8 = 5; // Ready for cleanup
 // CIDR BLOCKLIST (LPM Trie for threat feeds)
 // ============================================================
 
-/// LPM key for CIDR matching (prefix + IP)
+/// LPM trie data for IPv4 CIDR matching.
+///
+/// Aya's LPM `Key` wrapper carries the prefix length. This struct must contain
+/// only the bytes matched by the trie.
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct LpmKeyIpv4 {
-    pub prefix_len: u32, // Number of bits in prefix (0-32)
-    pub addr: u32,       // IPv4 address in network byte order
+    pub addr: u32, // IPv4 address in network byte order
 }
 
 /// Value for CIDR blocklist entry
@@ -356,13 +358,15 @@ pub const CONN_TIMEOUT_OTHER_NS: u64 = 30_000_000_000; // 30 sec
 /// IPv6 address as 16 bytes (128 bits)
 pub type Ipv6Addr = [u8; 16];
 
-/// LPM key for IPv6 CIDR matching
+/// LPM trie data for IPv6 CIDR matching.
+///
+/// Aya's LPM `Key` wrapper carries the prefix length. This struct must contain
+/// only the bytes matched by the trie.
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "user", derive(Debug))]
 #[repr(C)]
 pub struct LpmKeyIpv6 {
-    pub prefix_len: u32, // Number of bits in prefix (0-128)
-    pub addr: Ipv6Addr,  // IPv6 address in network byte order
+    pub addr: Ipv6Addr, // IPv6 address in network byte order
 }
 
 /// FlowKey for IPv6 manual blocklist

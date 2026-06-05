@@ -20,12 +20,12 @@ fuzz_target!(|data: &[u8]| {
     let valid_prefix = prefix_len % 33; // 0-32
 
     let key = LpmKeyIpv4 {
-        prefix_len: valid_prefix,
         addr,
     };
 
     // Verify invariants
-    assert!(key.prefix_len <= 32);
+    assert!(valid_prefix <= 32);
+    assert_eq!(key.addr, addr);
 
     // Test prefix masking (what the BPF LPM trie does internally)
     let mask = if valid_prefix == 0 {
@@ -49,11 +49,11 @@ fuzz_target!(|data: &[u8]| {
         addr_v6.copy_from_slice(&data[4..20]);
 
         let key_v6 = LpmKeyIpv6 {
-            prefix_len: valid_prefix_v6,
             addr: addr_v6,
         };
 
-        assert!(key_v6.prefix_len <= 128);
+        assert!(valid_prefix_v6 <= 128);
+        assert_eq!(key_v6.addr, addr_v6);
     }
 
     // Test edge cases
@@ -67,9 +67,9 @@ fuzz_target!(|data: &[u8]| {
 
     for &(prefix, test_addr) in edge_cases {
         let test_key = LpmKeyIpv4 {
-            prefix_len: prefix,
             addr: test_addr,
         };
-        assert!(test_key.prefix_len <= 32);
+        assert!(prefix <= 32);
+        assert_eq!(test_key.addr, test_addr);
     }
 });
