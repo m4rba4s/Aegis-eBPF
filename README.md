@@ -43,6 +43,12 @@
 - **IPv4 + IPv6 Support** — Dual-stack filtering with extension header security
 - **IP Allowlist** — Trusted IPs bypass all checks (config-driven)
 
+### Traffic Handling Policy
+
+- **VLAN / QinQ (802.1Q / 802.1ad)**: Fail-closed **DROP** for all tagged frames on both XDP ingress and TC egress. Aegis does not parse VLAN-encapsulated payloads; this prevents firewall bypass via VLAN tag injection. Bounded VLAN-aware parsing may be added in a future release.
+- **IPv6 Enforcement Scope**: Exact IP blocklist and CIDR blocklist (LPM Trie) for both ingress (XDP) and egress (TC). Extension header chain walking is limited to the basic `next_header` field; packets with unrecognized extension headers are passed to the kernel stack. Full extension header parsing is not yet implemented.
+- **IPv4 Options / Fragments**: Packets with IP options (`IHL > 5`) and IP fragments (`MF` flag or non-zero fragment offset) are dropped fail-closed by TC egress to prevent header-parsing bypass.
+
 ### Detection & Mitigation
 - **Port Scan Detection** — Bitmap-based unique port tracking with auto-ban
 - **SYN Flood Protection** — Token bucket rate limiting (XDP layer)

@@ -87,6 +87,12 @@ pass: true|false
 
 Missing logs, wrong case names, or `pass: false` fail the release gate.
 
+### Replay Scope Notes
+
+- `vlan_behavior` and `qinq_behavior` validate the **fail-closed DROP** policy for 802.1Q and 802.1ad tagged frames. Aegis does not parse VLAN payloads; these cases prove that tagged traffic is rejected.
+- `ipv6_pass_allowed`, `ipv6_drop_exact`, and `ipv6_drop_cidr` validate **exact IP and CIDR blocklist** enforcement only. Extension header edge cases (hop-by-hop, routing, fragment, destination options) are **not covered** by the current replay matrix and must not be claimed as tested.
+- `ipv4_ihl_options_behavior` and `ipv4_fragment_behavior` validate fail-closed DROP for packets with IP options and IP fragments respectively.
+
 ## Replay Driver
 
 The lab replay driver is:
