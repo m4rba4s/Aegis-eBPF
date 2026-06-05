@@ -20,6 +20,72 @@ require_cmd() {
   }
 }
 
+require_packet_replay_evidence() {
+  local evidence_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
+  local missing=0
+  local cases=(
+    ipv4_pass_allowed
+    ipv4_drop_exact
+    ipv4_drop_cidr
+    ipv6_pass_allowed
+    ipv6_drop_exact
+    ipv6_drop_cidr
+    vlan_behavior
+    qinq_behavior
+    ipv4_ihl_options_behavior
+    ipv4_fragment_behavior
+    truncated_tcp_blocked_ipv4_exact
+    truncated_udp_blocked_ipv4_exact
+    truncated_tcp_blocked_ipv4_cidr
+    truncated_udp_blocked_ipv4_cidr
+  )
+  local fields=(
+    packet
+    expected_verdict
+    observed_verdict
+    command
+  )
+
+  if [[ -z "$evidence_dir" ]]; then
+    echo "missing packet replay evidence: set AEGIS_PACKET_REPLAY_DIR to a directory containing required .log artifacts" >&2
+    printf 'required packet replay case: %s\n' "${cases[@]}" >&2
+    return 1
+  fi
+
+  for case_name in "${cases[@]}"; do
+    local log_file="$evidence_dir/$case_name.log"
+
+    if [[ ! -s "$log_file" ]]; then
+      echo "missing packet replay log for case: $case_name ($log_file)" >&2
+      missing=1
+      continue
+    fi
+
+    if ! grep -Eq "^case:[[:space:]]*$case_name[[:space:]]*$" "$log_file"; then
+      echo "packet replay log does not identify case '$case_name': $log_file" >&2
+      missing=1
+    fi
+
+    for field in "${fields[@]}"; do
+      if ! grep -Eq "^$field:[[:space:]]*.+" "$log_file"; then
+        echo "packet replay log missing '$field:' for case: $case_name ($log_file)" >&2
+        missing=1
+      fi
+    done
+
+    if ! grep -Eq "^pass:[[:space:]]*true[[:space:]]*$" "$log_file"; then
+      echo "packet replay log did not record pass: true for case: $case_name ($log_file)" >&2
+      missing=1
+    fi
+  done
+
+  if [[ $missing -ne 0 ]]; then
+    return 1
+  fi
+
+  echo "packet replay evidence artifacts present in: $evidence_dir"
+}
+
 non_privileged() {
   require_cmd cargo
 
@@ -114,6 +180,7 @@ privileged_lab() {
 
   run ip link show dev "$host_if"
   run tc qdisc show dev "$host_if"
+  require_packet_replay_evidence
 }
 
 case "${1:-nonpriv}" in
