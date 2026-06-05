@@ -128,17 +128,21 @@ cargo build --release -p aegis-cli
 sudo ./target/release/aegis-cli -i eth0 tui
 ```
 
-### Docker Build
+### Docker Build (Portable Static Binary)
 
 ```bash
-# Build release binaries in Docker
+# Build fully static musl binary — runs on any x86_64 Linux ≥ 5.4
 docker build --output=dist .
 
 # Outputs:
-# dist/aegis-cli     - Main binary (eBPF embedded)
+# dist/aegis-cli     - Static binary (eBPF embedded, no glibc dependency)
 # dist/aegis         - Standalone XDP object (optional)
 # dist/aegis-tc      - Standalone TC object (optional)
 ```
+
+The Docker build produces a **statically linked musl binary** that works on all
+x86_64 Linux distributions regardless of glibc version: Fedora, Ubuntu, Debian,
+RHEL, CentOS, Arch, Alpine, and others.
 
 ## Usage
 
