@@ -4,8 +4,8 @@
 
 #![no_main]
 
+use aegis_common::{RateLimitState, MAX_TOKENS, TOKENS_PER_SEC};
 use libfuzzer_sys::fuzz_target;
-use aegis_common::{RateLimitState, TOKENS_PER_SEC, MAX_TOKENS};
 
 /// Simulates the token bucket algorithm from the eBPF program
 fn simulate_rate_limit(
@@ -45,7 +45,9 @@ fuzz_target!(|data: &[u8]| {
 
     // Parse fuzz input
     let initial_tokens = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    let initial_time = u64::from_le_bytes([data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11]]);
+    let initial_time = u64::from_le_bytes([
+        data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+    ]);
     let time_delta = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as u64;
 
     // Clamp initial tokens to valid range
@@ -64,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
     assert!(state1.tokens <= MAX_TOKENS);
 
     // Operation 2: Check with consuming
-    let (state2, allowed2) = simulate_rate_limit(state.clone(), current_time, true);
+    let (state2, _allowed2) = simulate_rate_limit(state.clone(), current_time, true);
     assert!(state2.tokens <= MAX_TOKENS);
 
     // If we had tokens and consumed, we should have been allowed

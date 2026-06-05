@@ -4,9 +4,10 @@
 //! It generates random byte sequences and verifies that parsing never panics.
 
 #![no_main]
+#![allow(dead_code)]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// Simulated Ethernet header (14 bytes)
 #[derive(Debug, Clone, Arbitrary)]
@@ -132,8 +133,8 @@ fuzz_target!(|data: &[u8]| {
             let b3 = packet.payload[3];
 
             // All different = high entropy
-            let _all_different = (b0 != b1) && (b0 != b2) && (b0 != b3)
-                && (b1 != b2) && (b1 != b3) && (b2 != b3);
+            let _all_different =
+                (b0 != b1) && (b0 != b2) && (b0 != b3) && (b1 != b2) && (b1 != b3) && (b2 != b3);
         }
 
         // 6. Port scan bitmap simulation

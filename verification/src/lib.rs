@@ -67,7 +67,9 @@ mod kani_proofs {
     #[kani::proof]
     fn verify_packet_log_zeroed() {
         let log: PacketLog = unsafe { core::mem::zeroed() };
-        assert!(log.action == ACTION_PASS || log.action == ACTION_DROP || log.action == ACTION_ALERT);
+        assert!(
+            log.action == ACTION_PASS || log.action == ACTION_DROP || log.action == ACTION_ALERT
+        );
     }
 
     /// Prove: FlowKey operations never panic
@@ -341,43 +343,43 @@ mod unit_tests {
     #[test]
     fn test_rate_limit_constants() {
         // Ensure burst capacity is reasonable
-        assert!(MAX_TOKENS >= TOKENS_PER_SEC);
+        const { assert!(MAX_TOKENS >= TOKENS_PER_SEC) };
         // Ensure we can handle at least 1 second of traffic
-        assert!(MAX_TOKENS >= 100);
+        const { assert!(MAX_TOKENS >= 100) };
     }
 
     #[test]
     fn test_port_scan_constants() {
         // Threshold should be reasonable
-        assert!(PORT_SCAN_THRESHOLD > 10);
-        assert!(PORT_SCAN_THRESHOLD < 200);
+        const { assert!(PORT_SCAN_THRESHOLD > 10) };
+        const { assert!(PORT_SCAN_THRESHOLD < 200) };
         // Window should be in seconds range
-        assert!(PORT_SCAN_WINDOW_NS >= 1_000_000_000); // >= 1 sec
-        assert!(PORT_SCAN_WINDOW_NS <= 60_000_000_000); // <= 60 sec
+        const { assert!(PORT_SCAN_WINDOW_NS >= 1_000_000_000) }; // >= 1 sec
+        const { assert!(PORT_SCAN_WINDOW_NS <= 60_000_000_000) }; // <= 60 sec
     }
 
     #[test]
     fn test_entropy_constants() {
         // Sample size must be small for verifier
-        assert!(ENTROPY_SAMPLE_SIZE <= 8);
+        const { assert!(ENTROPY_SAMPLE_SIZE <= 8) };
         // Threshold must not exceed sample size
-        assert!((ENTROPY_THRESHOLD as usize) <= ENTROPY_SAMPLE_SIZE);
+        const { assert!((ENTROPY_THRESHOLD as usize) <= ENTROPY_SAMPLE_SIZE) };
     }
 
     #[test]
     fn test_ipv6_limits() {
         // Max ext headers must be small for verifier
-        assert!(IPV6_MAX_EXT_HEADERS <= 4);
+        const { assert!(IPV6_MAX_EXT_HEADERS <= 4) };
         // Max ext header length must be bounded
-        assert!(IPV6_MAX_EXT_HDR_LEN <= 512);
+        const { assert!(IPV6_MAX_EXT_HDR_LEN <= 512) };
     }
 
     #[test]
     fn test_connection_timeouts() {
         // Established should be longer than other states
-        assert!(CONN_TIMEOUT_ESTABLISHED_NS > CONN_TIMEOUT_OTHER_NS);
+        const { assert!(CONN_TIMEOUT_ESTABLISHED_NS > CONN_TIMEOUT_OTHER_NS) };
         // Other should be at least 10 seconds
-        assert!(CONN_TIMEOUT_OTHER_NS >= 10_000_000_000);
+        const { assert!(CONN_TIMEOUT_OTHER_NS >= 10_000_000_000) };
     }
 
     #[test]
