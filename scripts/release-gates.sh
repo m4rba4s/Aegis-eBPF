@@ -86,6 +86,67 @@ require_packet_replay_evidence() {
   echo "packet replay evidence artifacts present in: $evidence_dir"
 }
 
+diagnostic_bpftool_load() {
+  local obj="$1"
+  local pin="$2"
+  local prog_type="$3"
+  local log_file="$4"
+
+  rm -f "$pin"
+  {
+    echo "command: bpftool prog load $obj $pin type $prog_type"
+    if bpftool prog load "$obj" "$pin" type "$prog_type"; then
+      echo "bpftool_status: pass"
+    else
+      echo "bpftool_status: fail"
+      echo "note: bpftool load is diagnostic for Aya-built objects; Aya load/attach remains authoritative for this gate"
+    fi
+  } >"$log_file" 2>&1
+  rm -f "$pin"
+}
+
+write_lab_rule_config() {
+  local lab_dir="$1"
+
+  cat >"$lab_dir/aegis.yaml" <<'EOF'
+rules:
+  - ip: 198.51.100.10
+    proto: tcp
+    action: drop
+
+egress_rules:
+  - ip: 198.51.100.10
+    action: drop
+  - ip: 2001:db8:dead::10
+    action: drop
+
+egress_cidrs:
+  - cidr: 198.51.100.0/24
+    action: drop
+  - cidr: 2001:db8:dead::/48
+    action: drop
+EOF
+}
+
+capture_lab_state() {
+  local host_if="$1"
+  local out_file="$2"
+
+  {
+    echo "command: ip -details link show dev $host_if"
+    ip -details link show dev "$host_if" || true
+    echo
+    echo "command: tc qdisc show dev $host_if"
+    tc qdisc show dev "$host_if" || true
+    echo
+    echo "command: tc filter show dev $host_if egress"
+    tc filter show dev "$host_if" egress || true
+    echo
+    echo "command: bpftool net show"
+    bpftool net show || true
+  } >"$out_file" 2>&1
+}
+
 non_privileged() {
   require_cmd cargo
 
@@ -133,6 +194,7 @@ non_privileged() {
 privileged_lab() {
   require_cmd bpftool
   require_cmd ip
+  require_cmd python3
   require_cmd tc
   require_cmd timeout
 
@@ -144,42 +206,87 @@ privileged_lab() {
   local ns="aegis-reltest"
   local host_if="aegis-host0"
   local ns_if="aegis-peer0"
+  local replay_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
+  local lab_dir=""
+  local daemon_pid=""
+
+  if [[ -z "$replay_dir" ]]; then
+    echo "privileged lab requires AEGIS_PACKET_REPLAY_DIR for replay and attach evidence artifacts" >&2
+    exit 1
+  fi
+  mkdir -p "$replay_dir"
 
   cleanup() {
     set +e
+    if [[ -n "$daemon_pid" ]]; then
+      kill "$daemon_pid" 2>/dev/null
+      wait "$daemon_pid" 2>/dev/null
+    fi
     ip link set "$host_if" xdp off 2>/dev/null
     tc qdisc del dev "$host_if" clsact 2>/dev/null
     ip link del "$host_if" 2>/dev/null
     ip netns del "$ns" 2>/dev/null
+    [[ -n "$lab_dir" ]] && rm -rf "$lab_dir"
   }
   trap cleanup EXIT
 
   cleanup
+  lab_dir=$(mktemp -d /tmp/aegis-reltest-config.XXXXXX)
+  write_lab_rule_config "$lab_dir"
+
   run ip netns add "$ns"
   run ip link add "$host_if" type veth peer name "$ns_if"
   run ip link set "$ns_if" netns "$ns"
   run ip addr add 10.200.0.1/24 dev "$host_if"
   run ip -n "$ns" addr add 10.200.0.2/24 dev "$ns_if"
+  run ip addr add fd00:ae9:1::1/64 dev "$host_if"
+  run ip -n "$ns" addr add fd00:ae9:1::2/64 dev "$ns_if"
   run ip link set "$host_if" up
   run ip -n "$ns" link set "$ns_if" up
   run ip -n "$ns" link set lo up
 
-  run bpftool prog load target/bpfel-unknown-none/release/aegis /sys/fs/bpf/aegis-release-xdp type xdp
-  rm -f /sys/fs/bpf/aegis-release-xdp
+  diagnostic_bpftool_load \
+    target/bpfel-unknown-none/release/aegis \
+    /sys/fs/bpf/aegis-release-xdp \
+    xdp \
+    "$replay_dir/bpftool-xdp-load.log"
+  diagnostic_bpftool_load \
+    target/bpfel-unknown-none/release/aegis-tc \
+    /sys/fs/bpf/aegis-release-tc \
+    sched_cls \
+    "$replay_dir/bpftool-tc-load.log"
 
   # Runtime attach through the real loader validates Aya load/attach paths and TC setup.
-  # timeout exits non-zero after the smoke window; treat 124 as expected daemon timeout.
-  set +e
-  timeout 8s target/release/aegis-cli --iface "$host_if" daemon
-  local rc=$?
-  set -e
-  if [[ $rc -ne 0 && $rc -ne 124 ]]; then
-    echo "aegis daemon exited unexpectedly during privileged attach smoke: rc=$rc" >&2
-    exit "$rc"
+  (
+    cd "$lab_dir"
+    timeout 45s "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon
+  ) >"$replay_dir/aegis-daemon.log" 2>&1 &
+  daemon_pid=$!
+
+  sleep 3
+  if ! kill -0 "$daemon_pid" 2>/dev/null; then
+    local rc=0
+    set +e
+    wait "$daemon_pid"
+    rc=$?
+    set -e
+    echo "aegis daemon exited before packet replay; see $replay_dir/aegis-daemon.log (rc=${rc:-unknown})" >&2
+    exit "${rc:-1}"
   fi
 
-  run ip link show dev "$host_if"
-  run tc qdisc show dev "$host_if"
+  capture_lab_state "$host_if" "$replay_dir/attach-state.log"
+
+  run python3 scripts/packet-replay-lab.py \
+    --host-if "$host_if" \
+    --peer-ns "$ns" \
+    --peer-if "$ns_if" \
+    --out-dir "$replay_dir"
+
+  kill -TERM "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  daemon_pid=""
+
+  capture_lab_state "$host_if" "$replay_dir/detach-state.log"
   require_packet_replay_evidence
 }
 
