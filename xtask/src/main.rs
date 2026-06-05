@@ -140,7 +140,6 @@ fn build_bpf_crate(
 
     // Build arguments
     let mut args = vec![
-        "+nightly".to_string(),
         "build".to_string(),
         "-Zbuild-std=core".to_string(),
         "--target".to_string(),
