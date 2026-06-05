@@ -24,7 +24,7 @@
 | Feature | iptables/nftables | Aegis |
 |---------|-------------------|-------|
 | Packet processing | Kernel netfilter | XDP (driver level) |
-| Performance | ~1M pps | **10M+ pps** ¹ |
+| Performance | ~1M pps | **10M+ pps theoretical** ¹ |
 | Egress filtering | Yes | Yes (TC) |
 | Connection tracking | Conntrack module | **Native eBPF** |
 | Real-time TUI | No | **Yes** |
@@ -73,6 +73,14 @@
 - **Auto XDP Mode** — Automatic fallback from driver to SKB mode
 - **Systemd Integration** — Hardened service file with `CAP_BPF` + `CAP_NET_ADMIN`
 
+## Release Status
+
+Production release claims require archived verifier/load/attach/detach logs and packet replay artifacts. Build/test success alone is not firewall enforcement proof.
+
+- Portability matrix: [`docs/PORTABILITY.md`](docs/PORTABILITY.md)
+- Release validation: [`docs/RELEASE_VALIDATION.md`](docs/RELEASE_VALIDATION.md)
+- Troubleshooting and rollback: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+
 ## Installation
 
 ### Prerequisites
@@ -97,8 +105,11 @@ sudo ./install.sh
 The installer will:
 - Detect your distro and install dependencies
 - Build from source (or use pre-built if available)
-- Install systemd service
+- Install both XDP and TC eBPF objects
+- Install systemd service when available
 - Create config directories
+
+TC egress is required by default. `--no-tc` is an explicit ingress-only waiver.
 
 ### Run Without Installing
 

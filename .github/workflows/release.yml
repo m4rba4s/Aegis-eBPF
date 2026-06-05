@@ -55,12 +55,13 @@ jobs:
             sudo aegis-cli -i eth0 tui
             ```
 
-            ### Supported Platforms
-            - Fedora / RHEL / CentOS / Rocky
-            - Ubuntu / Debian / Pop!_OS
-            - Arch / Manjaro
-            - Alpine (OpenRC)
-            - openSUSE
+            ### Platform Support
+            Platform support is evidence-bound. See `docs/PORTABILITY.md` in this release source for the current support matrix.
+
+            Do not treat this release as production-validated unless the release assets or CI evidence include:
+            - non-privileged release gate log
+            - privileged verifier/load/attach/detach log
+            - packet replay artifacts for every required case
 
             ### Files
             | File | Description |

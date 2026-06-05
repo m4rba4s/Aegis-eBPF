@@ -1,20 +1,50 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
+  nonpriv-release-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Unit Tests
-        run: cargo test -p aegis-cli -p aegis-common -p aegis-cni -p xtask
-      - name: Clippy
-        run: cargo clippy -p aegis-cli -p aegis-common -p aegis-cni -p xtask -- -D warnings
-      - name: Format Check
-        run: cargo fmt --all -- --check
-      - name: Install bpf-linker
-        run: cargo install bpf-linker --locked
-      - name: Build eBPF Objects
-        run: cargo run -p xtask -- build-all --profile release
-      - name: Build Userspace Release
-        run: cargo build --release -p aegis-cli -p aegis-cni -p xtask
+      - name: Install release gate tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y file llvm
+          cargo install bpf-linker --locked
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+          cargo audit --stale || true
+      - name: Non-privileged release gate
+        run: ./scripts/release-gates.sh nonpriv
+      - name: Verification crate tests
+        run: cargo test --manifest-path verification/Cargo.toml
+      - name: Shell syntax
+        run: bash -n install.sh deploy/deploy.sh scripts/release-gates.sh
+      - name: Packet replay driver syntax
+        run: |
+          python3 -m py_compile scripts/packet-replay-lab.py
+          python3 scripts/packet-replay-lab.py --list-cases
+
+  privileged-runtime-lab:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, aegis-ebpf-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Privileged lab release gate
+        run: |
+          sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay \
+            CARGO_HOME=/tmp/aegis-cargo-home \
+            ./scripts/release-gates.sh privileged-lab
+      - name: Archive replay artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aegis-replay-${{ github.sha }}
+          path: /tmp/aegis-replay

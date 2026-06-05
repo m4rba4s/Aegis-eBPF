@@ -106,16 +106,54 @@ check_kernel_version() {
 }
 
 check_bpf_fs() {
-    if [[ ! -d /sys/fs/bpf ]]; then
-        log_warn "BPF filesystem not mounted at /sys/fs/bpf"
-        log_info "Attempting to mount..."
-        mount -t bpf bpf /sys/fs/bpf 2>/dev/null || {
-            log_error "Failed to mount BPF filesystem"
-            log_info "Try manually: mount -t bpf bpf /sys/fs/bpf"
-            return 1
-        }
+    mkdir -p /sys/fs/bpf
+
+    if awk '$2 == "/sys/fs/bpf" && $3 == "bpf" { found = 1 } END { exit !found }' /proc/mounts; then
+        log_ok "BPF filesystem mounted at /sys/fs/bpf"
+        return 0
     fi
-    log_ok "BPF filesystem available"
+
+    log_warn "BPF filesystem not mounted at /sys/fs/bpf"
+    log_info "Attempting to mount..."
+    mount -t bpf bpf /sys/fs/bpf 2>/dev/null || {
+        log_error "Failed to mount BPF filesystem"
+        log_info "Try manually: sudo mount -t bpf bpf /sys/fs/bpf"
+        return 1
+    }
+
+    if ! awk '$2 == "/sys/fs/bpf" && $3 == "bpf" { found = 1 } END { exit !found }' /proc/mounts; then
+        log_error "/sys/fs/bpf exists but is not mounted as bpffs"
+        return 1
+    fi
+
+    log_ok "BPF filesystem mounted at /sys/fs/bpf"
+}
+
+check_runtime_tools() {
+    local missing=()
+    local tools=(ip tc mount uname)
+
+    if [[ "$(detect_init_system)" == "systemd" ]]; then
+        tools+=(systemctl)
+    fi
+
+    for tool in "${tools[@]}"; do
+        command -v "$tool" &>/dev/null || missing+=("$tool")
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing runtime tools: ${missing[*]}"
+        log_info "Install iproute2/systemd tools for your distro, then re-run this script"
+        return 1
+    fi
+
+    if command -v bpftool &>/dev/null; then
+        log_ok "bpftool: $(command -v bpftool)"
+    else
+        log_warn "bpftool not found; install it for verifier diagnostics and release validation"
+    fi
+
+    log_ok "Runtime tools available: ${tools[*]}"
 }
 
 # =============================================================================
@@ -135,6 +173,7 @@ install_system_deps() {
                     llvm clang llvm-devel \
                     elfutils-libelf-devel \
                     protobuf-compiler \
+                    iproute \
                     curl wget git
             elif command -v yum &>/dev/null; then
                 yum install -y \
@@ -142,6 +181,7 @@ install_system_deps() {
                     llvm clang llvm-devel \
                     elfutils-libelf-devel \
                     protobuf-compiler \
+                    iproute \
                     curl wget git
             else
                 log_warn "dnf/yum not found; install system dependencies manually"
@@ -153,12 +193,14 @@ install_system_deps() {
                 build-essential pkg-config \
                 llvm clang libelf-dev \
                 protobuf-compiler \
+                iproute2 \
                 curl wget git
             ;;
         arch|manjaro|endeavouros)
             pacman -Sy --noconfirm --needed \
                 base-devel llvm clang libelf \
                 protobuf \
+                iproute2 \
                 curl wget git
             ;;
         opensuse*|sles)
@@ -166,6 +208,7 @@ install_system_deps() {
                 gcc make pkg-config \
                 llvm clang libelf-devel \
                 protobuf-devel \
+                iproute2 \
                 curl wget git
             ;;
         alpine)
@@ -173,10 +216,11 @@ install_system_deps() {
                 build-base musl-dev linux-headers \
                 llvm clang libelf-dev \
                 protobuf \
+                iproute2 \
                 curl wget git
             ;;
         *)
-            log_warn "Unknown distro '$distro' — install manually: gcc, llvm, clang, libelf-dev, curl, git"
+            log_warn "Unknown distro '$distro' — install manually: gcc, llvm, clang, libelf-dev, iproute2, curl, git"
             ;;
     esac
 
@@ -686,19 +730,40 @@ install_prebuilt() {
         return 1
     fi
 
+    if [[ -z "$xdp_obj" ]]; then
+        log_error "XDP eBPF object not found!"
+        log_info "Expected one of: $SCRIPT_DIR/aegis.o, $SCRIPT_DIR/target/bpfel-unknown-none/release/aegis, ./aegis.o"
+        log_info "Build first: cargo run -p xtask -- build-all --profile release"
+        return 1
+    fi
+
+    if [[ -z "$tc_obj" ]]; then
+        log_error "TC eBPF object not found; TC egress is required by default."
+        log_info "Expected one of: $SCRIPT_DIR/aegis-tc.o, $SCRIPT_DIR/target/bpfel-unknown-none/release/aegis-tc, ./aegis-tc.o"
+        log_info "Build first: cargo run -p xtask -- build-all --profile release"
+        return 1
+    fi
+
     cp "$cli_bin" "$BIN_DIR/aegis-cli"
     chmod +x "$BIN_DIR/aegis-cli"
     log_ok "Installed: $BIN_DIR/aegis-cli"
 
-    if [[ -n "$xdp_obj" ]]; then
-        cp "$xdp_obj" "$SHARE_DIR/aegis.o"
-        log_ok "Installed: $SHARE_DIR/aegis.o"
+    cp "$xdp_obj" "$SHARE_DIR/aegis.o"
+    log_ok "Installed: $SHARE_DIR/aegis.o"
+
+    cp "$tc_obj" "$SHARE_DIR/aegis-tc.o"
+    log_ok "Installed: $SHARE_DIR/aegis-tc.o"
+
+    if [[ ! -x "$BIN_DIR/aegis-cli" \
+          || ! -s "$SHARE_DIR/aegis.o" \
+          || ! -s "$SHARE_DIR/aegis-tc.o" ]]; then
+        log_error "Installed command/object path validation failed"
+        return 1
     fi
 
-    if [[ -n "$tc_obj" ]]; then
-        cp "$tc_obj" "$SHARE_DIR/aegis-tc.o"
-        log_ok "Installed: $SHARE_DIR/aegis-tc.o"
-    fi
+    "$BIN_DIR/aegis-cli" --iface lo daemon --help >/dev/null
+    "$BIN_DIR/aegis-cli" --iface lo --no-tc daemon --help >/dev/null
+    log_ok "Installed CLI command syntax validated"
 }
 
 build_and_install() {
@@ -854,6 +919,9 @@ run_checks() {
 
     # BPF filesystem
     check_bpf_fs || ((++errors))
+
+    # Runtime tools
+    check_runtime_tools || ((++errors))
 
     # System tools
     local tools=("gcc" "clang" "llvm-config" "curl" "git")
@@ -1182,6 +1250,7 @@ main() {
 
     # Install system deps FIRST (gcc, clang, llvm, curl, etc.)
     install_system_deps
+    check_runtime_tools
 
     # Stop running services
     stop_running_services
