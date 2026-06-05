@@ -207,7 +207,7 @@ non_privileged() {
   fi
 
   if command -v cargo-audit >/dev/null 2>&1; then
-    run cargo audit --no-fetch -D warnings
+    run cargo audit -D warnings
   else
     echo "cargo-audit not installed; install with: cargo install cargo-audit" >&2
     exit 127
