@@ -8,6 +8,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# AEGIS: "полная автоматизация" - auto-inject cargo path if missing due to sudo env_reset
+if ! command -v cargo >/dev/null 2>&1; then
+  if [ -n "${SUDO_USER:-}" ] && [ -f "/home/$SUDO_USER/.cargo/env" ]; then
+    source "/home/$SUDO_USER/.cargo/env"
+  elif [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+  fi
+fi
+
 run() {
   printf '\n\033[1;34m==> %s\033[0m\n' "$*"
   "$@"
