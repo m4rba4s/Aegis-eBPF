@@ -4,8 +4,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use aegis_common::{LpmKeyIpv4, LpmKeyIpv6};
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {

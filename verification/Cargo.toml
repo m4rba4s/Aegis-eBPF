@@ -18,3 +18,6 @@ arbitrary = { version = "1.3", features = ["derive"] }
 [features]
 default = []
 kani = []  # Enable Kani proofs
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
