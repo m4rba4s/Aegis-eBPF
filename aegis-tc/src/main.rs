@@ -282,6 +282,47 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_SHOT);
     }
 
+    // Enforce destination policy before any L4 reads. Truncated TCP/UDP
+    // packets to blocked destinations must not fail open via parse errors.
+    if let Some(_) = unsafe { EGRESS_BLOCKLIST.get(&dst_addr) } {
+        log_and_drop(
+            &ctx,
+            src_addr,
+            dst_addr,
+            0,
+            0,
+            proto,
+            0,
+            total_len,
+            REASON_EGRESS_BLOCK,
+            THREAT_EGRESS_BLOCKED,
+        );
+        return Ok(TC_ACT_SHOT);
+    }
+
+    let cidr_key = Key::new(
+        32,
+        LpmKeyIpv4 {
+            prefix_len: 32,
+            addr: dst_addr,
+        },
+    );
+    if let Some(_) = EGRESS_CIDR_BLOCKLIST.get(&cidr_key) {
+        log_and_drop(
+            &ctx,
+            src_addr,
+            dst_addr,
+            0,
+            0,
+            proto,
+            0,
+            total_len,
+            REASON_EGRESS_BLOCK,
+            THREAT_EGRESS_BLOCKED,
+        );
+        return Ok(TC_ACT_SHOT);
+    }
+
     // L4 parsing
     let l4_offset = ip_offset + 20;
     let mut src_port = 0u16;
@@ -305,48 +346,6 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
 
         let dst_port_ptr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
         dst_port = u16::from_be(unsafe { *dst_port_ptr });
-    }
-
-    // --- EGRESS BLOCKLIST CHECK ---
-    // 1. Exact IP match
-    if let Some(_) = unsafe { EGRESS_BLOCKLIST.get(&dst_addr) } {
-        log_and_drop(
-            &ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            proto,
-            tcp_flags,
-            total_len,
-            REASON_EGRESS_BLOCK,
-            THREAT_EGRESS_BLOCKED,
-        );
-        return Ok(TC_ACT_SHOT);
-    }
-
-    // 2. CIDR match
-    let cidr_key = Key::new(
-        32,
-        LpmKeyIpv4 {
-            prefix_len: 32,
-            addr: dst_addr,
-        },
-    );
-    if let Some(_) = EGRESS_CIDR_BLOCKLIST.get(&cidr_key) {
-        log_and_drop(
-            &ctx,
-            src_addr,
-            dst_addr,
-            src_port,
-            dst_port,
-            proto,
-            tcp_flags,
-            total_len,
-            REASON_EGRESS_BLOCK,
-            THREAT_EGRESS_BLOCKED,
-        );
-        return Ok(TC_ACT_SHOT);
     }
 
     let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };

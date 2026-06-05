@@ -36,7 +36,13 @@ mkdir -p "$INSTALL_DIR/share/aegis"
 # Check if binaries exist
 if [[ ! -f "$PROJECT_DIR/target/bpfel-unknown-none/release/aegis" ]]; then
     echo "❌ eBPF binary not found. Build first with:"
-    echo "   cargo run -p xtask -- build-ebpf --profile release"
+    echo "   cargo run -p xtask -- build-all --profile release"
+    exit 1
+fi
+
+if [[ ! -f "$PROJECT_DIR/target/bpfel-unknown-none/release/aegis-tc" ]]; then
+    echo "❌ TC eBPF binary not found. Build first with:"
+    echo "   cargo run -p xtask -- build-all --profile release"
     exit 1
 fi
 
@@ -49,8 +55,16 @@ fi
 # Install binaries
 echo "📋 Installing binaries..."
 cp "$PROJECT_DIR/target/bpfel-unknown-none/release/aegis" "$INSTALL_DIR/share/aegis/aegis.o"
+cp "$PROJECT_DIR/target/bpfel-unknown-none/release/aegis-tc" "$INSTALL_DIR/share/aegis/aegis-tc.o"
 cp "$PROJECT_DIR/target/release/aegis-cli" "$INSTALL_DIR/bin/aegis-cli"
 chmod +x "$INSTALL_DIR/bin/aegis-cli"
+
+if [[ ! -x "$INSTALL_DIR/bin/aegis-cli" \
+      || ! -f "$INSTALL_DIR/share/aegis/aegis.o" \
+      || ! -f "$INSTALL_DIR/share/aegis/aegis-tc.o" ]]; then
+    echo "❌ Installed command/object path validation failed"
+    exit 1
+fi
 
 # Install config (don't overwrite existing)
 if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
@@ -81,7 +95,8 @@ echo "║              INSTALLATION COMPLETE             ║"
 echo "╚════════════════════════════════════════════════╝"
 echo ""
 echo "📍 Binaries:  $INSTALL_DIR/bin/aegis-cli"
-echo "📍 eBPF:      $INSTALL_DIR/share/aegis/aegis.o"
+echo "📍 XDP eBPF:  $INSTALL_DIR/share/aegis/aegis.o"
+echo "📍 TC eBPF:   $INSTALL_DIR/share/aegis/aegis-tc.o"
 echo "📍 Config:    $CONFIG_DIR/config.yaml"
 echo "📍 Logs:      $LOG_DIR/"
 echo ""

@@ -287,6 +287,48 @@ mod property_tests {
 mod unit_tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TcIpv4PolicyStage {
+        DropMalformedIp,
+        DropBlockedDestinationBeforeL4,
+        ContinueToL4,
+    }
+
+    fn model_tc_ipv4_policy_stage(
+        ihl: u8,
+        frag_off: u16,
+        exact_blocked: bool,
+        cidr_blocked: bool,
+    ) -> TcIpv4PolicyStage {
+        if ihl != 5 || (frag_off & 0x3FFF) != 0 {
+            return TcIpv4PolicyStage::DropMalformedIp;
+        }
+
+        if exact_blocked || cidr_blocked {
+            return TcIpv4PolicyStage::DropBlockedDestinationBeforeL4;
+        }
+
+        TcIpv4PolicyStage::ContinueToL4
+    }
+
+    fn assert_truncated_blocked_ipv4_drops_before_l4(
+        proto: u8,
+        available_l4_bytes: usize,
+        exact_blocked: bool,
+        cidr_blocked: bool,
+    ) {
+        let min_l4_bytes = match proto {
+            PROTO_TCP => 20,
+            PROTO_UDP => 8,
+            _ => 0,
+        };
+        assert!(available_l4_bytes < min_l4_bytes);
+        assert_eq!(
+            model_tc_ipv4_policy_stage(5, 0, exact_blocked, cidr_blocked),
+            TcIpv4PolicyStage::DropBlockedDestinationBeforeL4
+        );
+    }
+
     #[test]
     fn test_struct_sizes() {
         assert_eq!(core::mem::size_of::<PacketLog>(), 32);
@@ -336,5 +378,29 @@ mod unit_tests {
         assert!(CONN_TIMEOUT_ESTABLISHED_NS > CONN_TIMEOUT_OTHER_NS);
         // Other should be at least 10 seconds
         assert!(CONN_TIMEOUT_OTHER_NS >= 10_000_000_000);
+    }
+
+    #[test]
+    fn test_tc_ipv4_truncated_exact_block_drops_before_l4() {
+        assert_truncated_blocked_ipv4_drops_before_l4(PROTO_TCP, 13, true, false);
+        assert_truncated_blocked_ipv4_drops_before_l4(PROTO_UDP, 3, true, false);
+    }
+
+    #[test]
+    fn test_tc_ipv4_truncated_cidr_block_drops_before_l4() {
+        assert_truncated_blocked_ipv4_drops_before_l4(PROTO_TCP, 13, false, true);
+        assert_truncated_blocked_ipv4_drops_before_l4(PROTO_UDP, 3, false, true);
+    }
+
+    #[test]
+    fn test_tc_ipv4_malformed_header_precedes_destination_policy() {
+        assert_eq!(
+            model_tc_ipv4_policy_stage(6, 0, true, true),
+            TcIpv4PolicyStage::DropMalformedIp
+        );
+        assert_eq!(
+            model_tc_ipv4_policy_stage(5, 0x2000, true, true),
+            TcIpv4PolicyStage::DropMalformedIp
+        );
     }
 }
