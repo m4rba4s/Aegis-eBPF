@@ -301,7 +301,14 @@ privileged_lab() {
 
   capture_lab_state "$host_if" "$replay_dir/attach-state.log"
 
-  run python3 scripts/packet-replay-lab.py \
+  echo "[+] Setting up Python virtual environment for packet replay..."
+  if ! python3 -m venv "$replay_dir/venv"; then
+    echo "ERROR: Failed to create Python virtual environment. Is python3-venv installed?" >&2
+    exit 1
+  fi
+  "$replay_dir/venv/bin/pip" install --quiet scapy
+
+  run "$replay_dir/venv/bin/python3" scripts/packet-replay-lab.py \
     --host-if "$host_if" \
     --peer-ns "$ns" \
     --peer-if "$ns_if" \
