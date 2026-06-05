@@ -10,10 +10,10 @@ cd "$ROOT_DIR"
 
 # AEGIS: "полная автоматизация" - auto-inject cargo path if missing due to sudo env_reset
 if ! command -v cargo >/dev/null 2>&1; then
-  if [ -n "${SUDO_USER:-}" ] && [ -f "/home/$SUDO_USER/.cargo/env" ]; then
-    source "/home/$SUDO_USER/.cargo/env"
-  elif [ -f "$HOME/.cargo/env" ]; then
-    source "$HOME/.cargo/env"
+  if [ -n "${SUDO_USER:-}" ] && [ -d "/home/$SUDO_USER/.cargo/bin" ]; then
+    export PATH="/home/$SUDO_USER/.cargo/bin:$PATH"
+  elif [ -d "$HOME/.cargo/bin" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
   fi
 fi
 
