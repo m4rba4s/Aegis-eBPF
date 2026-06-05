@@ -48,8 +48,9 @@ const _: () = {
     // ConnTrackKey MUST be 16 bytes
     assert!(core::mem::size_of::<ConnTrackKey>() == 16);
 
-    // LpmKeyIpv4 MUST be 8 bytes (prefix_len + addr)
-    assert!(core::mem::size_of::<LpmKeyIpv4>() == 8);
+    // LpmKeyIpv4 contains only address data; Aya's LPM Key wrapper owns prefix_len.
+    assert!(core::mem::size_of::<LpmKeyIpv4>() == 4);
+    assert!(core::mem::size_of::<LpmKeyIpv6>() == 16);
 
     // Reason codes must not overlap with threat codes conceptually
     // (enforced by separate constant namespaces)
@@ -99,10 +100,11 @@ mod kani_proofs {
         // Assume valid prefix (0-32 for IPv4)
         kani::assume(prefix_len <= 32);
 
-        let key = LpmKeyIpv4 { prefix_len, addr };
+        let key = LpmKeyIpv4 { addr };
 
-        // Must never exceed IPv4 max prefix
-        assert!(key.prefix_len <= 32);
+        // Prefix validation is external to the key data stored in the trie.
+        assert!(prefix_len <= 32);
+        assert!(key.addr == addr);
     }
 
     /// Prove: LPM prefix_len is bounded correctly for IPv6
@@ -114,10 +116,11 @@ mod kani_proofs {
         // Assume valid prefix (0-128 for IPv6)
         kani::assume(prefix_len <= 128);
 
-        let key = LpmKeyIpv6 { prefix_len, addr };
+        let key = LpmKeyIpv6 { addr };
 
-        // Must never exceed IPv6 max prefix
-        assert!(key.prefix_len <= 128);
+        // Prefix validation is external to the key data stored in the trie.
+        assert!(prefix_len <= 128);
+        assert!(key.addr == addr);
     }
 
     /// Prove: Rate limit token bucket never overflows
@@ -247,15 +250,17 @@ mod property_tests {
         /// Property: LPM IPv4 prefix is bounded
         #[test]
         fn prop_lpm_ipv4_prefix(prefix in 0u32..=32u32, addr: u32) {
-            let key = LpmKeyIpv4 { prefix_len: prefix, addr };
-            prop_assert!(key.prefix_len <= 32);
+            let key = LpmKeyIpv4 { addr };
+            prop_assert!(prefix <= 32);
+            prop_assert_eq!(key.addr, addr);
         }
 
         /// Property: LPM IPv6 prefix is bounded
         #[test]
         fn prop_lpm_ipv6_prefix(prefix in 0u32..=128u32, addr: [u8; 16]) {
-            let key = LpmKeyIpv6 { prefix_len: prefix, addr };
-            prop_assert!(key.prefix_len <= 128);
+            let key = LpmKeyIpv6 { addr };
+            prop_assert!(prefix <= 128);
+            prop_assert_eq!(key.addr, addr);
         }
 
         /// Property: Connection state is always valid enum value
@@ -337,7 +342,8 @@ mod unit_tests {
         assert_eq!(core::mem::size_of::<PacketLogIpv6>(), 48);
         assert_eq!(core::mem::size_of::<FlowKey>(), 8);
         assert_eq!(core::mem::size_of::<ConnTrackKey>(), 16);
-        assert_eq!(core::mem::size_of::<LpmKeyIpv4>(), 8);
+        assert_eq!(core::mem::size_of::<LpmKeyIpv4>(), 4);
+        assert_eq!(core::mem::size_of::<LpmKeyIpv6>(), 16);
     }
 
     #[test]

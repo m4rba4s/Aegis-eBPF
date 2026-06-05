@@ -472,7 +472,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
     // CIDR blocklist (threat feeds)
     if is_module_enabled(CFG_THREAT_FEEDS) {
-        let cidr_key_early = Key::new(32, LpmKeyIpv4 { prefix_len: 32, addr: src_addr });
+        let cidr_key_early = Key::new(32, LpmKeyIpv4 { addr: src_addr });
         if let Some(_) = CIDR_BLOCKLIST.get(&cidr_key_early) {
             stats_inc_block_cidr();
             return log_and_return(
@@ -790,7 +790,6 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         let cidr_key = Key::new(
             128,
             LpmKeyIpv6 {
-                prefix_len: 128,
                 addr: src_addr,
             },
         );

@@ -136,7 +136,6 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
     let cidr_key = Key::new(
         128,
         LpmKeyIpv6 {
-            prefix_len: 128,
             addr: dst_addr,
         },
     );
@@ -303,7 +302,6 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     let cidr_key = Key::new(
         32,
         LpmKeyIpv4 {
-            prefix_len: 32,
             addr: dst_addr,
         },
     );

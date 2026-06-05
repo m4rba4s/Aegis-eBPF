@@ -262,14 +262,14 @@ privileged_lab() {
     exit 1
   fi
 
-  local ns="aegis-reltest"
-  local host_if="aegis-host0"
-  local ns_if="aegis-peer0"
-  local replay_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
-  local lab_dir=""
-  local daemon_pid=""
-  local lab_daemon_started=0
-  local cleanup_state_written=0
+  ns="aegis-reltest"
+  host_if="aegis-host0"
+  ns_if="aegis-peer0"
+  replay_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
+  lab_dir=""
+  daemon_pid=""
+  lab_daemon_started=0
+  cleanup_state_written=0
 
   if [[ -z "$replay_dir" ]]; then
     replay_dir="$(mktemp -d /tmp/aegis-replay.XXXXXX)"
@@ -280,18 +280,19 @@ privileged_lab() {
 
   cleanup() {
     set +e
-    if [[ -n "$daemon_pid" ]]; then
-      kill "$daemon_pid" 2>/dev/null
-      wait "$daemon_pid" 2>/dev/null
+    local pid="${daemon_pid:-}"
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
     fi
-    ip link set "$host_if" xdp off 2>/dev/null
-    tc qdisc del dev "$host_if" clsact 2>/dev/null
-    ip link del "$host_if" 2>/dev/null
-    ip netns del "$ns" 2>/dev/null
-    if [[ "$lab_daemon_started" -eq 1 ]]; then
+    ip link set "${host_if:-aegis-host0}" xdp off 2>/dev/null
+    tc qdisc del dev "${host_if:-aegis-host0}" clsact 2>/dev/null
+    ip link del "${host_if:-aegis-host0}" 2>/dev/null
+    ip netns del "${ns:-aegis-reltest}" 2>/dev/null
+    if [[ "${lab_daemon_started:-0}" -eq 1 ]]; then
       cleanup_aegis_lab_pins
     fi
-    [[ -n "$lab_dir" ]] && rm -rf "$lab_dir"
+    [[ -n "${lab_dir:-}" ]] && rm -rf "$lab_dir"
     set -e
     return 0
   }
@@ -299,8 +300,8 @@ privileged_lab() {
   cleanup_and_capture() {
     local rc=$?
     cleanup
-    if [[ "$cleanup_state_written" -eq 0 ]]; then
-      capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log"
+    if [[ "${cleanup_state_written:-0}" -eq 0 ]]; then
+      capture_cleanup_state "${host_if:-aegis-host0}" "${replay_dir:-/tmp}/cleanup-state.log"
       cleanup_state_written=1
     fi
     exit "$rc"
