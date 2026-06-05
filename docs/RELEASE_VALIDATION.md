@@ -15,6 +15,11 @@ git rev-parse --short HEAD
 CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh nonpriv
 ```
 
+`AEGIS_DOC_TARGET_DIR` may be set when the documentation output path must be
+stable. If it is omitted, the gate writes `cargo doc` output to a fresh
+`/tmp/aegis-doc-target.*` directory to avoid stale privileged artifacts in
+`target/doc`.
+
 Required evidence:
 
 - empty `git status --short`
@@ -27,7 +32,7 @@ Required evidence:
 - `cargo run -p xtask -- build-all --profile release`
 - release userspace build
 - `file` and `llvm-objdump -h` for XDP and TC objects
-- `cargo audit --no-fetch -D warnings`
+- `cargo audit -D warnings`
 - `cargo deny check`
 - CLI command parse for `aegis-cli --iface lo daemon --help`
 
@@ -40,6 +45,10 @@ sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay \
   CARGO_HOME=/tmp/aegis-cargo-home \
   ./scripts/release-gates.sh privileged-lab
 ```
+
+`AEGIS_PACKET_REPLAY_DIR` is recommended for stable, archiveable evidence
+paths. If it is omitted, the privileged gate creates a `/tmp/aegis-replay.*`
+directory and prints the selected path.
 
 Required evidence:
 
@@ -57,7 +66,7 @@ and Aya success. If Aya load/attach fails, do not ship.
 
 ## Packet Replay Artifacts
 
-`AEGIS_PACKET_REPLAY_DIR` must contain one `.log` per case:
+The replay artifact directory must contain one `.log` per case:
 
 - `ipv4_pass_allowed.log`
 - `ipv4_drop_exact.log`

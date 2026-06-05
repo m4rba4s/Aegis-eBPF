@@ -179,8 +179,31 @@ capture_cleanup_state() {
   } >"$out_file" 2>&1
 }
 
+cleanup_aegis_lab_pins() {
+  local pin_dir="/sys/fs/bpf/aegis"
+  local pins=(
+    BLOCKLIST
+    ALLOWLIST
+    STATS
+    CONFIG
+    BLOCKLIST_IPV6
+    ALLOWLIST_IPV6
+    CIDR_BLOCKLIST
+    CIDR_BLOCKLIST_IPV6
+    CONN_TRACK
+    CONN_TRACK_IPV6
+  )
+
+  [[ -d "$pin_dir" ]] || return 0
+  for pin in "${pins[@]}"; do
+    rm -f "$pin_dir/$pin" 2>/dev/null
+  done
+  rmdir "$pin_dir" 2>/dev/null || true
+}
+
 non_privileged() {
   require_cmd cargo
+  local doc_target_dir="${AEGIS_DOC_TARGET_DIR:-}"
 
   run git status --short
   run rustc --version
@@ -191,7 +214,11 @@ non_privileged() {
   run cargo clippy --workspace --all-targets --all-features -- -D warnings
   run cargo test --workspace --all-features
   run cargo test --workspace --doc
-  run cargo doc --workspace --all-features --no-deps
+  if [[ -z "$doc_target_dir" ]]; then
+    doc_target_dir="$(mktemp -d /tmp/aegis-doc-target.XXXXXX)"
+    echo "AEGIS_DOC_TARGET_DIR not set; writing cargo doc artifacts to: $doc_target_dir" >&2
+  fi
+  run cargo doc --workspace --all-features --no-deps --target-dir "$doc_target_dir"
   run cargo run -p xtask -- build-all --profile release
   run cargo build --release -p aegis-cli -p aegis-cni -p xtask
 
@@ -241,11 +268,14 @@ privileged_lab() {
   local replay_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
   local lab_dir=""
   local daemon_pid=""
+  local lab_daemon_started=0
+  local cleanup_state_written=0
 
   if [[ -z "$replay_dir" ]]; then
-    echo "privileged lab requires AEGIS_PACKET_REPLAY_DIR for replay and attach evidence artifacts" >&2
-    exit 1
+    replay_dir="$(mktemp -d /tmp/aegis-replay.XXXXXX)"
+    echo "AEGIS_PACKET_REPLAY_DIR not set; writing replay and attach evidence artifacts to: $replay_dir" >&2
   fi
+  export AEGIS_PACKET_REPLAY_DIR="$replay_dir"
   mkdir -p "$replay_dir"
 
   cleanup() {
@@ -258,11 +288,24 @@ privileged_lab() {
     tc qdisc del dev "$host_if" clsact 2>/dev/null
     ip link del "$host_if" 2>/dev/null
     ip netns del "$ns" 2>/dev/null
-    # Remove pinned BPF maps left by the daemon (intentionally survives shutdown)
-    rm -rf /sys/fs/bpf/aegis 2>/dev/null
+    if [[ "$lab_daemon_started" -eq 1 ]]; then
+      cleanup_aegis_lab_pins
+    fi
     [[ -n "$lab_dir" ]] && rm -rf "$lab_dir"
+    set -e
+    return 0
   }
-  trap cleanup EXIT
+
+  cleanup_and_capture() {
+    local rc=$?
+    cleanup
+    if [[ "$cleanup_state_written" -eq 0 ]]; then
+      capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log"
+      cleanup_state_written=1
+    fi
+    exit "$rc"
+  }
+  trap cleanup_and_capture EXIT
 
   cleanup
   lab_dir=$(mktemp -d /tmp/aegis-reltest-config.XXXXXX)
@@ -296,6 +339,7 @@ privileged_lab() {
     timeout 45s "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon
   ) >"$replay_dir/aegis-daemon.log" 2>&1 &
   daemon_pid=$!
+  lab_daemon_started=1
 
   sleep 3
   if ! kill -0 "$daemon_pid" 2>/dev/null; then
@@ -329,9 +373,10 @@ privileged_lab() {
 
   capture_lab_state "$host_if" "$replay_dir/detach-state.log"
 
-  # Final cleanup runs via trap; capture state after it executes
+  # Final cleanup is manual here so replay evidence validation still runs after it.
   cleanup
   capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log"
+  cleanup_state_written=1
   # Prevent trap from running cleanup again (already done)
   daemon_pid=""
   lab_dir=""

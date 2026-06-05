@@ -9,6 +9,7 @@ logs consumed by the privileged release gate.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -27,6 +28,7 @@ IPV4_CIDR_BLOCKED = "198.51.100.20"
 IPV6_ALLOWED = "fd00:ae9:1::2"
 IPV6_EXACT_BLOCKED = "2001:db8:dead::10"
 IPV6_CIDR_BLOCKED = "2001:db8:dead::20"
+DROP_SEND_ERRNOS = {errno.ENOBUFS}
 
 
 @dataclass(frozen=True)
@@ -197,6 +199,21 @@ def first_line(text: str) -> str:
     return line[:500] if line else "unavailable"
 
 
+def wait_for_receiver_ready(receiver: subprocess.Popen[str], ready_marker: Path) -> None:
+    deadline = time.monotonic() + 2.0
+    while not ready_marker.exists():
+        if receiver.poll() is not None:
+            stdout, stderr = receiver.communicate()
+            raise RuntimeError(
+                "receiver exited before sniff setup "
+                f"rc={receiver.returncode} stdout={first_line(stdout)} stderr={first_line(stderr)}"
+            )
+        if time.monotonic() >= deadline:
+            raise RuntimeError("receiver did not become ready before packet send")
+        time.sleep(0.05)
+    time.sleep(0.1)
+
+
 def build_packet(spec: Dict[str, object], host_mac: str, peer_mac: str):
     Dot1Q, Ether, ICMP, ICMPv6EchoRequest, IP, IPOption_NOP, IPv6, Raw, _, _ = require_scapy()
 
@@ -244,25 +261,26 @@ def write_log(
     xdp_state: str,
     tc_state: str,
     interface: str,
+    error: str = "",
 ) -> None:
     log_file = out_dir / f"{case.name}.log"
+    lines = [
+        f"case: {case.name}",
+        f"packet: {case.packet}",
+        f"expected_verdict: {case.expected}",
+        f"observed_verdict: {observed}",
+        f"command: {command}",
+        f"interface: {interface}",
+        f"counters_before: {first_line(counters_before)}",
+        f"counters_after: {first_line(counters_after)}",
+        f"xdp_state: {first_line(xdp_state)}",
+        f"tc_state: {first_line(tc_state)}",
+    ]
+    if error:
+        lines.append(f"error: {first_line(error)}")
+    lines.extend([f"pass: {'true' if passed else 'false'}", ""])
     log_file.write_text(
-        "\n".join(
-            [
-                f"case: {case.name}",
-                f"packet: {case.packet}",
-                f"expected_verdict: {case.expected}",
-                f"observed_verdict: {observed}",
-                f"command: {command}",
-                f"interface: {interface}",
-                f"counters_before: {first_line(counters_before)}",
-                f"counters_after: {first_line(counters_after)}",
-                f"xdp_state: {first_line(xdp_state)}",
-                f"tc_state: {first_line(tc_state)}",
-                f"pass: {'true' if passed else 'false'}",
-                "",
-            ]
-        )
+        "\n".join(lines)
     )
 
 
@@ -301,6 +319,8 @@ def receive_one(args: argparse.Namespace) -> int:
             return IPv6 in pkt and pkt[IPv6].dst == spec["dst"]
         return False
 
+    if args.ready_marker:
+        Path(args.ready_marker).write_text("ready\n")
     packets = sniff(iface=args.iface, timeout=args.timeout, count=1, lfilter=matches)
     if packets:
         marker.write_text("received\n")
@@ -312,57 +332,92 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
     _, _, _, _, _, _, _, _, sendp, _ = require_scapy()
     out_dir = Path(args.out_dir)
     marker = Path(tempfile.mkstemp(prefix=f"{case.name}.", suffix=".seen")[1])
+    ready_marker = Path(tempfile.mkstemp(prefix=f"{case.name}.", suffix=".ready")[1])
     marker.unlink(missing_ok=True)
+    ready_marker.unlink(missing_ok=True)
+    receiver: subprocess.Popen[str] | None = None
 
-    receiver_cmd = [
-        "ip",
-        "netns",
-        "exec",
-        args.peer_ns,
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--receive-one",
-        "--iface",
-        args.peer_if,
-        "--marker",
-        str(marker),
-        "--match-json",
-        json.dumps({"family": case.spec["family"], "dst": case.spec["dst"]}),
-        "--timeout",
-        str(args.timeout),
-    ]
-    receiver = subprocess.Popen(receiver_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    time.sleep(0.2)
+    try:
+        receiver_cmd = [
+            "ip",
+            "netns",
+            "exec",
+            args.peer_ns,
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--receive-one",
+            "--iface",
+            args.peer_if,
+            "--marker",
+            str(marker),
+            "--ready-marker",
+            str(ready_marker),
+            "--match-json",
+            json.dumps({"family": case.spec["family"], "dst": case.spec["dst"]}),
+            "--timeout",
+            str(args.timeout),
+        ]
+        receiver = subprocess.Popen(receiver_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wait_for_receiver_ready(receiver, ready_marker)
 
-    counters_before = run_text(["tc", "-s", "filter", "show", "dev", args.host_if, "egress"])
-    xdp_state = run_text(["ip", "-details", "link", "show", "dev", args.host_if])
-    tc_state = run_text(["tc", "qdisc", "show", "dev", args.host_if])
+        counters_before = run_text(["tc", "-s", "filter", "show", "dev", args.host_if, "egress"])
+        xdp_state = run_text(["ip", "-details", "link", "show", "dev", args.host_if])
+        tc_state = run_text(["tc", "qdisc", "show", "dev", args.host_if])
 
-    packet = build_packet(case.spec, host_mac, peer_mac)
-    command = f"sendp({packet.summary()}, iface={args.host_if}, count=1)"
-    sendp(packet, iface=args.host_if, count=1, verbose=False)
+        packet = build_packet(case.spec, host_mac, peer_mac)
+        command = f"sendp({packet.summary()}, iface={args.host_if}, count=1)"
+        send_error = ""
+        try:
+            sendp(packet, iface=args.host_if, count=1, verbose=False)
+        except OSError as exc:
+            if exc.errno not in DROP_SEND_ERRNOS:
+                raise
+            send_error = f"sendp returned drop-like socket error: {exc}"
 
-    receiver.communicate(timeout=args.timeout + 1)
-    counters_after = run_text(["tc", "-s", "filter", "show", "dev", args.host_if, "egress"])
+        try:
+            stdout, stderr = receiver.communicate(timeout=args.timeout + 1)
+        except subprocess.TimeoutExpired:
+            receiver.kill()
+            stdout, stderr = receiver.communicate()
+            raise RuntimeError(
+                "receiver timed out after packet send "
+                f"stdout={first_line(stdout)} stderr={first_line(stderr)}"
+            )
+        counters_after = run_text(["tc", "-s", "filter", "show", "dev", args.host_if, "egress"])
 
-    seen = marker.exists()
-    marker.unlink(missing_ok=True)
+        if receiver.returncode not in (0, 1):
+            raise RuntimeError(
+                "receiver failed "
+                f"rc={receiver.returncode} stdout={first_line(stdout)} stderr={first_line(stderr)}"
+            )
 
-    observed = "pass" if seen else "drop"
-    passed = observed == case.expected
-    write_log(
-        out_dir,
-        case,
-        observed,
-        passed,
-        command,
-        counters_before,
-        counters_after,
-        xdp_state,
-        tc_state,
-        args.host_if,
-    )
-    return passed
+        seen = marker.exists()
+        observed = "pass" if seen else "drop"
+        passed = observed == case.expected
+        write_log(
+            out_dir,
+            case,
+            observed,
+            passed,
+            command,
+            counters_before,
+            counters_after,
+            xdp_state,
+            tc_state,
+            args.host_if,
+            send_error,
+        )
+        return passed
+    finally:
+        if receiver is not None and receiver.poll() is None:
+            receiver.terminate()
+            try:
+                receiver.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                receiver.kill()
+                receiver.communicate()
+        marker.unlink(missing_ok=True)
+        ready_marker.unlink(missing_ok=True)
 
 
 def run_replay(args: argparse.Namespace) -> int:
@@ -404,6 +459,7 @@ def main() -> int:
     parser.add_argument("--receive-one", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--iface", help=argparse.SUPPRESS)
     parser.add_argument("--marker", help=argparse.SUPPRESS)
+    parser.add_argument("--ready-marker", help=argparse.SUPPRESS)
     parser.add_argument("--match-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
