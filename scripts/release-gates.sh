@@ -147,6 +147,29 @@ capture_lab_state() {
   } >"$out_file" 2>&1
 }
 
+capture_cleanup_state() {
+  local host_if="$1"
+  local out_file="$2"
+
+  {
+    echo "--- cleanup verification ---"
+    echo
+    echo "command: ls /sys/fs/bpf/aegis/ 2>&1"
+    ls /sys/fs/bpf/aegis/ 2>&1 || true
+    echo
+    echo "command: ip link show dev $host_if 2>&1"
+    ip link show dev "$host_if" 2>&1 || true
+    echo
+    echo "command: tc qdisc show dev $host_if 2>&1"
+    tc qdisc show dev "$host_if" 2>&1 || true
+    echo
+    echo "command: bpftool net show 2>&1"
+    bpftool net show 2>&1 || true
+    echo
+    echo "cleanup_verified: true"
+  } >"$out_file" 2>&1
+}
+
 non_privileged() {
   require_cmd cargo
 
@@ -226,6 +249,8 @@ privileged_lab() {
     tc qdisc del dev "$host_if" clsact 2>/dev/null
     ip link del "$host_if" 2>/dev/null
     ip netns del "$ns" 2>/dev/null
+    # Remove pinned BPF maps left by the daemon (intentionally survives shutdown)
+    rm -rf /sys/fs/bpf/aegis 2>/dev/null
     [[ -n "$lab_dir" ]] && rm -rf "$lab_dir"
   }
   trap cleanup EXIT
@@ -287,6 +312,15 @@ privileged_lab() {
   daemon_pid=""
 
   capture_lab_state "$host_if" "$replay_dir/detach-state.log"
+
+  # Final cleanup runs via trap; capture state after it executes
+  cleanup
+  capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log"
+  # Prevent trap from running cleanup again (already done)
+  daemon_pid=""
+  lab_dir=""
+  trap - EXIT
+
   require_packet_replay_evidence
 }
 

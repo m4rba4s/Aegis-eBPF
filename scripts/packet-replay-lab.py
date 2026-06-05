@@ -266,6 +266,29 @@ def write_log(
     )
 
 
+def write_error_log(
+    out_dir: Path,
+    case: ReplayCase,
+    error: str,
+) -> None:
+    """Write a structured failure log when a case raises an exception."""
+    log_file = out_dir / f"{case.name}.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                f"case: {case.name}",
+                f"packet: {case.packet}",
+                f"expected_verdict: {case.expected}",
+                "observed_verdict: unknown",
+                "command: error during case execution",
+                f"error: {first_line(error)}",
+                "pass: false",
+                "",
+            ]
+        )
+    )
+
+
 def receive_one(args: argparse.Namespace) -> int:
     _, _, _, _, IP, _, IPv6, _, _, sniff = require_scapy()
     spec = json.loads(args.match_json)
@@ -354,7 +377,12 @@ def run_replay(args: argparse.Namespace) -> int:
 
     failed = []
     for case in CASES:
-        if not run_case(args, case, host_mac, peer_mac):
+        try:
+            if not run_case(args, case, host_mac, peer_mac):
+                failed.append(case.name)
+        except Exception as exc:
+            print(f"case {case.name} raised: {exc}", file=sys.stderr)
+            write_error_log(Path(args.out_dir), case, str(exc))
             failed.append(case.name)
 
     if failed:

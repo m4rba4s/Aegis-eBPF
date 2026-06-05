@@ -31,3 +31,5 @@ supported only after the listed evidence is archived for the release commit.
 - Do not claim XDP driver-mode support on a NIC without driver-mode attach logs.
 - Do not claim Kubernetes production support without node-level attach and replay artifacts.
 - Do not claim measured throughput without benchmark logs that include kernel, NIC/driver, XDP mode, CPU, packet size, rule count, pass/drop mix, pps, and command.
+- VLAN/QinQ (802.1Q/802.1ad) tagged frames are dropped fail-closed. VLAN-aware forwarding is not supported. Do not claim VLAN transparency without bounded parsing proof.
+- IPv6 enforcement covers exact IP and CIDR blocklists only. Extension header chain walking is limited to the basic `next_header` field. Do not claim full IPv6 extension header support without replay evidence covering hop-by-hop, routing, fragment, and destination options headers.
