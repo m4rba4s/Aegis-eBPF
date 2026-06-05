@@ -48,3 +48,33 @@ jobs:
         with:
           name: aegis-replay-${{ github.sha }}
           path: /tmp/aegis-replay
+
+  portable-static-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm clang libelf-dev musl-tools
+          cargo install bpf-linker --locked
+          rustup target add x86_64-unknown-linux-musl
+      - name: Build eBPF objects
+        run: cargo run -p xtask -- build-all --profile release
+      - name: Build static musl binary
+        run: cargo build --release --target x86_64-unknown-linux-musl -p aegis-cli
+      - name: Validate portability
+        run: |
+          file target/x86_64-unknown-linux-musl/release/aegis-cli
+          ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "not a dynamic executable" || ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "statically linked"
+          target/x86_64-unknown-linux-musl/release/aegis-cli --version
+      - name: Upload portable binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-portable-${{ github.sha }}
+          path: |
+            target/x86_64-unknown-linux-musl/release/aegis-cli
+            target/bpfel-unknown-none/release/aegis
+            target/bpfel-unknown-none/release/aegis-tc
+
