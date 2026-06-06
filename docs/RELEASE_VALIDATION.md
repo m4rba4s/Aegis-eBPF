@@ -17,8 +17,9 @@ CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh nonpriv
 
 `AEGIS_DOC_TARGET_DIR` may be set when the documentation output path must be
 stable. If it is omitted, the gate writes `cargo doc` output to a fresh
-`/tmp/aegis-doc-target.*` directory to avoid stale privileged artifacts in
-`target/doc`.
+`/tmp/aegis-doc-target.*` directory, then removes it after the documentation
+step, to avoid stale privileged artifacts in `target/doc` and repeated `/tmp`
+growth.
 
 Required evidence:
 
@@ -48,7 +49,8 @@ sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay \
 
 `AEGIS_PACKET_REPLAY_DIR` is recommended for stable, archiveable evidence
 paths. If it is omitted, the privileged gate creates a `/tmp/aegis-replay.*`
-directory and prints the selected path.
+directory and prints the selected path. An explicit directory must be new or
+empty so stale logs from an earlier run cannot be mixed into release evidence.
 
 Required evidence:
 
@@ -63,6 +65,32 @@ Required evidence:
 If bpftool load fails but Aya load/attach succeeds, bpftool is diagnostic for
 that object format and the release gate must archive both the bpftool failure
 and Aya success. If Aya load/attach fails, do not ship.
+
+## Pre-Release Stress Gate
+
+Run this after `privileged-lab` and before cutting a production release
+candidate. It is still lab-only and uses the same disposable veth/netns setup;
+it does not touch a production NIC.
+
+```bash
+sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay-stress \
+  AEGIS_STRESS_ITERATIONS=25 \
+  CARGO_HOME=/tmp/aegis-cargo-home \
+  ./scripts/release-gates.sh stress-lab
+```
+
+The stress gate repeats the full packet replay matrix for
+`AEGIS_STRESS_ITERATIONS` iterations after the required one-shot replay cases.
+It is a stability/enforcement stress check, not a throughput benchmark. Do not
+publish packets-per-second claims from this gate.
+
+Required stress evidence:
+
+- `stress-summary.log`
+- `case: stress_replay_matrix`
+- `stress_iterations: <AEGIS_STRESS_ITERATIONS>`
+- `stress_total_case_runs: <iterations * 14>`
+- `pass: true`
 
 ## Packet Replay Artifacts
 
@@ -132,6 +160,7 @@ A release candidate requires:
 - non-privileged gate pass on the exact commit
 - privileged verifier/load/attach/detach evidence
 - packet replay matrix pass
+- bounded stress replay matrix pass
 - deploy/install start and rollback evidence
 - supply-chain gates pass or signed waiver
 - documentation that matches the evidence

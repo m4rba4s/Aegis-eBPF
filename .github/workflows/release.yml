@@ -62,6 +62,7 @@ jobs:
             - non-privileged release gate log
             - privileged verifier/load/attach/detach log
             - packet replay artifacts for every required case
+            - bounded stress replay summary with `pass: true`
 
             ### Files
             | File | Description |

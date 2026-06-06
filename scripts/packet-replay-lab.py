@@ -199,6 +199,16 @@ def first_line(text: str) -> str:
     return line[:500] if line else "unavailable"
 
 
+def non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
 def wait_for_receiver_ready(receiver: subprocess.Popen[str], ready_marker: Path) -> None:
     deadline = time.monotonic() + 2.0
     while not ready_marker.exists():
@@ -307,6 +317,48 @@ def write_error_log(
     )
 
 
+def temp_marker_path(prefix: str, suffix: str) -> Path:
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    return Path(path)
+
+
+def write_stress_summary(
+    out_dir: Path,
+    iterations: int,
+    failures: List[str],
+    duration_seconds: float,
+    args: argparse.Namespace,
+) -> None:
+    command = (
+        "python3 scripts/packet-replay-lab.py "
+        f"--host-if {args.host_if} "
+        f"--peer-ns {args.peer_ns} "
+        f"--peer-if {args.peer_if} "
+        f"--out-dir {args.out_dir} "
+        f"--stress-iterations {iterations}"
+    )
+    passed = not failures
+    out_dir.joinpath("stress-summary.log").write_text(
+        "\n".join(
+            [
+                "case: stress_replay_matrix",
+                f"packet: bounded repeated replay of {len(CASES)} required release cases",
+                "expected_verdict: every replay case matches its expected verdict",
+                f"observed_verdict: {'pass' if passed else 'fail'}",
+                f"command: {command}",
+                f"stress_iterations: {iterations}",
+                f"stress_cases_per_iteration: {len(CASES)}",
+                f"stress_total_case_runs: {iterations * len(CASES)}",
+                f"duration_seconds: {duration_seconds:.3f}",
+                f"failures: {', '.join(failures) if failures else 'none'}",
+                f"pass: {'true' if passed else 'false'}",
+                "",
+            ]
+        )
+    )
+
+
 def receive_one(args: argparse.Namespace) -> int:
     _, _, _, _, IP, _, IPv6, _, _, sniff = require_scapy()
     spec = json.loads(args.match_json)
@@ -331,8 +383,8 @@ def receive_one(args: argparse.Namespace) -> int:
 def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac: str) -> bool:
     _, _, _, _, _, _, _, _, sendp, _ = require_scapy()
     out_dir = Path(args.out_dir)
-    marker = Path(tempfile.mkstemp(prefix=f"{case.name}.", suffix=".seen")[1])
-    ready_marker = Path(tempfile.mkstemp(prefix=f"{case.name}.", suffix=".ready")[1])
+    marker = temp_marker_path(prefix=f"{case.name}.", suffix=".seen")
+    ready_marker = temp_marker_path(prefix=f"{case.name}.", suffix=".ready")
     marker.unlink(missing_ok=True)
     ready_marker.unlink(missing_ok=True)
     receiver: subprocess.Popen[str] | None = None
@@ -420,6 +472,24 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
         ready_marker.unlink(missing_ok=True)
 
 
+def run_stress(args: argparse.Namespace, host_mac: str, peer_mac: str) -> bool:
+    failures: List[str] = []
+    start = time.monotonic()
+
+    for iteration in range(1, args.stress_iterations + 1):
+        for case in CASES:
+            try:
+                if not run_case(args, case, host_mac, peer_mac):
+                    failures.append(f"iteration={iteration}:case={case.name}")
+            except Exception as exc:
+                failures.append(f"iteration={iteration}:case={case.name}:error={first_line(str(exc))}")
+                write_error_log(Path(args.out_dir), case, str(exc))
+
+    duration = time.monotonic() - start
+    write_stress_summary(Path(args.out_dir), args.stress_iterations, failures, duration, args)
+    return not failures
+
+
 def run_replay(args: argparse.Namespace) -> int:
     require_root()
     require_lab_name(args.host_if, "host interface")
@@ -444,6 +514,19 @@ def run_replay(args: argparse.Namespace) -> int:
         print("packet replay failed cases: " + ", ".join(failed), file=sys.stderr)
         return 1
 
+    if args.stress_iterations > 0 and not run_stress(args, host_mac, peer_mac):
+        print(
+            f"packet replay stress failed; see {Path(args.out_dir) / 'stress-summary.log'}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.stress_iterations > 0:
+        print(
+            f"packet replay stress passed {args.stress_iterations} iterations; "
+            f"summary in {Path(args.out_dir) / 'stress-summary.log'}"
+        )
+
     print(f"packet replay passed {len(CASES)} cases; logs in {args.out_dir}")
     return 0
 
@@ -455,6 +538,12 @@ def main() -> int:
     parser.add_argument("--peer-if", default="aegis-peer0")
     parser.add_argument("--out-dir", default=os.environ.get("AEGIS_PACKET_REPLAY_DIR", "/tmp/aegis-replay"))
     parser.add_argument("--timeout", type=float, default=1.5)
+    parser.add_argument(
+        "--stress-iterations",
+        type=non_negative_int,
+        default=None,
+        help="run a bounded repeated replay matrix after the required one-shot cases",
+    )
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument("--receive-one", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--iface", help=argparse.SUPPRESS)
@@ -472,6 +561,12 @@ def main() -> int:
         if not args.iface or not args.marker or not args.match_json:
             raise SystemExit("--receive-one requires --iface, --marker, and --match-json")
         return receive_one(args)
+
+    if args.stress_iterations is None:
+        try:
+            args.stress_iterations = non_negative_int(os.environ.get("AEGIS_STRESS_ITERATIONS", "0"))
+        except argparse.ArgumentTypeError as exc:
+            parser.error(f"AEGIS_STRESS_ITERATIONS {exc}")
 
     return run_replay(args)
 
