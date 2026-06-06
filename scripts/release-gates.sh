@@ -531,9 +531,11 @@ privileged_lab() {
     "$replay_dir/bpftool-tc-load.log"
 
   # Runtime attach through the real loader validates Aya load/attach paths and TC setup.
+  # Scale daemon timeout: 45s base + 15s per stress iteration (14 cases × ~1s + overhead).
+  local daemon_timeout=$(( 45 + stress_iterations * 30 ))
   (
     cd "$lab_dir"
-    timeout 45s "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon
+    timeout "${daemon_timeout}s" "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon
   ) >"$replay_dir/aegis-daemon.log" 2>&1 &
   daemon_pid=$!
   lab_daemon_started=1
