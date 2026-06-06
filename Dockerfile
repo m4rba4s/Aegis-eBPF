@@ -40,6 +40,11 @@ WORKDIR /home/builder/build
 # Copy source
 COPY --chown=builder . .
 
+# Initialize the correct toolchain from rust-toolchain.toml and add targets
+RUN rustup show && \
+    rustup component add rust-src && \
+    rustup target add x86_64-unknown-linux-musl
+
 # Build eBPF programs first (XDP + TC) — must use release profile
 RUN cargo run -p xtask -- build-all --profile release
 
