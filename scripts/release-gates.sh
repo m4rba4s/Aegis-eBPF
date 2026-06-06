@@ -95,6 +95,78 @@ require_packet_replay_evidence() {
   echo "packet replay evidence artifacts present in: $evidence_dir"
 }
 
+require_stress_evidence() {
+  local expected_iterations="$1"
+  local expected_cases_per_iteration=14
+  local expected_total_case_runs=$((expected_iterations * expected_cases_per_iteration))
+  local evidence_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
+  local log_file="$evidence_dir/stress-summary.log"
+
+  if [[ -z "$evidence_dir" ]]; then
+    echo "missing stress evidence: set AEGIS_PACKET_REPLAY_DIR to the privileged lab artifact directory" >&2
+    return 1
+  fi
+
+  if [[ ! -s "$log_file" ]]; then
+    echo "missing stress replay summary: $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^case:[[:space:]]*stress_replay_matrix[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary has wrong case name: $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^stress_iterations:[[:space:]]*$expected_iterations[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary does not record expected iteration count ($expected_iterations): $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^stress_cases_per_iteration:[[:space:]]*$expected_cases_per_iteration[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary does not record $expected_cases_per_iteration cases per iteration: $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^stress_total_case_runs:[[:space:]]*$expected_total_case_runs[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary does not record expected total case runs ($expected_total_case_runs): $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^failures:[[:space:]]*none[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary records failures: $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^pass:[[:space:]]*true[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary did not record pass: true: $log_file" >&2
+    return 1
+  fi
+
+  echo "stress replay evidence artifact present in: $log_file"
+}
+
+require_clean_evidence_dir() {
+  local evidence_dir="$1"
+  local first_entry=""
+
+  if [[ -e "$evidence_dir" && ! -d "$evidence_dir" ]]; then
+    echo "privileged lab evidence path exists but is not a directory: $evidence_dir" >&2
+    return 1
+  fi
+
+  if [[ -d "$evidence_dir" ]]; then
+    if ! first_entry="$(find "$evidence_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+      echo "privileged lab could not inspect evidence directory: $evidence_dir" >&2
+      return 1
+    fi
+    if [[ -n "$first_entry" ]]; then
+      echo "privileged lab requires a new or empty evidence directory; found: $first_entry" >&2
+      echo "choose a run-specific AEGIS_PACKET_REPLAY_DIR to prevent stale evidence mixing" >&2
+      return 1
+    fi
+  fi
+}
+
 diagnostic_bpftool_load() {
   local obj="$1"
   local pin="$2"
@@ -158,17 +230,32 @@ capture_lab_state() {
 
 capture_cleanup_state() {
   local host_if="$1"
-  local out_file="$2"
+  local ns="$2"
+  local out_file="$3"
   local cleanup_ok=1
+  local netns_state=""
+  local prog_state=""
   local remaining_pin=""
 
   if [[ -d /sys/fs/bpf/aegis ]]; then
-    remaining_pin="$(find /sys/fs/bpf/aegis -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+    if ! remaining_pin="$(find /sys/fs/bpf/aegis -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+      cleanup_ok=0
+    fi
   fi
   if [[ -n "$remaining_pin" ]]; then
     cleanup_ok=0
   fi
   if ip link show dev "$host_if" >/dev/null 2>&1; then
+    cleanup_ok=0
+  fi
+  if ! netns_state="$(ip netns list 2>&1)"; then
+    cleanup_ok=0
+  elif awk '{print $1}' <<<"$netns_state" | grep -Fxq "$ns"; then
+    cleanup_ok=0
+  fi
+  if ! prog_state="$(bpftool prog show 2>&1)"; then
+    cleanup_ok=0
+  elif grep -Eq 'name (xdp_firewall|tc_egress)' <<<"$prog_state"; then
     cleanup_ok=0
   fi
 
@@ -181,11 +268,17 @@ capture_cleanup_state() {
     echo "command: ip link show dev $host_if 2>&1"
     ip link show dev "$host_if" 2>&1 || true
     echo
+    echo "command: ip netns list"
+    printf '%s\n' "$netns_state"
+    echo
     echo "command: tc qdisc show dev $host_if 2>&1"
     tc qdisc show dev "$host_if" 2>&1 || true
     echo
     echo "command: bpftool net show 2>&1"
     bpftool net show 2>&1 || true
+    echo
+    echo "command: bpftool prog show 2>&1"
+    printf '%s\n' "$prog_state"
     echo
     if [[ "$cleanup_ok" -eq 1 ]]; then
       echo "cleanup_verified: true"
@@ -230,11 +323,18 @@ cleanup_aegis_lab_pins() {
 }
 
 require_clean_privileged_lab_host() {
+  local host_if="$1"
+  local ns="$2"
   local pin_dir="/sys/fs/bpf/aegis"
   local first_pin=""
+  local netns_state=""
+  local prog_state=""
 
   if [[ -d "$pin_dir" ]]; then
-    first_pin="$(find "$pin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+    if ! first_pin="$(find "$pin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+      echo "privileged lab could not inspect Aegis bpffs state under $pin_dir" >&2
+      exit 1
+    fi
   fi
   if [[ -n "$first_pin" ]]; then
     echo "privileged lab requires a clean Aegis bpffs state; found existing pin: $first_pin" >&2
@@ -242,9 +342,29 @@ require_clean_privileged_lab_host() {
     exit 1
   fi
 
-  if bpftool prog show 2>/dev/null | grep -Eq 'name (xdp_firewall|tc_egress)'; then
+  if ! prog_state="$(bpftool prog show 2>&1)"; then
+    echo "privileged lab could not inspect loaded BPF programs: $prog_state" >&2
+    exit 1
+  fi
+  if grep -Eq 'name (xdp_firewall|tc_egress)' <<<"$prog_state"; then
     echo "privileged lab found existing Aegis BPF programs; refusing to touch shared host bpffs state" >&2
     echo "run this gate only in a disposable VM/lab host or detach/cleanup the existing Aegis instance first" >&2
+    exit 1
+  fi
+
+  if ip link show dev "$host_if" >/dev/null 2>&1; then
+    echo "privileged lab found existing interface '$host_if'; refusing to delete shared host state" >&2
+    echo "run this gate only in a disposable VM/lab host or remove the stale lab interface first" >&2
+    exit 1
+  fi
+
+  if ! netns_state="$(ip netns list 2>&1)"; then
+    echo "privileged lab could not inspect network namespaces: $netns_state" >&2
+    exit 1
+  fi
+  if awk '{print $1}' <<<"$netns_state" | grep -Fxq "$ns"; then
+    echo "privileged lab found existing network namespace '$ns'; refusing to delete shared host state" >&2
+    echo "run this gate only in a disposable VM/lab host or remove the stale lab namespace first" >&2
     exit 1
   fi
 }
@@ -252,6 +372,8 @@ require_clean_privileged_lab_host() {
 non_privileged() {
   require_cmd cargo
   local doc_target_dir="${AEGIS_DOC_TARGET_DIR:-}"
+  local doc_target_is_temporary=0
+  local doc_rc=0
 
   run git status --short
   run rustc --version
@@ -264,9 +386,20 @@ non_privileged() {
   run cargo test --workspace --doc
   if [[ -z "$doc_target_dir" ]]; then
     doc_target_dir="$(mktemp -d /tmp/aegis-doc-target.XXXXXX)"
+    doc_target_is_temporary=1
     echo "AEGIS_DOC_TARGET_DIR not set; writing cargo doc artifacts to: $doc_target_dir" >&2
   fi
-  run cargo doc --workspace --all-features --no-deps --target-dir "$doc_target_dir"
+  if run cargo doc --workspace --all-features --no-deps --target-dir "$doc_target_dir"; then
+    doc_rc=0
+  else
+    doc_rc=$?
+  fi
+  if [[ "$doc_target_is_temporary" -eq 1 ]]; then
+    rm -rf -- "$doc_target_dir"
+  fi
+  if [[ "$doc_rc" -ne 0 ]]; then
+    return "$doc_rc"
+  fi
   run cargo run -p xtask -- build-all --profile release
   run cargo build --release -p aegis-cli -p aegis-cni -p xtask
 
@@ -314,18 +447,25 @@ privileged_lab() {
   host_if="aegis-host0"
   ns_if="aegis-peer0"
   replay_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
+  stress_iterations="${AEGIS_STRESS_ITERATIONS:-0}"
   lab_dir=""
   daemon_pid=""
   lab_daemon_started=0
   cleanup_state_written=0
 
+  if [[ ! "$stress_iterations" =~ ^[0-9]+$ ]]; then
+    echo "AEGIS_STRESS_ITERATIONS must be a non-negative integer, got: $stress_iterations" >&2
+    exit 2
+  fi
+
   if [[ -z "$replay_dir" ]]; then
     replay_dir="$(mktemp -d /tmp/aegis-replay.XXXXXX)"
     echo "AEGIS_PACKET_REPLAY_DIR not set; writing replay and attach evidence artifacts to: $replay_dir" >&2
   fi
+  require_clean_evidence_dir "$replay_dir"
   export AEGIS_PACKET_REPLAY_DIR="$replay_dir"
   mkdir -p "$replay_dir"
-  require_clean_privileged_lab_host
+  require_clean_privileged_lab_host "$host_if" "$ns"
 
   cleanup() {
     set +e
@@ -351,7 +491,10 @@ privileged_lab() {
     local cleanup_rc=0
     cleanup
     if [[ "${cleanup_state_written:-0}" -eq 0 ]]; then
-      capture_cleanup_state "${host_if:-aegis-host0}" "${replay_dir:-/tmp}/cleanup-state.log" || cleanup_rc=$?
+      capture_cleanup_state \
+        "${host_if:-aegis-host0}" \
+        "${ns:-aegis-reltest}" \
+        "${replay_dir:-/tmp}/cleanup-state.log" || cleanup_rc=$?
       cleanup_state_written=1
     fi
     if [[ "$rc" -eq 0 && "$cleanup_rc" -ne 0 ]]; then
@@ -415,11 +558,18 @@ privileged_lab() {
   fi
   "$replay_dir/venv/bin/pip" install --quiet scapy
 
-  run "$replay_dir/venv/bin/python3" scripts/packet-replay-lab.py \
-    --host-if "$host_if" \
-    --peer-ns "$ns" \
-    --peer-if "$ns_if" \
+  replay_cmd=(
+    "$replay_dir/venv/bin/python3"
+    scripts/packet-replay-lab.py
+    --host-if "$host_if"
+    --peer-ns "$ns"
+    --peer-if "$ns_if"
     --out-dir "$replay_dir"
+  )
+  if (( stress_iterations > 0 )); then
+    replay_cmd+=(--stress-iterations "$stress_iterations")
+  fi
+  run "${replay_cmd[@]}"
 
   kill -TERM "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
@@ -430,7 +580,7 @@ privileged_lab() {
   # Final cleanup is manual here so replay evidence validation still runs after it.
   cleanup
   cleanup_rc=0
-  capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log" || cleanup_rc=$?
+  capture_cleanup_state "$host_if" "$ns" "$replay_dir/cleanup-state.log" || cleanup_rc=$?
   cleanup_state_written=1
   if [[ "$cleanup_rc" -ne 0 ]]; then
     exit "$cleanup_rc"
@@ -441,18 +591,27 @@ privileged_lab() {
   trap - EXIT
 
   require_packet_replay_evidence
+  if (( stress_iterations > 0 )); then
+    require_stress_evidence "$stress_iterations"
+  fi
 }
 
 case "${1:-nonpriv}" in
   nonpriv)
     non_privileged
+    exit 0
     ;;
   privileged-lab)
     non_privileged
     privileged_lab
     ;;
+  stress-lab)
+    export AEGIS_STRESS_ITERATIONS="${AEGIS_STRESS_ITERATIONS:-25}"
+    non_privileged
+    privileged_lab
+    ;;
   *)
-    echo "usage: $0 [nonpriv|privileged-lab]" >&2
+    echo "usage: $0 [nonpriv|privileged-lab|stress-lab]" >&2
     exit 2
     ;;
 esac
