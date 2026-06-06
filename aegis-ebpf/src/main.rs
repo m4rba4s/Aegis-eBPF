@@ -627,6 +627,7 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
             } else {
                 let new_state = RateLimitState {
                     tokens: MAX_TOKENS - 1,
+                    _pad: [0; 4],
                     last_update: now_ns,
                 };
                 let _ = RATE_LIMIT.insert(&src_addr, &new_state, 0);
@@ -1003,6 +1004,7 @@ fn log_packet(
         threat_type,
         hook: HOOK_XDP,
         packet_len,
+        _pad: [0; 4],
         timestamp,
     };
     if EVENTS.output(&log_entry, 0).is_ok() {
@@ -1039,6 +1041,7 @@ fn log_and_return(
         threat_type,
         hook: HOOK_XDP,
         packet_len,
+        _pad: [0; 4],
         timestamp,
     };
     if EVENTS.output(&log_entry, 0).is_ok() {
