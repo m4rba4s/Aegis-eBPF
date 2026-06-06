@@ -195,11 +195,17 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
         let _ = writeln!(buf, "# TYPE aegis_conntrack_hits_total counter");
         let _ = writeln!(buf, "aegis_conntrack_hits_total {}", s.conntrack_hits);
 
-        let _ = writeln!(buf, "# HELP aegis_events_ok_total BPF events successfully sent to userspace");
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_events_ok_total BPF events successfully sent to userspace"
+        );
         let _ = writeln!(buf, "# TYPE aegis_events_ok_total counter");
         let _ = writeln!(buf, "aegis_events_ok_total {}", s.events_ok);
 
-        let _ = writeln!(buf, "# HELP aegis_events_fail_total BPF events dropped due to RingBuffer overflow");
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_events_fail_total BPF events dropped due to RingBuffer overflow"
+        );
         let _ = writeln!(buf, "# TYPE aegis_events_fail_total counter");
         let _ = writeln!(buf, "aegis_events_fail_total {}", s.events_fail);
     } else {
