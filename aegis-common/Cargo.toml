@@ -1,6 +1,6 @@
 [package]
 name = "aegis-common"
-version = "1.0.0"
+version = "4.1.1"
 edition = "2021"
 license = "MIT"
 description = "Shared types for Aegis eBPF firewall"

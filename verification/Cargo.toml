@@ -1,6 +1,6 @@
 [package]
 name = "aegis-verification"
-version = "0.1.0"
+version = "4.1.1"
 edition = "2021"
 description = "Formal verification and testing for Aegis eBPF firewall"
 
