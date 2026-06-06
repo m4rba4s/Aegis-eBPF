@@ -47,3 +47,20 @@ pub struct Ipv6Hdr {
 impl Ipv6Hdr {
     pub const LEN: usize = 40;
 }
+
+#[repr(C)]
+#[allow(dead_code)]
+pub struct Ipv6ExtHdr {
+    pub next_header: u8,
+    pub hdr_ext_len: u8,
+}
+
+#[allow(dead_code)]
+impl Ipv6ExtHdr {
+    pub const MIN_LEN: usize = 8;
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        ((self.hdr_ext_len as usize) + 1) * 8
+    }
+}
