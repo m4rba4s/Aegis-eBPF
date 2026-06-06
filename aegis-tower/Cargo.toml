@@ -1,6 +1,6 @@
 [package]
 name = "aegis-tower"
-version = "4.1.1"
+version = "4.1.2"
 edition = "2021"
 license = "MIT"
 description = "gRPC Fleet Controller for Aegis eBPF Firewall"
