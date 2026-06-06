@@ -159,6 +159,18 @@ capture_lab_state() {
 capture_cleanup_state() {
   local host_if="$1"
   local out_file="$2"
+  local cleanup_ok=1
+  local remaining_pin=""
+
+  if [[ -d /sys/fs/bpf/aegis ]]; then
+    remaining_pin="$(find /sys/fs/bpf/aegis -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+  fi
+  if [[ -n "$remaining_pin" ]]; then
+    cleanup_ok=0
+  fi
+  if ip link show dev "$host_if" >/dev/null 2>&1; then
+    cleanup_ok=0
+  fi
 
   {
     echo "--- cleanup verification ---"
@@ -175,8 +187,14 @@ capture_cleanup_state() {
     echo "command: bpftool net show 2>&1"
     bpftool net show 2>&1 || true
     echo
-    echo "cleanup_verified: true"
+    if [[ "$cleanup_ok" -eq 1 ]]; then
+      echo "cleanup_verified: true"
+    else
+      echo "cleanup_verified: false"
+    fi
   } >"$out_file" 2>&1
+
+  [[ "$cleanup_ok" -eq 1 ]]
 }
 
 cleanup_aegis_lab_pins() {
@@ -190,6 +208,16 @@ cleanup_aegis_lab_pins() {
     ALLOWLIST_IPV6
     CIDR_BLOCKLIST
     CIDR_BLOCKLIST_IPV6
+    DPI_EVENTS
+    EGRESS_BLOCKLIST
+    EGRESS_BLOCKLIST_IPV6
+    EGRESS_CIDR_BLOCKLIST
+    EGRESS_CIDR_BLOCKLIST_IPV6
+    EVENTS
+    EVENTS_IPV6
+    GLOBAL_SYN_CTR
+    PORT_SCAN
+    RATE_LIMIT
     CONN_TRACK
     CONN_TRACK_IPV6
   )
@@ -199,6 +227,26 @@ cleanup_aegis_lab_pins() {
     rm -f "$pin_dir/$pin" 2>/dev/null
   done
   rmdir "$pin_dir" 2>/dev/null || true
+}
+
+require_clean_privileged_lab_host() {
+  local pin_dir="/sys/fs/bpf/aegis"
+  local first_pin=""
+
+  if [[ -d "$pin_dir" ]]; then
+    first_pin="$(find "$pin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true)"
+  fi
+  if [[ -n "$first_pin" ]]; then
+    echo "privileged lab requires a clean Aegis bpffs state; found existing pin: $first_pin" >&2
+    echo "run this gate only in a disposable VM/lab host or detach/cleanup the existing Aegis instance first" >&2
+    exit 1
+  fi
+
+  if bpftool prog show 2>/dev/null | grep -Eq 'name (xdp_firewall|tc_egress)'; then
+    echo "privileged lab found existing Aegis BPF programs; refusing to touch shared host bpffs state" >&2
+    echo "run this gate only in a disposable VM/lab host or detach/cleanup the existing Aegis instance first" >&2
+    exit 1
+  fi
 }
 
 non_privileged() {
@@ -277,6 +325,7 @@ privileged_lab() {
   fi
   export AEGIS_PACKET_REPLAY_DIR="$replay_dir"
   mkdir -p "$replay_dir"
+  require_clean_privileged_lab_host
 
   cleanup() {
     set +e
@@ -299,10 +348,14 @@ privileged_lab() {
 
   cleanup_and_capture() {
     local rc=$?
+    local cleanup_rc=0
     cleanup
     if [[ "${cleanup_state_written:-0}" -eq 0 ]]; then
-      capture_cleanup_state "${host_if:-aegis-host0}" "${replay_dir:-/tmp}/cleanup-state.log"
+      capture_cleanup_state "${host_if:-aegis-host0}" "${replay_dir:-/tmp}/cleanup-state.log" || cleanup_rc=$?
       cleanup_state_written=1
+    fi
+    if [[ "$rc" -eq 0 && "$cleanup_rc" -ne 0 ]]; then
+      exit "$cleanup_rc"
     fi
     exit "$rc"
   }
@@ -376,8 +429,12 @@ privileged_lab() {
 
   # Final cleanup is manual here so replay evidence validation still runs after it.
   cleanup
-  capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log"
+  cleanup_rc=0
+  capture_cleanup_state "$host_if" "$replay_dir/cleanup-state.log" || cleanup_rc=$?
   cleanup_state_written=1
+  if [[ "$cleanup_rc" -ne 0 ]]; then
+    exit "$cleanup_rc"
+  fi
   # Prevent trap from running cleanup again (already done)
   daemon_pid=""
   lab_dir=""
