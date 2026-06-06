@@ -217,7 +217,7 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
                 dst_ip: dst_addr,
                 src_port,
                 dst_port,
-                proto: next_header,
+                proto: current_nh,
                 _pad: [0u8; 3],
             };
             let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
@@ -242,7 +242,7 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
             dst_ip: dst_addr,
             src_port,
             dst_port,
-            proto: next_header,
+            proto: current_nh,
             _pad: [0u8; 3],
         };
         let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
