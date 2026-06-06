@@ -71,7 +71,6 @@ use aegis_common::{
     THREAT_BLOCKLIST,
     THREAT_FLOOD_SYN,
     THREAT_IPV6_EXT_CHAIN,
-    THREAT_IPV6_FRAGMENT,
     // Threat types - IPv4
     THREAT_NONE,
     THREAT_SCAN_NULL,
@@ -331,60 +330,11 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     let proto = unsafe { (*ipv4_hdr).proto };
     let total_len = u16::from_be(unsafe { (*ipv4_hdr).tot_len });
 
-    // Fail-closed: DROP packets with IP options (variable-length headers
-    // bypass our fixed L4 offset calculation). <0.01% of legitimate traffic.
-    let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
-    if ip_ihl != 5 {
-        return Ok(xdp_action::XDP_DROP);
-    }
-
-    // Fail-closed: DROP fragmented packets. Fragments bypass L4 port/protocol
-    // parsing, rate limiting, and scan detection. Kernel reassembly happens
-    // after XDP, so legitimate fragmented flows still complete.
-    let frag_off = u16::from_be(unsafe { (*ipv4_hdr).frag_off });
-    if (frag_off & 0x3FFF) != 0 {
-        return Ok(xdp_action::XDP_DROP);
-    }
-
-    // W-2: L4 Length Validation
-    // Ensure total_len covers at least the IP header (20) + min L4 header
-    if proto == 6 {
-        // TCP: min 20 bytes
-        if total_len < 40 {
-            return Ok(xdp_action::XDP_DROP);
-        }
-    } else if proto == 17 {
-        // UDP: min 8 bytes
-        if total_len < 28 {
-            return Ok(xdp_action::XDP_DROP);
-        }
-    }
-
-    let l4_offset = l4_base_offset;
-
     let mut src_port = 0u16;
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
 
-    if proto == 6 {
-        // TCP
-        let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
-        src_port = u16::from_be(unsafe { *src_port_ptr });
-
-        let tcp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
-        dst_port = u16::from_be(unsafe { *tcp_hdr });
-
-        let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
-        tcp_flags = unsafe { *flags_ptr };
-    } else if proto == 17 {
-        // UDP
-        let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
-        src_port = u16::from_be(unsafe { *src_port_ptr });
-
-        let udp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
-        dst_port = u16::from_be(unsafe { *udp_hdr });
-    }
-
+    // --- EARLY IPv4 BLOCKLIST/ALLOWLIST CHECKS ---
     // --- WHITELIST CHECK (EARLY) ---
     let src_octets = src_addr.to_be_bytes();
     let is_whitelisted = src_octets[0] == 10 ||  // 10.0.0.0/8
@@ -438,21 +388,6 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // established flows from blocked IPs bypass manual bans and CIDR feeds.
     // Hot-reload bans won't work on active connections without this.
 
-    // Exact match blocklist (manual blocks)
-    let key_exact_early = FlowKey {
-        src_ip: src_addr,
-        dst_port,
-        proto,
-        _pad: 0,
-    };
-    if let Some(_) = unsafe { BLOCKLIST.get(&key_exact_early) } {
-        stats_inc_block_manual();
-        return log_and_return(
-            &ctx, src_addr, dst_addr, src_port, dst_port,
-            proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK,
-            THREAT_BLOCKLIST, total_len,
-        );
-    }
 
     // Wildcard blocklist (IP-only block, any port/proto)
     let key_wild_early = FlowKey {
@@ -481,6 +416,74 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
                 THREAT_BLOCKLIST, total_len,
             );
         }
+    }
+
+
+    // Fail-closed: DROP packets with IP options (variable-length headers
+    // bypass our fixed L4 offset calculation). <0.01% of legitimate traffic.
+    let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
+    if ip_ihl != 5 {
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    // Fail-closed: DROP fragmented packets. Fragments bypass L4 port/protocol
+    // parsing, rate limiting, and scan detection. Kernel reassembly happens
+    // after XDP, so legitimate fragmented flows still complete.
+    let frag_off = u16::from_be(unsafe { (*ipv4_hdr).frag_off });
+    if (frag_off & 0x3FFF) != 0 {
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    // W-2: L4 Length Validation
+    // Ensure total_len covers at least the IP header (20) + min L4 header
+    if proto == 6 {
+        // TCP: min 20 bytes
+        if total_len < 40 {
+            return Ok(xdp_action::XDP_DROP);
+        }
+    } else if proto == 17 {
+        // UDP: min 8 bytes
+        if total_len < 28 {
+            return Ok(xdp_action::XDP_DROP);
+        }
+    }
+
+    let l4_offset = l4_base_offset;
+
+
+    if proto == 6 {
+        // TCP
+        let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *src_port_ptr });
+
+        let tcp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
+        dst_port = u16::from_be(unsafe { *tcp_hdr });
+
+        let flags_ptr: *const u8 = ptr_at(&ctx, l4_offset + 13)?;
+        tcp_flags = unsafe { *flags_ptr };
+    } else if proto == 17 {
+        // UDP
+        let src_port_ptr: *const u16 = ptr_at(&ctx, l4_offset)?;
+        src_port = u16::from_be(unsafe { *src_port_ptr });
+
+        let udp_hdr: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
+        dst_port = u16::from_be(unsafe { *udp_hdr });
+    }
+
+    // Exact match blocklist (manual blocks)
+    let key_exact = FlowKey {
+        src_ip: src_addr,
+        dst_port,
+        proto,
+        _pad: 0,
+    };
+    if let Some(_) = unsafe { BLOCKLIST.get(&key_exact) } {
+        stats_inc_block_manual();
+        return log_and_return(
+            &ctx, src_addr, dst_addr, src_port, dst_port,
+            proto, tcp_flags, ACTION_DROP, REASON_MANUAL_BLOCK,
+            THREAT_BLOCKLIST, total_len,
+        );
     }
 
     // XDP stays stateless: stateful inspection/conntrack is owned by TC.
@@ -680,11 +683,64 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
+    let mut src_port = 0u16;
+    let mut dst_port = 0u16;
+    let mut tcp_flags = 0u8;
+    let mut ext_hdr_count: u8 = 0;
+
+    // --- EARLY IPv6 BLOCKLIST/ALLOWLIST CHECKS ---
+    // --- IPv6 WHITELIST (Link-local, Loopback, Multicast) ---
+    // Link-local: fe80::/10
+    // Loopback: ::1
+    // Multicast: ff00::/8
+    let is_whitelisted = (src_addr[0] == 0xfe && (src_addr[1] & 0xc0) == 0x80) ||  // Link-local
+        (src_addr == [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]) ||        // ::1
+        (src_addr[0] == 0xff); // Multicast
+
+    // --- DYNAMIC ALLOWLIST ---
+    if unsafe { ALLOWLIST_IPV6.get(&src_addr).is_some() } {
+        stats_inc_ipv6_pass();
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    if is_whitelisted {
+        stats_inc_ipv6_pass();
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // --- IPv6 CIDR BLOCKLIST ---
+    if is_module_enabled(CFG_THREAT_FEEDS) {
+        let cidr_key = Key::new(
+            128,
+            LpmKeyIpv6 {
+                addr: src_addr,
+            },
+        );
+
+        if let Some(_entry) = CIDR_BLOCKLIST_IPV6.get(&cidr_key) {
+            stats_inc_ipv6_drop();
+            stats_inc_block_cidr();
+            return log_ipv6_drop(
+                ctx,
+                &src_addr,
+                &dst_addr,
+                src_port,
+                dst_port,
+                next_header,
+                tcp_flags,
+                REASON_CIDR_FEED,
+                THREAT_BLOCKLIST,
+                payload_len,
+                ext_hdr_count,
+            );
+        }
+    }
+
+
     // --- EXTENSION HEADER HANDLING ---
     let mut current_nh = next_header;
     let mut l4_offset = ip_offset + Ipv6Hdr::LEN;
     let mut is_valid_l4 = false;
-    let mut ext_hdr_count: u8 = 0;
 
     // Bounded loop: parse up to 4 extension headers.
     // The verifier accepts this because the loop is unrolled, and ptr_at internally
@@ -696,12 +752,9 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 break;
             }
             NEXTHDR_FRAGMENT => {
-                // W-1: Drop all IPv6 fragments at XDP
-                stats_inc_ipv6_drop();
-                return log_ipv6_drop(
-                    ctx, &src_addr, &dst_addr, 0, 0, current_nh, 0,
-                    REASON_IPV6_POLICY, THREAT_IPV6_FRAGMENT, payload_len, ext_hdr_count,
-                );
+                // IP checks passed earlier. Let the kernel reassemble fragments.
+                // We cannot track L4 state for fragments, so we PASS them.
+                return Ok(xdp_action::XDP_PASS);
             }
             NEXTHDR_AUTH => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(ctx, l4_offset)?;
@@ -749,9 +802,6 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     }
 
     let next_header = current_nh;
-    let mut src_port = 0u16;
-    let mut dst_port = 0u16;
-    let mut tcp_flags = 0u8;
 
     if next_header == NEXTHDR_TCP {
         let sp: *const u16 = ptr_at(ctx, l4_offset)?;
@@ -765,53 +815,6 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
         src_port = u16::from_be(unsafe { *sp });
         let dp: *const u16 = ptr_at(ctx, l4_offset + 2)?;
         dst_port = u16::from_be(unsafe { *dp });
-    }
-
-    // --- IPv6 WHITELIST (Link-local, Loopback, Multicast) ---
-    // Link-local: fe80::/10
-    // Loopback: ::1
-    // Multicast: ff00::/8
-    let is_whitelisted = (src_addr[0] == 0xfe && (src_addr[1] & 0xc0) == 0x80) ||  // Link-local
-        (src_addr == [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]) ||        // ::1
-        (src_addr[0] == 0xff); // Multicast
-
-    // --- DYNAMIC ALLOWLIST ---
-    if unsafe { ALLOWLIST_IPV6.get(&src_addr).is_some() } {
-        stats_inc_ipv6_pass();
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    if is_whitelisted {
-        stats_inc_ipv6_pass();
-        return Ok(xdp_action::XDP_PASS);
-    }
-
-    // --- IPv6 CIDR BLOCKLIST ---
-    if is_module_enabled(CFG_THREAT_FEEDS) {
-        let cidr_key = Key::new(
-            128,
-            LpmKeyIpv6 {
-                addr: src_addr,
-            },
-        );
-
-        if let Some(_entry) = CIDR_BLOCKLIST_IPV6.get(&cidr_key) {
-            stats_inc_ipv6_drop();
-            stats_inc_block_cidr();
-            return log_ipv6_drop(
-                ctx,
-                &src_addr,
-                &dst_addr,
-                src_port,
-                dst_port,
-                next_header,
-                tcp_flags,
-                REASON_CIDR_FEED,
-                THREAT_BLOCKLIST,
-                payload_len,
-                ext_hdr_count,
-            );
-        }
     }
 
     // --- IPv6 EXACT BLOCKLIST ---
