@@ -66,7 +66,6 @@ use aegis_common::{
     NEXTHDR_ROUTING,
     REASON_IPV6_POLICY,
     THREAT_IPV6_EXT_CHAIN,
-    THREAT_IPV6_FRAGMENT,
 };
 
 // ============================================================
@@ -166,11 +165,9 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
                 break;
             }
             NEXTHDR_FRAGMENT => {
-                // Drop all IPv6 fragments to prevent evasion
-                return log_ipv6_drop_tc(
-                    &dst_addr, current_nh, REASON_IPV6_POLICY,
-                    THREAT_IPV6_FRAGMENT, payload_len
-                );
+                // IP checks passed earlier. Let the kernel reassemble fragments.
+                // We cannot track L4 state for fragments, so we PASS them.
+                return Ok(TC_ACT_OK);
             }
             NEXTHDR_AUTH => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(&ctx, l4_offset)?;

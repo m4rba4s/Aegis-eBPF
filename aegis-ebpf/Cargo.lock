@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "aegis-common"
-version = "1.0.0"
+version = "4.1.5"
 
 [[package]]
 name = "aegis-ebpf"
-version = "1.0.0"
+version = "4.1.5"
 dependencies = [
  "aegis-common",
  "aya-ebpf",
