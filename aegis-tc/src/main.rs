@@ -19,7 +19,7 @@ use aya_ebpf::{
     },
     programs::TcContext,
 };
-use headers::{EthHdr, Ipv4Hdr, Ipv6Hdr, ETH_P_IP, ETH_P_IPV6};
+use headers::{EthHdr, Ipv4Hdr, Ipv6Hdr, Ipv6ExtHdr, ETH_P_IP, ETH_P_IPV6};
 use parsing::ptr_at;
 
 // ============================================================
@@ -57,6 +57,16 @@ use aegis_common::{
     NEXTHDR_UDP,
     PORT_SCAN_THRESHOLD,
     PORT_SCAN_WINDOW_NS,
+    NEXTHDR_AUTH,
+    NEXTHDR_DEST,
+    NEXTHDR_FRAGMENT,
+    NEXTHDR_HOP,
+    NEXTHDR_ICMPV6,
+    NEXTHDR_NONE,
+    NEXTHDR_ROUTING,
+    REASON_IPV6_POLICY,
+    THREAT_IPV6_EXT_CHAIN,
+    THREAT_IPV6_FRAGMENT,
 };
 
 // ============================================================
@@ -144,9 +154,53 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
         return Ok(TC_ACT_SHOT);
     }
 
-    let l4_offset = ip_offset + Ipv6Hdr::LEN;
+    // --- EXTENSION HEADER HANDLING ---
+    let mut current_nh = next_header;
+    let mut l4_offset = ip_offset + Ipv6Hdr::LEN;
+    let mut is_valid_l4 = false;
 
-    if next_header == NEXTHDR_TCP {
+    for _ in 0..4 {
+        match current_nh {
+            NEXTHDR_TCP | NEXTHDR_UDP | NEXTHDR_ICMPV6 => {
+                is_valid_l4 = true;
+                break;
+            }
+            NEXTHDR_FRAGMENT => {
+                // Drop all IPv6 fragments to prevent evasion
+                return log_ipv6_drop_tc(
+                    &dst_addr, current_nh, REASON_IPV6_POLICY,
+                    THREAT_IPV6_FRAGMENT, payload_len
+                );
+            }
+            NEXTHDR_AUTH => {
+                let ext_hdr: *const Ipv6ExtHdr = ptr_at(&ctx, l4_offset)?;
+                current_nh = unsafe { (*ext_hdr).next_header };
+                let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
+                l4_offset += ((ext_len as usize) + 2) * 4;
+            }
+            NEXTHDR_HOP | NEXTHDR_ROUTING | NEXTHDR_DEST => {
+                let ext_hdr: *const Ipv6ExtHdr = ptr_at(&ctx, l4_offset)?;
+                current_nh = unsafe { (*ext_hdr).next_header };
+                let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
+                l4_offset += ((ext_len as usize) + 1) * 8;
+            }
+            NEXTHDR_NONE => {
+                break;
+            }
+            _ => {
+                break;
+            }
+        }
+    }
+
+    if !is_valid_l4 {
+        return log_ipv6_drop_tc(
+            &dst_addr, current_nh, REASON_IPV6_POLICY,
+            THREAT_IPV6_EXT_CHAIN, payload_len
+        );
+    }
+
+    if current_nh == NEXTHDR_TCP {
         let sp: *const u16 = ptr_at(&ctx, l4_offset)?;
         let src_port = u16::from_be(unsafe { *sp });
         let dp: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
@@ -177,7 +231,7 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
             };
             let _ = CONN_TRACK_IPV6.insert(&conn_key, &new_state, 0);
         }
-    } else if next_header == NEXTHDR_UDP {
+    } else if current_nh == NEXTHDR_UDP {
         let sp: *const u16 = ptr_at(&ctx, l4_offset)?;
         let src_port = u16::from_be(unsafe { *sp });
         let dp: *const u16 = ptr_at(&ctx, l4_offset + 2)?;
@@ -231,6 +285,37 @@ fn log_ipv6_egress_block(dst_addr: &Ipv6Addr, payload_len: u16) {
         timestamp,
     };
     let _ = EVENTS.output(&log_entry, 0);
+}
+
+#[inline(always)]
+fn log_ipv6_drop_tc(
+    dst_addr: &Ipv6Addr,
+    proto: u8,
+    reason: u8,
+    threat_type: u8,
+    payload_len: u16,
+) -> Result<i32, ()> {
+    let timestamp = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    let dst_ip_tail = u32::from_be_bytes([
+        dst_addr[12], dst_addr[13], dst_addr[14], dst_addr[15],
+    ]);
+    let log_entry = PacketLog {
+        src_ip: 0,
+        dst_ip: dst_ip_tail,
+        src_port: 0,
+        dst_port: 0,
+        proto,
+        tcp_flags: 0,
+        action: ACTION_DROP,
+        reason,
+        threat_type,
+        hook: HOOK_TC_EGRESS,
+        packet_len: payload_len,
+        _pad: [0; 4],
+        timestamp,
+    };
+    let _ = EVENTS.output(&log_entry, 0);
+    Ok(TC_ACT_SHOT)
 }
 
 fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
