@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y \
     libelf-dev \
     pkg-config \
     musl-tools \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # Install nightly Rust (required for eBPF cross-compilation) + musl target
