@@ -170,7 +170,7 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
             let new_state = ConnTrackState {
                 state: CONN_SYN_SENT,
                 direction: 0,
-                _pad: [0u8; 2],
+                _pad: [0u8; 6],
                 last_seen: now_ns,
                 packets: 1,
                 bytes: payload_len as u32,
@@ -195,7 +195,7 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
         let new_state = ConnTrackState {
             state: CONN_SYN_SENT,
             direction: 0,
-            _pad: [0u8; 2],
+            _pad: [0u8; 6],
             last_seen: now_ns,
             packets: 1,
             bytes: payload_len as u32,
@@ -227,6 +227,7 @@ fn log_ipv6_egress_block(dst_addr: &Ipv6Addr, payload_len: u16) {
         threat_type: THREAT_EGRESS_BLOCKED,
         hook: HOOK_TC_EGRESS,
         packet_len: payload_len,
+        _pad: [0; 4],
         timestamp,
     };
     let _ = EVENTS.output(&log_entry, 0);
@@ -394,8 +395,8 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
                 let mut new_state = PortScanState {
                     port_bitmap: [0u32; 8],
                     port_count: 1,
-                    first_seen: now_ns,
                     _pad: [0u8; 6],
+                    first_seen: now_ns,
                 };
                 if bitmap_index < 8 {
                     new_state.port_bitmap[bitmap_index] = 1u32 << bit_position;
@@ -426,7 +427,7 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
             let new_state = ConnTrackState {
                 state: CONN_SYN_SENT,
                 direction: 0, // Outgoing
-                _pad: [0u8; 2],
+                _pad: [0u8; 6],
                 last_seen: now_ns,
                 packets: 1,
                 bytes: total_len as u32,
@@ -474,7 +475,7 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
         let new_state = ConnTrackState {
             state: CONN_SYN_SENT, // Pseudo-state for UDP
             direction: 0,
-            _pad: [0u8; 2],
+            _pad: [0u8; 6],
             last_seen: now_ns,
             packets: 1,
             bytes: total_len as u32,
@@ -512,6 +513,7 @@ fn log_and_drop(
         threat_type,
         hook: HOOK_TC_EGRESS,
         packet_len,
+        _pad: [0; 4],
         timestamp,
     };
     let _ = EVENTS.output(&log_entry, 0);
@@ -542,6 +544,7 @@ fn log_pass(
         threat_type: THREAT_NONE,
         hook: HOOK_TC_EGRESS,
         packet_len,
+        _pad: [0; 4],
         timestamp,
     };
     let _ = EVENTS.output(&log_entry, 0);

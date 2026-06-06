@@ -55,6 +55,7 @@ fuzz_target!(|data: &[u8]| {
 
     let mut state = RateLimitState {
         tokens: clamped_tokens,
+        _pad: [0; 4],
         last_update: initial_time,
     };
 
@@ -81,6 +82,7 @@ fuzz_target!(|data: &[u8]| {
     // Simulate rapid fire (many requests in short time)
     state = RateLimitState {
         tokens: MAX_TOKENS,
+        _pad: [0; 4],
         last_update: 0,
     };
 
@@ -112,6 +114,7 @@ fuzz_target!(|data: &[u8]| {
     // Test edge case: time overflow protection
     let edge_state = RateLimitState {
         tokens: 0,
+        _pad: [0; 4],
         last_update: u64::MAX - 1000,
     };
     let (final_state, _) = simulate_rate_limit(edge_state, u64::MAX, true);

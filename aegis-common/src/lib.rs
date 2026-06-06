@@ -37,6 +37,7 @@ pub struct PacketLog {
     pub threat_type: u8, // 1  Threat category (THREAT_* constants)
     pub hook: u8,        // 1  Hook point (HOOK_* constants)
     pub packet_len: u16, // 2  Packet length
+    pub _pad: [u8; 4],   // 4  Padding for 8-byte alignment
     pub timestamp: u64,  // 8  Kernel timestamp (nanoseconds)
 } // Total: 32 bytes
 
@@ -127,7 +128,7 @@ pub struct ConnTrackKey {
 pub struct ConnTrackState {
     pub state: u8,      // Connection state (CONN_* constants)
     pub direction: u8,  // 0 = outgoing (we initiated), 1 = incoming
-    pub _pad: [u8; 2],  // Padding
+    pub _pad: [u8; 6],  // Padding for 8-byte alignment
     pub last_seen: u64, // Last packet timestamp (ns)
     pub packets: u32,   // Packet count
     pub bytes: u32,     // Byte count
@@ -183,6 +184,7 @@ pub const CAT_MANUAL: u8 = 5;
 #[repr(C)]
 pub struct RateLimitState {
     pub tokens: u32,      // Current tokens available
+    pub _pad: [u8; 4],    // Padding for 8-byte alignment
     pub last_update: u64, // Last refill timestamp (ns)
 }
 
@@ -197,8 +199,8 @@ pub struct RateLimitState {
 pub struct PortScanState {
     pub port_bitmap: [u32; 8], // 256 bits = ports 0-255 bitmap
     pub port_count: u16,       // Count of unique ports accessed
+    pub _pad: [u8; 6],         // Padding for 8-byte alignment
     pub first_seen: u64,       // First packet timestamp (ns)
-    pub _pad: [u8; 6],         // Padding for alignment
 }
 
 // ============================================================
