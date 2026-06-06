@@ -467,7 +467,6 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHostname=true
 ProtectClock=true
-ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
@@ -483,8 +482,8 @@ SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Capability restrictions
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN
 
 [Install]
 WantedBy=multi-user.target
