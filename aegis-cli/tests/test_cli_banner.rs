@@ -11,7 +11,7 @@ fn test_cli_completions_no_banner() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // The banner contains the following string, it must NOT be in the completions output
     assert!(!stdout.contains("AEGIS eBPF FIREWALL"));
     assert!(!stdout.contains("██████"));
@@ -23,7 +23,7 @@ fn test_cli_completions_no_banner() {
 #[test]
 fn test_cli_manpage_no_banner() {
     let cargo_bin = env!("CARGO_BIN_EXE_aegis-cli");
-    
+
     let temp_dir = std::env::temp_dir();
     let man_path = temp_dir.join("aegis_man_test");
     std::fs::create_dir_all(&man_path).unwrap();
@@ -36,7 +36,7 @@ fn test_cli_manpage_no_banner() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // The banner should NOT be in the stdout
     assert!(!stdout.contains("AEGIS eBPF FIREWALL"));
     assert!(!stdout.contains("██████"));
