@@ -45,9 +45,9 @@
 
 To maintain transparency as a security tool, features are strictly categorized by their current validation status:
 
-### Implemented & Lab-Validated
-- **XDP Ingress Filtering** — Drop packets at NIC driver level based on IP/CIDR blocklists
-- **TC Egress Filtering** — Block outbound connections to malicious destinations
+### Implemented (Release Evidence Pending)
+- **XDP Ingress Filtering** — Policy path implemented for NIC-driver/SKB attach modes; current release requires privileged verifier/load/attach and replay evidence before production claims.
+- **TC Egress Filtering** — Egress policy path implemented; current release requires TC attach and replay evidence before production claims.
 - **IPv4 + IPv6 Basic Filtering** — Dual-stack support with strict IP/CIDR blocklists
 - **IP Allowlist** — Trusted IPs bypass checks
 - **CIDR Blocklists** — LPM Trie matching
