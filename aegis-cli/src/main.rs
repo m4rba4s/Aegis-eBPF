@@ -279,8 +279,11 @@ async fn main() -> Result<(), anyhow::Error> {
         std::process::exit(1);
     }
 
-    // Banner shown conditionally (not for TUI - it has its own header)
-    if !matches!(opt.command, Commands::Tui) {
+    // Banner shown conditionally (not for TUI, Completions, or Manpage)
+    if !matches!(
+        opt.command,
+        Commands::Tui | Commands::Completions { .. } | Commands::Manpage { .. }
+    ) {
         println!(
             r#"
     ██████╗ ███████╗ ██████╗ ██╗███████╗
