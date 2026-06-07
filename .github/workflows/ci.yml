@@ -16,7 +16,7 @@ jobs:
       - name: Install release gate tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y file llvm
+          sudo apt-get install -y file llvm python3-scapy
           cargo install bpf-linker --locked
           cargo install cargo-audit --locked
           cargo install cargo-deny --locked
@@ -24,13 +24,43 @@ jobs:
       - name: Non-privileged release gate
         run: ./scripts/release-gates.sh nonpriv
       - name: Verification crate tests
-        run: cargo test --manifest-path verification/Cargo.toml
+        run: |
+          cargo fmt --manifest-path verification/Cargo.toml --all -- --check
+          cargo clippy --manifest-path verification/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --manifest-path verification/Cargo.toml
+      - name: Verification fuzz target checks
+        run: |
+          cargo fmt --manifest-path verification/fuzz/Cargo.toml --all -- --check
+          cargo clippy --manifest-path verification/fuzz/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: CLI config fuzz target checks
+        run: |
+          cargo fmt --manifest-path aegis-cli/fuzz/Cargo.toml --all -- --check
+          cargo clippy --locked --manifest-path aegis-cli/fuzz/Cargo.toml --all-targets --all-features -- -D warnings
       - name: Shell syntax
-        run: bash -n install.sh deploy/deploy.sh scripts/release-gates.sh
+        run: bash -n install.sh deploy/deploy.sh scripts/check-tla.sh scripts/release-gates.sh verify.sh
       - name: Packet replay driver syntax
         run: |
           python3 -m py_compile scripts/packet-replay-lab.py
-          python3 scripts/packet-replay-lab.py --list-cases
+          test "$(python3 scripts/packet-replay-lab.py --list-cases | wc -l)" -eq 18
+          python3 scripts/packet-replay-lab.py --validate-packets
+
+  formal-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install formal verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y default-jre-headless
+          cargo install kani-verifier --version 0.67.0 --locked
+          cargo kani setup
+          curl -fL https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o /tmp/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  /tmp/tla2tools.jar" | sha256sum -c -
+      - name: Kani proofs
+        run: ./verify.sh kani
+      - name: TLA+ model checking
+        run: TLA2TOOLS_JAR=/tmp/tla2tools.jar ./verify.sh tla
 
   privileged-runtime-lab:
     if: github.event_name == 'workflow_dispatch'

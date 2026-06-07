@@ -124,6 +124,54 @@ CASES: List[ReplayCase] = [
         "drop",
         {"family": "ipv4", "dst": IPV4_CIDR_BLOCKED, "proto": "udp_truncated"},
     ),
+    ReplayCase(
+        "xdp_ipv4_pass_allowed",
+        "ingress IPv4 ICMP packet from an allowed public source",
+        "pass",
+        {
+            "direction": "ingress",
+            "family": "ipv4",
+            "src": "203.0.113.2",
+            "dst": "10.200.0.1",
+            "proto": "icmp",
+        },
+    ),
+    ReplayCase(
+        "xdp_ipv4_drop_exact",
+        "ingress IPv4 ICMP packet from the exact blocked source",
+        "drop",
+        {
+            "direction": "ingress",
+            "family": "ipv4",
+            "src": IPV4_EXACT_BLOCKED,
+            "dst": "10.200.0.1",
+            "proto": "icmp",
+        },
+    ),
+    ReplayCase(
+        "xdp_ipv6_fragment_pass",
+        "ingress IPv6 first fragment; current policy allows kernel reassembly",
+        "pass",
+        {
+            "direction": "ingress",
+            "family": "ipv6",
+            "src": "2001:db8:1::2",
+            "dst": "fd00:ae9:1::1",
+            "proto": "icmp6_fragment",
+        },
+    ),
+    ReplayCase(
+        "xdp_ipv6_malformed_extension_drop",
+        "ingress IPv6 packet with an out-of-bounds extension-header length",
+        "drop",
+        {
+            "direction": "ingress",
+            "family": "ipv6",
+            "src": "2001:db8:2::2",
+            "dst": "fd00:ae9:1::1",
+            "proto": "icmp6_malformed_hop",
+        },
+    ),
 ]
 
 
@@ -137,6 +185,7 @@ def require_scapy():
             IP,
             IPOption_NOP,
             IPv6,
+            IPv6ExtHdrFragment,
             Raw,
             conf,
             sendp,
@@ -155,7 +204,19 @@ def require_scapy():
         raise SystemExit(127)
 
     conf.verb = 0
-    return Dot1Q, Ether, ICMP, ICMPv6EchoRequest, IP, IPOption_NOP, IPv6, Raw, sendp, sniff
+    return (
+        Dot1Q,
+        Ether,
+        ICMP,
+        ICMPv6EchoRequest,
+        IP,
+        IPOption_NOP,
+        IPv6,
+        IPv6ExtHdrFragment,
+        Raw,
+        sendp,
+        sniff,
+    )
 
 
 def run_text(cmd: List[str]) -> str:
@@ -225,9 +286,25 @@ def wait_for_receiver_ready(receiver: subprocess.Popen[str], ready_marker: Path)
 
 
 def build_packet(spec: Dict[str, object], host_mac: str, peer_mac: str):
-    Dot1Q, Ether, ICMP, ICMPv6EchoRequest, IP, IPOption_NOP, IPv6, Raw, _, _ = require_scapy()
+    (
+        Dot1Q,
+        Ether,
+        ICMP,
+        ICMPv6EchoRequest,
+        IP,
+        IPOption_NOP,
+        IPv6,
+        IPv6ExtHdrFragment,
+        Raw,
+        _,
+        _,
+    ) = require_scapy()
 
-    pkt = Ether(src=host_mac, dst=peer_mac)
+    direction = spec.get("direction", "egress")
+    if direction == "ingress":
+        pkt = Ether(src=peer_mac, dst=host_mac)
+    else:
+        pkt = Ether(src=host_mac, dst=peer_mac)
     for vlan_id in spec.get("vlan", []):
         pkt = pkt / Dot1Q(vlan=int(vlan_id))
 
@@ -235,7 +312,7 @@ def build_packet(spec: Dict[str, object], host_mac: str, peer_mac: str):
     proto = spec["proto"]
     if family == "ipv4":
         ip_kwargs: Dict[str, object] = {
-            "src": "10.200.0.1",
+            "src": str(spec.get("src", "10.200.0.1")),
             "dst": str(spec["dst"]),
             "ttl": 64,
         }
@@ -251,11 +328,23 @@ def build_packet(spec: Dict[str, object], host_mac: str, peer_mac: str):
         return pkt / IP(**ip_kwargs) / ICMP(id=0xA69, seq=1)
 
     if family == "ipv6":
-        return (
-            pkt
-            / IPv6(src="fd00:ae9:1::1", dst=str(spec["dst"]), hlim=64)
-            / ICMPv6EchoRequest(id=0xA69, seq=1)
+        ipv6 = IPv6(
+            src=str(spec.get("src", "fd00:ae9:1::1")),
+            dst=str(spec["dst"]),
+            hlim=64,
         )
+        if proto == "icmp6_fragment":
+            return (
+                pkt
+                / ipv6
+                / IPv6ExtHdrFragment(nh=58, id=0xAE61, offset=0, m=1)
+                / ICMPv6EchoRequest(id=0xA69, seq=1)
+            )
+        if proto == "icmp6_malformed_hop":
+            return pkt / IPv6(src=ipv6.src, dst=ipv6.dst, hlim=64, nh=0) / Raw(
+                bytes([58, 255]) + bytes(6)
+            )
+        return pkt / ipv6 / ICMPv6EchoRequest(id=0xA69, seq=1)
 
     raise SystemExit(f"unknown packet family: {family}")
 
@@ -274,12 +363,16 @@ def write_log(
     error: str = "",
 ) -> None:
     log_file = out_dir / f"{case.name}.log"
+    direction = str(case.spec.get("direction", "egress"))
+    hook = "xdp" if direction == "ingress" else "tc_egress"
     lines = [
         f"case: {case.name}",
         f"packet: {case.packet}",
         f"expected_verdict: {case.expected}",
         f"observed_verdict: {observed}",
         f"command: {command}",
+        f"direction: {direction}",
+        f"hook: {hook}",
         f"interface: {interface}",
         f"counters_before: {first_line(counters_before)}",
         f"counters_after: {first_line(counters_after)}",
@@ -301,6 +394,8 @@ def write_error_log(
 ) -> None:
     """Write a structured failure log when a case raises an exception."""
     log_file = out_dir / f"{case.name}.log"
+    direction = str(case.spec.get("direction", "egress"))
+    hook = "xdp" if direction == "ingress" else "tc_egress"
     log_file.write_text(
         "\n".join(
             [
@@ -309,6 +404,8 @@ def write_error_log(
                 f"expected_verdict: {case.expected}",
                 "observed_verdict: unknown",
                 "command: error during case execution",
+                f"direction: {direction}",
+                f"hook: {hook}",
                 f"error: {first_line(error)}",
                 "pass: false",
                 "",
@@ -360,15 +457,23 @@ def write_stress_summary(
 
 
 def receive_one(args: argparse.Namespace) -> int:
-    _, _, _, _, IP, _, IPv6, _, _, sniff = require_scapy()
+    _, _, _, _, IP, _, IPv6, _, _, _, sniff = require_scapy()
     spec = json.loads(args.match_json)
     marker = Path(args.marker)
 
     def matches(pkt) -> bool:
         if spec["family"] == "ipv4":
-            return IP in pkt and pkt[IP].dst == spec["dst"]
+            return (
+                IP in pkt
+                and pkt[IP].dst == spec["dst"]
+                and ("src" not in spec or pkt[IP].src == spec["src"])
+            )
         if spec["family"] == "ipv6":
-            return IPv6 in pkt and pkt[IPv6].dst == spec["dst"]
+            return (
+                IPv6 in pkt
+                and pkt[IPv6].dst == spec["dst"]
+                and ("src" not in spec or pkt[IPv6].src == spec["src"])
+            )
         return False
 
     if args.ready_marker:
@@ -380,8 +485,34 @@ def receive_one(args: argparse.Namespace) -> int:
     return 1
 
 
+def send_one(args: argparse.Namespace) -> int:
+    if not args.iface or not args.spec_json or not args.host_mac or not args.peer_mac:
+        raise SystemExit(
+            "--send-one requires --iface, --spec-json, --host-mac, and --peer-mac"
+        )
+    require_root()
+    require_lab_name(args.iface, "send interface")
+    spec = json.loads(args.spec_json)
+    packet = build_packet(spec, args.host_mac, args.peer_mac)
+    *_, sendp, _ = require_scapy()
+    sendp(packet, iface=args.iface, count=1, verbose=False)
+    return 0
+
+
+def validate_packets() -> int:
+    host_mac = "02:00:00:00:00:01"
+    peer_mac = "02:00:00:00:00:02"
+    for case in CASES:
+        packet = build_packet(case.spec, host_mac, peer_mac)
+        raw = bytes(packet)
+        if not raw:
+            raise SystemExit(f"packet case serialized to zero bytes: {case.name}")
+        print(f"{case.name}: {len(raw)} bytes: {packet.summary()}")
+    return 0
+
+
 def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac: str) -> bool:
-    _, _, _, _, _, _, _, _, sendp, _ = require_scapy()
+    *_, sendp, _ = require_scapy()
     out_dir = Path(args.out_dir)
     marker = temp_marker_path(prefix=f"{case.name}.", suffix=".seen")
     ready_marker = temp_marker_path(prefix=f"{case.name}.", suffix=".ready")
@@ -390,25 +521,33 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
     receiver: subprocess.Popen[str] | None = None
 
     try:
-        receiver_cmd = [
-            "ip",
-            "netns",
-            "exec",
-            args.peer_ns,
+        direction = str(case.spec.get("direction", "egress"))
+        receive_cmd = [
             sys.executable,
             str(Path(__file__).resolve()),
             "--receive-one",
             "--iface",
-            args.peer_if,
+            args.peer_if if direction == "egress" else args.host_if,
             "--marker",
             str(marker),
             "--ready-marker",
             str(ready_marker),
             "--match-json",
-            json.dumps({"family": case.spec["family"], "dst": case.spec["dst"]}),
+            json.dumps(
+                {
+                    key: case.spec[key]
+                    for key in ("family", "src", "dst")
+                    if key in case.spec
+                }
+            ),
             "--timeout",
             str(args.timeout),
         ]
+        receiver_cmd = (
+            ["ip", "netns", "exec", args.peer_ns, *receive_cmd]
+            if direction == "egress"
+            else receive_cmd
+        )
         receiver = subprocess.Popen(receiver_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         wait_for_receiver_ready(receiver, ready_marker)
 
@@ -417,10 +556,41 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
         tc_state = run_text(["tc", "qdisc", "show", "dev", args.host_if])
 
         packet = build_packet(case.spec, host_mac, peer_mac)
-        command = f"sendp({packet.summary()}, iface={args.host_if}, count=1)"
+        send_iface = args.host_if if direction == "egress" else args.peer_if
+        command = f"sendp({packet.summary()}, iface={send_iface}, direction={direction}, count=1)"
         send_error = ""
         try:
-            sendp(packet, iface=args.host_if, count=1, verbose=False)
+            if direction == "egress":
+                sendp(packet, iface=args.host_if, count=1, verbose=False)
+            else:
+                sender = subprocess.run(
+                    [
+                        "ip",
+                        "netns",
+                        "exec",
+                        args.peer_ns,
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--send-one",
+                        "--iface",
+                        args.peer_if,
+                        "--spec-json",
+                        json.dumps(case.spec),
+                        "--host-mac",
+                        host_mac,
+                        "--peer-mac",
+                        peer_mac,
+                    ],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if sender.returncode != 0:
+                    raise RuntimeError(
+                        "sender failed "
+                        f"rc={sender.returncode} stdout={first_line(sender.stdout)} "
+                        f"stderr={first_line(sender.stderr)}"
+                    )
         except OSError as exc:
             if exc.errno not in DROP_SEND_ERRNOS:
                 raise
@@ -545,11 +715,16 @@ def main() -> int:
         help="run a bounded repeated replay matrix after the required one-shot cases",
     )
     parser.add_argument("--list-cases", action="store_true")
+    parser.add_argument("--validate-packets", action="store_true")
     parser.add_argument("--receive-one", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--send-one", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--iface", help=argparse.SUPPRESS)
     parser.add_argument("--marker", help=argparse.SUPPRESS)
     parser.add_argument("--ready-marker", help=argparse.SUPPRESS)
     parser.add_argument("--match-json", help=argparse.SUPPRESS)
+    parser.add_argument("--spec-json", help=argparse.SUPPRESS)
+    parser.add_argument("--host-mac", help=argparse.SUPPRESS)
+    parser.add_argument("--peer-mac", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.list_cases:
@@ -557,10 +732,16 @@ def main() -> int:
             print(case.name)
         return 0
 
+    if args.validate_packets:
+        return validate_packets()
+
     if args.receive_one:
         if not args.iface or not args.marker or not args.match_json:
             raise SystemExit("--receive-one requires --iface, --marker, and --match-json")
         return receive_one(args)
+
+    if args.send_one:
+        return send_one(args)
 
     if args.stress_iterations is None:
         try:

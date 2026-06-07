@@ -32,28 +32,26 @@ require_cmd() {
 require_packet_replay_evidence() {
   local evidence_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
   local missing=0
-  local cases=(
-    ipv4_pass_allowed
-    ipv4_drop_exact
-    ipv4_drop_cidr
-    ipv6_pass_allowed
-    ipv6_drop_exact
-    ipv6_drop_cidr
-    vlan_behavior
-    qinq_behavior
-    ipv4_ihl_options_behavior
-    ipv4_fragment_behavior
-    truncated_tcp_blocked_ipv4_exact
-    truncated_udp_blocked_ipv4_exact
-    truncated_tcp_blocked_ipv4_cidr
-    truncated_udp_blocked_ipv4_cidr
-  )
+  local case_output=""
+  local cases=()
   local fields=(
     packet
     expected_verdict
     observed_verdict
     command
+    direction
+    hook
   )
+
+  if ! case_output="$(python3 scripts/packet-replay-lab.py --list-cases)"; then
+    echo "could not load the canonical packet replay case list" >&2
+    return 1
+  fi
+  mapfile -t cases <<<"$case_output"
+  if [[ "${#cases[@]}" -eq 0 ]]; then
+    echo "canonical packet replay case list is empty" >&2
+    return 1
+  fi
 
   if [[ -z "$evidence_dir" ]]; then
     echo "missing packet replay evidence: set AEGIS_PACKET_REPLAY_DIR to a directory containing required .log artifacts" >&2
@@ -97,10 +95,20 @@ require_packet_replay_evidence() {
 
 require_stress_evidence() {
   local expected_iterations="$1"
-  local expected_cases_per_iteration=14
-  local expected_total_case_runs=$((expected_iterations * expected_cases_per_iteration))
+  local case_output=""
+  local cases=()
+  local expected_cases_per_iteration=0
+  local expected_total_case_runs=0
   local evidence_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
   local log_file="$evidence_dir/stress-summary.log"
+
+  if ! case_output="$(python3 scripts/packet-replay-lab.py --list-cases)"; then
+    echo "could not load the canonical packet replay case list" >&2
+    return 1
+  fi
+  mapfile -t cases <<<"$case_output"
+  expected_cases_per_iteration="${#cases[@]}"
+  expected_total_case_runs=$((expected_iterations * expected_cases_per_iteration))
 
   if [[ -z "$evidence_dir" ]]; then
     echo "missing stress evidence: set AEGIS_PACKET_REPLAY_DIR to the privileged lab artifact directory" >&2
@@ -192,7 +200,6 @@ write_lab_rule_config() {
   cat >"$lab_dir/aegis.yaml" <<'EOF'
 rules:
   - ip: 198.51.100.10
-    proto: tcp
     action: drop
 
 egress_rules:
@@ -416,6 +423,15 @@ non_privileged() {
 
   if command -v cargo-audit >/dev/null 2>&1; then
     run cargo audit -D warnings
+    for lockfile in \
+      aegis-cli/fuzz/Cargo.lock \
+      aegis-ebpf/Cargo.lock \
+      aegis-tc/Cargo.lock \
+      aegis-tower/Cargo.lock \
+      verification/Cargo.lock \
+      verification/fuzz/Cargo.lock; do
+      run cargo audit --no-fetch --file "$lockfile" -D warnings
+    done
   else
     echo "cargo-audit not installed; install with: cargo install cargo-audit" >&2
     exit 127
@@ -531,7 +547,7 @@ privileged_lab() {
     "$replay_dir/bpftool-tc-load.log"
 
   # Runtime attach through the real loader validates Aya load/attach paths and TC setup.
-  # Scale daemon timeout: 45s base + 15s per stress iteration (14 cases × ~1s + overhead).
+  # Scale daemon timeout for the XDP+TC replay matrix plus setup overhead.
   local daemon_timeout=$(( 45 + stress_iterations * 30 ))
   (
     cd "$lab_dir"
@@ -612,8 +628,20 @@ case "${1:-nonpriv}" in
     non_privileged
     privileged_lab
     ;;
+  evidence-only)
+    require_cmd python3
+    require_packet_replay_evidence
+    stress_iterations="${AEGIS_STRESS_ITERATIONS:-0}"
+    if [[ ! "$stress_iterations" =~ ^[0-9]+$ ]]; then
+      echo "AEGIS_STRESS_ITERATIONS must be a non-negative integer, got: $stress_iterations" >&2
+      exit 2
+    fi
+    if (( stress_iterations > 0 )); then
+      require_stress_evidence "$stress_iterations"
+    fi
+    ;;
   *)
-    echo "usage: $0 [nonpriv|privileged-lab|stress-lab]" >&2
+    echo "usage: $0 [nonpriv|privileged-lab|stress-lab|evidence-only]" >&2
     exit 2
     ;;
 esac

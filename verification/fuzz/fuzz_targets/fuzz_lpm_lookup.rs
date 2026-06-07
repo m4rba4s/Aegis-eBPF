@@ -19,9 +19,7 @@ fuzz_target!(|data: &[u8]| {
     // Clamp prefix to valid range
     let valid_prefix = prefix_len % 33; // 0-32
 
-    let key = LpmKeyIpv4 {
-        addr,
-    };
+    let key = LpmKeyIpv4 { addr };
 
     // Verify invariants
     assert!(valid_prefix <= 32);
@@ -48,9 +46,7 @@ fuzz_target!(|data: &[u8]| {
         let mut addr_v6 = [0u8; 16];
         addr_v6.copy_from_slice(&data[4..20]);
 
-        let key_v6 = LpmKeyIpv6 {
-            addr: addr_v6,
-        };
+        let key_v6 = LpmKeyIpv6 { addr: addr_v6 };
 
         assert!(valid_prefix_v6 <= 128);
         assert_eq!(key_v6.addr, addr_v6);
@@ -66,9 +62,7 @@ fuzz_target!(|data: &[u8]| {
     ];
 
     for &(prefix, test_addr) in edge_cases {
-        let test_key = LpmKeyIpv4 {
-            addr: test_addr,
-        };
+        let test_key = LpmKeyIpv4 { addr: test_addr };
         assert!(prefix <= 32);
         assert_eq!(test_key.addr, test_addr);
     }

@@ -1,7 +1,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use aegis_cli::config::AegisConfig;
+
+#[allow(dead_code)]
+#[path = "../../src/config.rs"]
+mod config;
+
+use config::AegisConfig;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
