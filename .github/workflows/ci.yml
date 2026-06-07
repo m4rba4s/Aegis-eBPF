@@ -11,12 +11,12 @@ jobs:
   nonpriv-release-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install release gate tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y file llvm python3-scapy
+          sudo apt-get install -y file llvm protobuf-compiler python3-scapy
           cargo install bpf-linker --locked
           cargo install cargo-audit --locked
           cargo install cargo-deny --locked
@@ -47,7 +47,7 @@ jobs:
   formal-verification:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install formal verification tools
         run: |
@@ -66,7 +66,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, aegis-ebpf-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Privileged lab release gate with bounded stress
         run: |
           sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay-${{ github.run_id }}-${{ github.run_attempt }} \
@@ -83,12 +83,12 @@ jobs:
   portable-static-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm clang libelf-dev musl-tools
+          sudo apt-get install -y llvm clang libelf-dev musl-tools protobuf-compiler
           cargo install bpf-linker --locked
           rustup target add x86_64-unknown-linux-musl
       - name: Build eBPF objects
