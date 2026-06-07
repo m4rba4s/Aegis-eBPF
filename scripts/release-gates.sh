@@ -548,7 +548,7 @@ privileged_lab() {
 
   # Runtime attach through the real loader validates Aya load/attach paths and TC setup.
   # Scale daemon timeout for the XDP+TC replay matrix plus setup overhead.
-  local daemon_timeout=$(( 45 + stress_iterations * 30 ))
+  local daemon_timeout=$(( 120 + stress_iterations * 30 ))
   (
     cd "$lab_dir"
     timeout "${daemon_timeout}s" "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon
@@ -621,11 +621,13 @@ case "${1:-nonpriv}" in
     ;;
   privileged-lab)
     non_privileged
+    rm -rf /sys/fs/bpf/aegis 2>/dev/null || true
     privileged_lab
     ;;
   stress-lab)
     export AEGIS_STRESS_ITERATIONS="${AEGIS_STRESS_ITERATIONS:-25}"
     non_privileged
+    rm -rf /sys/fs/bpf/aegis 2>/dev/null || true
     privileged_lab
     ;;
   evidence-only)

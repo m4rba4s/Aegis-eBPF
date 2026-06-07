@@ -740,6 +740,7 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     // --- EXTENSION HEADER HANDLING ---
     let mut current_nh = next_header;
     let mut l4_offset = ip_offset + Ipv6Hdr::LEN;
+    let mut ext_hdr_count = 0;
     let mut is_valid_l4 = false;
 
     // Bounded loop: parse up to 4 extension headers.
@@ -761,6 +762,9 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 current_nh = unsafe { (*ext_hdr).next_header };
                 let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
                 l4_offset += ((ext_len as usize) + 2) * 4;
+                if l4_offset > 1500 || ptr_at::<u8>(ctx, l4_offset.saturating_sub(1)).is_err() {
+                    break;
+                }
                 ext_hdr_count += 1;
             }
             NEXTHDR_HOP | NEXTHDR_ROUTING | NEXTHDR_DEST => {
@@ -768,6 +772,9 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 current_nh = unsafe { (*ext_hdr).next_header };
                 let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
                 l4_offset += ((ext_len as usize) + 1) * 8;
+                if l4_offset > 1500 || ptr_at::<u8>(ctx, l4_offset.saturating_sub(1)).is_err() {
+                    break;
+                }
                 ext_hdr_count += 1;
             }
             NEXTHDR_NONE => {
