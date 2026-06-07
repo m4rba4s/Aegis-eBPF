@@ -7,11 +7,14 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
-[dependencies]
-libfuzzer-sys = "0.4"
+[workspace]
 
-[dependencies.aegis-cli]
-path = ".."
+[dependencies]
+anyhow = "1.0"
+libfuzzer-sys = "0.4"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
 
 [dependencies.toml]
 version = "0.8"

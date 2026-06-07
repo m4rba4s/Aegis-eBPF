@@ -87,7 +87,7 @@ fuzz_target!(|data: &[u8]| {
 
             // IHL must be >= 5 (20 bytes minimum)
             // This is a bounds check the eBPF program makes
-            let _valid_ihl = ihl >= 5 && ihl <= 15;
+            let _valid_ihl = (5..=15).contains(&ihl);
 
             // Protocol extraction
             let _proto = ipv4.proto;

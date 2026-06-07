@@ -29,10 +29,8 @@ fn simulate_rate_limit(
     let allowed = if consume && state.tokens > 0 {
         state.tokens -= 1;
         true
-    } else if consume {
-        false
     } else {
-        true
+        !consume
     };
 
     (state, allowed)
@@ -63,11 +61,11 @@ fuzz_target!(|data: &[u8]| {
     let current_time = initial_time.saturating_add(time_delta);
 
     // Operation 1: Check without consuming
-    let (state1, _allowed1) = simulate_rate_limit(state.clone(), current_time, false);
+    let (state1, _allowed1) = simulate_rate_limit(state, current_time, false);
     assert!(state1.tokens <= MAX_TOKENS);
 
     // Operation 2: Check with consuming
-    let (state2, _allowed2) = simulate_rate_limit(state.clone(), current_time, true);
+    let (state2, _allowed2) = simulate_rate_limit(state, current_time, true);
     assert!(state2.tokens <= MAX_TOKENS);
 
     // If we had tokens and consumed, we should have been allowed

@@ -16,7 +16,9 @@ CONSTANTS
     CONN_SYN_RECV,
     CONN_ESTABLISHED,
     CONN_FIN_WAIT,
-    CONN_CLOSED
+    CONN_CLOSED,
+    MAX_PACKETS,
+    MAX_TIME
 
 VARIABLES
     state,          \* Current connection state
@@ -32,6 +34,9 @@ TypeInvariant ==
     /\ packets_in \in Nat
     /\ packets_out \in Nat
     /\ last_seen \in Nat
+    /\ packets_in <= MAX_PACKETS
+    /\ packets_out <= MAX_PACKETS
+    /\ last_seen <= MAX_TIME
 
 -----------------------------------------------------------------------------
 (* Initial State *)
@@ -48,6 +53,8 @@ Init ==
 (* Send SYN - initiate outgoing connection *)
 SendSYN ==
     /\ state = CONN_NEW
+    /\ packets_out < MAX_PACKETS
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_SYN_SENT
     /\ packets_out' = packets_out + 1
     /\ last_seen' = last_seen + 1
@@ -56,6 +63,8 @@ SendSYN ==
 (* Receive SYN - incoming connection attempt *)
 RecvSYN ==
     /\ state = CONN_NEW
+    /\ packets_in < MAX_PACKETS
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_SYN_RECV
     /\ packets_in' = packets_in + 1
     /\ last_seen' = last_seen + 1
@@ -64,6 +73,8 @@ RecvSYN ==
 (* Receive SYN-ACK - response to our SYN *)
 RecvSYNACK ==
     /\ state = CONN_SYN_SENT
+    /\ packets_in < MAX_PACKETS
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_ESTABLISHED
     /\ packets_in' = packets_in + 1
     /\ last_seen' = last_seen + 1
@@ -72,6 +83,8 @@ RecvSYNACK ==
 (* Send SYN-ACK - respond to incoming SYN *)
 SendSYNACK ==
     /\ state = CONN_SYN_RECV
+    /\ packets_out < MAX_PACKETS
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_ESTABLISHED
     /\ packets_out' = packets_out + 1
     /\ last_seen' = last_seen + 1
@@ -80,16 +93,21 @@ SendSYNACK ==
 (* Data transfer in established connection *)
 DataTransfer ==
     /\ state = CONN_ESTABLISHED
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_ESTABLISHED
-    /\ \/ /\ packets_in' = packets_in + 1
+    /\ \/ /\ packets_in < MAX_PACKETS
+          /\ packets_in' = packets_in + 1
           /\ UNCHANGED packets_out
-       \/ /\ packets_out' = packets_out + 1
+       \/ /\ packets_out < MAX_PACKETS
+          /\ packets_out' = packets_out + 1
           /\ UNCHANGED packets_in
     /\ last_seen' = last_seen + 1
 
 (* Send or receive FIN - initiate close *)
 SendFIN ==
     /\ state = CONN_ESTABLISHED
+    /\ packets_out < MAX_PACKETS
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_FIN_WAIT
     /\ packets_out' = packets_out + 1
     /\ last_seen' = last_seen + 1
@@ -97,6 +115,8 @@ SendFIN ==
 
 RecvFIN ==
     /\ state = CONN_ESTABLISHED
+    /\ packets_in < MAX_PACKETS
+    /\ last_seen < MAX_TIME
     /\ state' = CONN_FIN_WAIT
     /\ packets_in' = packets_in + 1
     /\ last_seen' = last_seen + 1
@@ -110,9 +130,14 @@ Close ==
 
 (* Timeout - connection expires *)
 Timeout ==
-    /\ state \in {CONN_SYN_SENT, CONN_SYN_RECV, CONN_FIN_WAIT}
+    /\ state \in {CONN_SYN_SENT, CONN_SYN_RECV, CONN_ESTABLISHED, CONN_FIN_WAIT}
     /\ state' = CONN_CLOSED
     /\ UNCHANGED <<packets_in, packets_out, last_seen>>
+
+(* Model the terminal state explicitly so TLC does not report it as a deadlock. *)
+StayClosed ==
+    /\ state = CONN_CLOSED
+    /\ UNCHANGED vars
 
 -----------------------------------------------------------------------------
 (* Next State Relation *)
@@ -127,6 +152,7 @@ Next ==
     \/ RecvFIN
     \/ Close
     \/ Timeout
+    \/ StayClosed
 
 -----------------------------------------------------------------------------
 (* Safety Properties *)
@@ -136,7 +162,7 @@ SafeTransitions ==
     /\ state = CONN_NEW => state' \in {CONN_NEW, CONN_SYN_SENT, CONN_SYN_RECV}
     /\ state = CONN_SYN_SENT => state' \in {CONN_SYN_SENT, CONN_ESTABLISHED, CONN_CLOSED}
     /\ state = CONN_SYN_RECV => state' \in {CONN_SYN_RECV, CONN_ESTABLISHED, CONN_CLOSED}
-    /\ state = CONN_ESTABLISHED => state' \in {CONN_ESTABLISHED, CONN_FIN_WAIT}
+    /\ state = CONN_ESTABLISHED => state' \in {CONN_ESTABLISHED, CONN_FIN_WAIT, CONN_CLOSED}
     /\ state = CONN_FIN_WAIT => state' \in {CONN_FIN_WAIT, CONN_CLOSED}
     /\ state = CONN_CLOSED => state' = CONN_CLOSED
 
@@ -148,6 +174,10 @@ ClosedIsTerminal ==
 PacketsMonotonic ==
     /\ packets_in' >= packets_in
     /\ packets_out' >= packets_out
+
+SafeTransitionsProperty == [][SafeTransitions]_vars
+ClosedIsTerminalProperty == [][ClosedIsTerminal]_vars
+PacketsMonotonicProperty == [][PacketsMonotonic]_vars
 
 -----------------------------------------------------------------------------
 (* Liveness Properties *)
@@ -165,7 +195,9 @@ Spec ==
     /\ WF_vars(Next)  \* Weak fairness - if enabled, eventually taken
 
 THEOREM Spec => []TypeInvariant
-THEOREM Spec => []ClosedIsTerminal
+THEOREM Spec => SafeTransitionsProperty
+THEOREM Spec => ClosedIsTerminalProperty
+THEOREM Spec => PacketsMonotonicProperty
 THEOREM Spec => EventuallyCloses
 
 =============================================================================
