@@ -52,6 +52,17 @@ sudo ip -details link show dev eth0
 journalctl -u aegis@eth0 --no-pager -n 100
 ```
 
+## Emergency Detach (Daemon Crash)
+
+If the userspace daemon is OOM-killed or receives `SIGKILL` (`kill -9`), the eBPF programs (XDP and TC) may remain attached to the interface. This provides fail-closed resilience but requires manual intervention to restore unrestricted connectivity.
+
+To forcibly detach all Aegis programs from an interface (e.g. `eth0`) without the daemon:
+
+```bash
+sudo ip link set dev eth0 xdp off
+sudo tc qdisc del dev eth0 clsact
+```
+
 ## Rollback And Cleanup
 
 Stop the service first:
