@@ -605,8 +605,8 @@ UMask=0077
 # The CLI then retains only CAP_BPF and CAP_NET_ADMIN.
 # CAP_PERFMON: perf_event_open for eBPF stats.
 # No CAP_SYS_ADMIN fallback in production.
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SETUID CAP_SETGID CAP_SETPCAP
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SETUID CAP_SETGID CAP_SETPCAP
 
 # Filesystem protection
 ProtectSystem=strict
@@ -615,7 +615,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHostname=true
 ProtectClock=true
-ProtectKernelTunables=true
+ProtectKernelTunables=false
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true

@@ -727,10 +727,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 // Drop privileges to non-root (Anti-Tamper Layer 1)
                 if let Err(e) = privilege::drop_privileges() {
-                    tracing::error!(
-                        "🛑 Failed to drop privileges: {}. Running as root is a security risk!",
-                        e
-                    );
+                    tracing::error!("Failed to drop privileges: {}. Running as root is a security risk! Exiting.", e);
+                    std::process::exit(1);
+                } else {
+                    tracing::info!("Privileges dropped successfully.");
                 }
 
                 // Initialize CEF/Syslog export (if configured)
