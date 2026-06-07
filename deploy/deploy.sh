@@ -2,9 +2,9 @@
 # Aegis eBPF Firewall - Production Install Script
 # Run with sudo: sudo ./deploy.sh [interface]
 
-set -e
+set -euo pipefail
 
-INTERFACE="${1:-wg0-mullvad}"
+INTERFACE="${1:-eth0}"
 INSTALL_DIR="/usr/local"
 CONFIG_DIR="/etc/aegis"
 LOG_DIR="/var/log/aegis"
@@ -67,11 +67,11 @@ if [[ ! -x "$INSTALL_DIR/bin/aegis-cli" \
 fi
 
 # Install config (don't overwrite existing)
-if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
+if [[ ! -f "$CONFIG_DIR/aegis.yaml" ]]; then
     echo "📋 Installing default configuration..."
-    cp "$SCRIPT_DIR/config.yaml" "$CONFIG_DIR/config.yaml"
+    cp "$SCRIPT_DIR/config.yaml" "$CONFIG_DIR/aegis.yaml"
     # Update interface in config
-    sed -i "s/interface:.*/interface: $INTERFACE/" "$CONFIG_DIR/config.yaml"
+    sed -i "s/interface:.*/interface: $INTERFACE/" "$CONFIG_DIR/aegis.yaml"
 else
     echo "⚠️  Config exists, skipping (backup and remove to reinstall)"
 fi
@@ -97,7 +97,7 @@ echo ""
 echo "📍 Binaries:  $INSTALL_DIR/bin/aegis-cli"
 echo "📍 XDP eBPF:  $INSTALL_DIR/share/aegis/aegis.o"
 echo "📍 TC eBPF:   $INSTALL_DIR/share/aegis/aegis-tc.o"
-echo "📍 Config:    $CONFIG_DIR/config.yaml"
+echo "📍 Config:    $CONFIG_DIR/aegis.yaml"
 echo "📍 Logs:      $LOG_DIR/"
 echo ""
 echo "🔧 Commands:"

@@ -20,6 +20,9 @@ if ! command -v cargo-generate-rpm &>/dev/null; then
     cargo install cargo-generate-rpm
 fi
 
+echo "🔨 Compiling eBPF objects..."
+cargo run -p xtask -- build-all --profile release
+
 echo "🔨 Compiling release binary..."
 cargo build --release -p aegis-cli
 

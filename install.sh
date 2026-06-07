@@ -106,15 +106,22 @@ check_kernel_version() {
 }
 
 check_bpf_fs() {
-    mkdir -p /sys/fs/bpf
+    local check_only="${1:-false}"
 
     if awk '$2 == "/sys/fs/bpf" && $3 == "bpf" { found = 1 } END { exit !found }' /proc/mounts; then
         log_ok "BPF filesystem mounted at /sys/fs/bpf"
         return 0
     fi
 
+    if [[ "$check_only" == "true" ]]; then
+        log_error "BPF filesystem not mounted at /sys/fs/bpf"
+        log_info "Mount it with: sudo mount -t bpf bpf /sys/fs/bpf"
+        return 1
+    fi
+
     log_warn "BPF filesystem not mounted at /sys/fs/bpf"
     log_info "Attempting to mount..."
+    mkdir -p /sys/fs/bpf
     mount -t bpf bpf /sys/fs/bpf 2>/dev/null || {
         log_error "Failed to mount BPF filesystem"
         log_info "Try manually: sudo mount -t bpf bpf /sys/fs/bpf"
@@ -282,14 +289,20 @@ source_rust_envs() {
     if [[ -n "${SUDO_USER:-}" ]]; then
         local sudo_home
         sudo_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6) || true
-        [[ -f "$sudo_home/.cargo/env" ]] && # shellcheck disable=SC1091
+        if [[ -f "$sudo_home/.cargo/env" ]]; then
+            # shellcheck disable=SC1091
             source "$sudo_home/.cargo/env"
+        fi
     fi
 
-    [[ -f "${HOME:-}/.cargo/env" ]] && # shellcheck disable=SC1091
+    if [[ -f "${HOME:-}/.cargo/env" ]]; then
+        # shellcheck disable=SC1091
         source "$HOME/.cargo/env"
-    [[ -f /root/.cargo/env ]] && # shellcheck disable=SC1091
+    fi
+    if [[ -f /root/.cargo/env ]]; then
+        # shellcheck disable=SC1091
         source /root/.cargo/env
+    fi
 
     hash -r 2>/dev/null || true
 }
@@ -446,8 +459,8 @@ ensure_rust_toolchain() {
 install_systemd_service() {
     cat > /etc/systemd/system/aegis@.service << 'EOF'
 [Unit]
-Description=Aegis eBPF Firewall on %i
-Documentation=https://github.com/m4rba4s/Aegis-Portable-Demo
+Description=Aegis eBPF XDP Firewall
+Documentation=https://github.com/m4rba4s/Aegis-eBPF
 After=network.target
 Wants=network.target
 
@@ -457,33 +470,65 @@ ExecStart=/usr/local/bin/aegis-cli -i %i daemon
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
-LimitMEMLOCK=infinity
-LimitNOFILE=65536
+TimeoutStopSec=30
 
-# Security hardening
+# ============================================================
+# SECURITY HARDENING
+# ============================================================
+
+# Capabilities - minimum required for eBPF/XDP/TC
+# CAP_BPF: load BPF programs (kernel 5.8+)
+# CAP_NET_ADMIN: attach XDP/TC, manage network
+# CAP_PERFMON: perf_event_open for eBPF stats
+# No CAP_SYS_ADMIN fallback in production.
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+
+# Filesystem protection
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 PrivateDevices=true
 ProtectHostname=true
 ProtectClock=true
+ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
+
+# Process isolation
 NoNewPrivileges=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
 PrivateUsers=false
+
+# Namespace restrictions (need network namespace access)
 RestrictNamespaces=cgroup ipc pid user uts
+
+# System call filtering
+# @system-service: basic service calls
+# @network-io: network operations
+# bpf: eBPF operations
 SystemCallFilter=@system-service @network-io bpf perf_event_open
 SystemCallErrorNumber=EPERM
+
+# Network (needs full access for XDP)
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
-# Capability restrictions
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN
+# ============================================================
+# RESOURCE LIMITS
+# ============================================================
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# ============================================================
+# LOGGING
+# ============================================================
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aegis
 
 [Install]
 WantedBy=multi-user.target
@@ -611,12 +656,12 @@ PIDFILE=/run/aegis.pid
 case "$1" in
     start)
         echo "Starting Aegis..."
-        $DAEMON -i $AEGIS_INTERFACE daemon &
-        echo $! > $PIDFILE
+        "$DAEMON" -i "$AEGIS_INTERFACE" daemon &
+        echo $! > "$PIDFILE"
         ;;
     stop)
         echo "Stopping Aegis..."
-        [ -f $PIDFILE ] && kill $(cat $PIDFILE) && rm -f $PIDFILE
+        [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" && rm -f "$PIDFILE"
         ;;
     restart)
         $0 stop
@@ -917,7 +962,7 @@ run_checks() {
     check_kernel_version || ((++errors))
 
     # BPF filesystem
-    check_bpf_fs || ((++errors))
+    check_bpf_fs true || ((++errors))
 
     # Runtime tools
     check_runtime_tools || ((++errors))
@@ -1031,19 +1076,31 @@ uninstall_aegis() {
     rm -f /etc/periodic/weekly/aegis-logclean 2>/dev/null
 
     if [[ -d /etc/aegis ]]; then
-        echo ""
-        read -rp "  Remove config (/etc/aegis)? [y/N] " ans
-        [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /etc/aegis && log_ok "Config removed"
+        if [[ -t 0 ]]; then
+            echo ""
+            read -rp "  Remove config (/etc/aegis)? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /etc/aegis && log_ok "Config removed"
+        else
+            log_info "Non-interactive: preserving /etc/aegis (use rm -rf /etc/aegis to remove)"
+        fi
     fi
 
     if [[ -d /var/log/aegis ]]; then
-        read -rp "  Remove logs (/var/log/aegis)? [y/N] " ans
-        [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /var/log/aegis && log_ok "Logs removed"
+        if [[ -t 0 ]]; then
+            read -rp "  Remove logs (/var/log/aegis)? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /var/log/aegis && log_ok "Logs removed"
+        else
+            log_info "Non-interactive: preserving /var/log/aegis"
+        fi
     fi
 
     if [[ -d /var/lib/aegis ]]; then
-        read -rp "  Remove GeoIP data (/var/lib/aegis)? [y/N] " ans
-        [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /var/lib/aegis && log_ok "GeoIP data removed"
+        if [[ -t 0 ]]; then
+            read -rp "  Remove GeoIP data (/var/lib/aegis)? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] && rm -rf /var/lib/aegis && log_ok "GeoIP data removed"
+        else
+            log_info "Non-interactive: preserving /var/lib/aegis"
+        fi
     fi
 
     echo ""
@@ -1120,8 +1177,12 @@ update_aegis() {
 
     # Stop running instances
     stop_running_services
-    # Also kill any manual aegis-cli processes
-    killall -9 aegis-cli 2>/dev/null || true
+    # Also kill any manual aegis-cli processes (graceful first, then force)
+    if command -v killall &>/dev/null && killall -0 aegis-cli 2>/dev/null; then
+        killall aegis-cli 2>/dev/null || true
+        sleep 3
+        killall -9 aegis-cli 2>/dev/null || true
+    fi
     sleep 1
 
     # Clean stale BPF pins (map definitions may have changed)

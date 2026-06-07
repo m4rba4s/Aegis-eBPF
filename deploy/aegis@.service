@@ -1,6 +1,6 @@
 [Unit]
 Description=Aegis eBPF XDP Firewall
-Documentation=https://github.com/m4rba4s/Aegis-Portable-Demo
+Documentation=https://github.com/m4rba4s/Aegis-eBPF
 After=network.target
 Wants=network.target
 
@@ -20,8 +20,8 @@ TimeoutStopSec=30
 # CAP_BPF: load BPF programs (kernel 5.8+)
 # CAP_NET_ADMIN: attach XDP/TC, manage network
 # No CAP_SYS_ADMIN fallback in production.
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
 
 # Filesystem protection
 ProtectSystem=strict
