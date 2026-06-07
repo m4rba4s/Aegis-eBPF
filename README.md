@@ -1,7 +1,7 @@
 # Aegis: eBPF Security Matrix
 ![Logo](https://i.ibb.co/xS3StSws/000aqaqaqaqaqaq.png)
-> **High-Performance XDP/TC Firewall & Traffic Analyzer written in Rust.**
-> *Zero-overhead packet filtering, stateful connection tracking, and heuristic intrusion detection.*
+> **Experimental Rust/Aya XDP + TC firewall and traffic analyzer.**
+> *Low-overhead packet filtering with release evidence still pending for production claims.*
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/built_with-Rust-red.svg)
@@ -24,14 +24,22 @@
 | Feature | iptables/nftables | Aegis |
 |---------|-------------------|-------|
 | Packet processing | Kernel netfilter | XDP (driver level) |
-| Performance | ~1M pps | **10M+ pps theoretical** ¹ |
+| Performance | Measured by deployment | **Benchmark pending** ¹ |
 | Egress filtering | Yes | Yes (TC) |
-| Connection tracking | Conntrack module | **Native eBPF** |
+| Connection tracking | Conntrack module | **Experimental eBPF state tracking** |
 | Real-time TUI | No | **Yes** |
 | Memory safety | C | **Rust** |
 | Deployment | Multiple packages | **Single binary** |
 
-> ¹ *Theoretical throughput for XDP in NIC driver mode with minimal rule set. Actual performance depends on NIC driver, kernel version, rule complexity, and hardware. Independent benchmarks pending.*
+> ¹ *No measured throughput claim is made for this release candidate. Benchmark results require archived kernel, NIC/driver, XDP mode, CPU, packet-size, rule-count, and raw command output evidence.*
+
+## Current Release Status
+
+- **Non-privileged gates**: passing on latest local validation; rerun before every tag.
+- **Privileged verifier/load/attach**: pending for the current release candidate.
+- **Packet replay matrix**: pending for the current release candidate.
+- **Stress replay**: pending for the current release candidate.
+- **Production tag**: blocked until privileged lab evidence is archived.
 
 ## Features Status & Claims
 
@@ -51,12 +59,12 @@ To maintain transparency as a security tool, features are strictly categorized b
 - **SYN Flood Protection** — Token bucket rate limiting at XDP layer
 
 ### Theoretical / Benchmark Pending
-- **10M+ pps Throughput** — Theoretical zero-overhead performance in XDP NIC driver mode (independent benchmarks pending)
+- **Throughput** — XDP driver mode is expected to be low overhead, but no pps number is claimed without benchmark artifacts.
 
 ### Planned v2 (Deferred / Stubbed)
 - **TLS ClientHello Fingerprinting** — Native eBPF TLS payload extraction for JA3 scoring (map exists, DPI deferred to v2)
 - **Heuristic Intrusion Detection** — Advanced protocol anomaly detection beyond basic TCP flags
-- **Full IPv6 Extension Header Security** — Currently passes unrecognized extension headers to the kernel; full chain walking planned for v2
+- **IPv6 Extension Header Coverage** — Limited today; exact/CIDR IPv6 policy paths exist, while full extension-header replay coverage is pending.
 - **VLAN / QinQ Payload Parsing** — Currently fails-closed (drops all tagged frames)
 
 ### Interface
