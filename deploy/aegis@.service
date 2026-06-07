@@ -6,11 +6,13 @@ Wants=network.target
 
 [Service]
 Type=simple
+WorkingDirectory=/etc/aegis
+EnvironmentFile=-/etc/aegis/service.env
 ExecStart=/usr/local/bin/aegis-cli -i %i daemon
-ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+UMask=0077
 
 # ============================================================
 # SECURITY HARDENING
@@ -19,9 +21,13 @@ TimeoutStopSec=30
 # Capabilities - minimum required for eBPF/XDP/TC
 # CAP_BPF: load BPF programs (kernel 5.8+)
 # CAP_NET_ADMIN: attach XDP/TC, manage network
+# CAP_SETUID/CAP_SETGID/CAP_SETPCAP: required only while the CLI drops
+# privileges to the dedicated service account after loading/attaching eBPF.
+# The CLI then retains only CAP_BPF and CAP_NET_ADMIN.
+# CAP_PERFMON: perf_event_open for eBPF stats.
 # No CAP_SYS_ADMIN fallback in production.
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SETUID CAP_SETGID CAP_SETPCAP
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SETUID CAP_SETGID CAP_SETPCAP
 
 # Filesystem protection
 ProtectSystem=strict

@@ -1,0 +1,47 @@
+# Aegis runtime configuration loaded from /etc/aegis/config.toml.
+
+interface = "eth0"
+
+[modules]
+port_scan = true
+rate_limit = true
+threat_feeds = true
+conn_track = true
+scan_detect = true
+verbose = false
+entropy = false
+
+[autoban]
+enabled = true
+max_entries = 512
+
+[feeds]
+enabled = true
+max_download_bytes = 10485760
+
+[logging]
+level = "info"
+json = false
+
+[allowlist]
+ips = []
+
+[webhooks]
+enabled = false
+slack_url = ""
+pagerduty_key = ""
+generic_url = ""
+min_severity = "high"
+
+[dpi]
+enabled = false
+auto_block_threshold = 80
+rules_path = "/etc/aegis/rules"
+
+[fleet]
+enabled = false
+endpoint = "http://127.0.0.1:50051"
+token = ""
+
+[pcap]
+enabled = false

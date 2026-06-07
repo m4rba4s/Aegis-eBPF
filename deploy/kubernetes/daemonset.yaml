@@ -21,35 +21,37 @@ spec:
     spec:
       hostNetwork: true
       serviceAccountName: aegis
+      automountServiceAccountToken: false
       tolerations:
         - operator: Exists
       containers:
         - name: aegis
           image: ghcr.io/m4rba4s/aegis-ebpf:latest
+          workingDir: /etc/aegis
           securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 0
+            seccompProfile:
+              type: Unconfined
             capabilities:
               add:
                 - NET_ADMIN
                 - BPF
                 - PERFMON
+                - SETUID
+                - SETGID
+                - SETPCAP
           volumeMounts:
             - name: bpffs
               mountPath: /sys/fs/bpf
-            - name: cni-bin
-              mountPath: /opt/cni/bin
-            - name: cni-conf
-              mountPath: /etc/cni/net.d
             - name: aegis-config
               mountPath: /etc/aegis
           command:
-            - /bin/sh
-            - -c
-            - |
-              # Install CNI binary
-              cp /usr/local/bin/aegis-cni /opt/cni/bin/aegis-cni
-              chmod +x /opt/cni/bin/aegis-cni
-              # Run daemon
-              exec aegis-cli --iface eth0 daemon
+            - /aegis-cli
+          args:
+            - --iface
+            - eth0
+            - daemon
           ports:
             - containerPort: 9100
               name: metrics
@@ -58,12 +60,14 @@ spec:
             httpGet:
               path: /health
               port: 9100
+              host: 127.0.0.1
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /health
               port: 9100
+              host: 127.0.0.1
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
@@ -77,14 +81,6 @@ spec:
         - name: bpffs
           hostPath:
             path: /sys/fs/bpf
-            type: DirectoryOrCreate
-        - name: cni-bin
-          hostPath:
-            path: /opt/cni/bin
-            type: DirectoryOrCreate
-        - name: cni-conf
-          hostPath:
-            path: /etc/cni/net.d
             type: DirectoryOrCreate
         - name: aegis-config
           configMap:

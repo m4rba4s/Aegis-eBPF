@@ -47,6 +47,8 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 INSTALL_DIR="/usr/local"
 BIN_DIR="$INSTALL_DIR/bin"
 SHARE_DIR="$INSTALL_DIR/share/aegis"
+SERVICE_USER="${AEGIS_SERVICE_USER:-aegis}"
+SERVICE_GROUP="${AEGIS_SERVICE_GROUP:-aegis}"
 
 # Colors
 RED='\033[0;31m'
@@ -68,6 +70,7 @@ log_step()  { echo -e "${BOLD}▶  $1${NC}"; }
 
 detect_distro() {
     if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
         . /etc/os-release
         echo "$ID"
     elif [[ -f /etc/redhat-release ]]; then
@@ -221,7 +224,7 @@ install_system_deps() {
         alpine)
             apk add \
                 build-base musl-dev linux-headers \
-                llvm clang libelf-dev \
+                llvm clang elfutils-dev \
                 protobuf \
                 iproute2 \
                 curl wget git
@@ -245,6 +248,99 @@ install_system_deps() {
     fi
 
     log_ok "System dependencies installed ($distro)"
+}
+
+install_runtime_deps() {
+    log_step "Installing runtime dependencies..."
+    local distro
+    distro=$(detect_distro)
+
+    case "$distro" in
+        fedora|rhel|centos|rocky|alma)
+            if command -v dnf &>/dev/null; then
+                dnf install -y iproute curl ca-certificates psmisc util-linux
+            elif command -v yum &>/dev/null; then
+                yum install -y iproute curl ca-certificates psmisc util-linux
+            else
+                log_warn "dnf/yum not found; install runtime dependencies manually"
+            fi
+            ;;
+        ubuntu|debian|pop|linuxmint)
+            apt-get update -qq
+            apt-get install -y iproute2 curl ca-certificates procps psmisc util-linux
+            ;;
+        arch|manjaro|endeavouros)
+            pacman -Sy --noconfirm --needed iproute2 curl ca-certificates procps-ng util-linux
+            ;;
+        opensuse*|sles)
+            zypper install -y iproute2 curl ca-certificates psmisc util-linux
+            ;;
+        alpine)
+            apk add --no-cache iproute2 curl ca-certificates psmisc util-linux
+            ;;
+        *)
+            log_warn "Unknown distro '$distro' - install iproute2, curl, psmisc, and util-linux manually"
+            ;;
+    esac
+
+    check_runtime_tools
+    log_ok "Runtime dependencies installed ($distro)"
+}
+
+# =============================================================================
+# SERVICE ACCOUNT
+# =============================================================================
+
+ensure_service_account() {
+    if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+        if command -v groupadd >/dev/null 2>&1; then
+            groupadd --system "$SERVICE_GROUP"
+        elif command -v addgroup >/dev/null 2>&1; then
+            addgroup -S "$SERVICE_GROUP"
+        else
+            log_error "Cannot create service group: groupadd/addgroup not found"
+            return 1
+        fi
+    fi
+
+    if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+        local nologin_shell
+        nologin_shell=$(command -v nologin 2>/dev/null || true)
+        [[ -n "$nologin_shell" ]] || nologin_shell="/sbin/nologin"
+
+        if command -v useradd >/dev/null 2>&1; then
+            useradd --system --gid "$SERVICE_GROUP" --home-dir /var/lib/aegis \
+                --no-create-home --shell "$nologin_shell" "$SERVICE_USER"
+        elif command -v adduser >/dev/null 2>&1; then
+            adduser -S -D -H -G "$SERVICE_GROUP" -h /var/lib/aegis \
+                -s "$nologin_shell" "$SERVICE_USER"
+        else
+            log_error "Cannot create service user: useradd/adduser not found"
+            return 1
+        fi
+    fi
+
+    local service_uid service_gid expected_gid
+    service_uid=$(id -u "$SERVICE_USER")
+    service_gid=$(id -g "$SERVICE_USER")
+    expected_gid=$(getent group "$SERVICE_GROUP" | cut -d: -f3)
+    if [[ "$service_gid" != "$expected_gid" ]]; then
+        log_error "Service user $SERVICE_USER must use $SERVICE_GROUP as its primary group"
+        return 1
+    fi
+
+    install -d -o root -g "$SERVICE_GROUP" -m 0750 /etc/aegis
+    install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 /var/log/aegis
+    install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 /var/lib/aegis
+
+    {
+        printf 'SUDO_UID=%s\n' "$service_uid"
+        printf 'SUDO_GID=%s\n' "$service_gid"
+    } > /etc/aegis/service.env
+    chown root:"$SERVICE_GROUP" /etc/aegis/service.env
+    chmod 0640 /etc/aegis/service.env
+
+    log_ok "Service account ready: $SERVICE_USER ($service_uid:$service_gid)"
 }
 
 # =============================================================================
@@ -438,15 +534,38 @@ ensure_rust_toolchain() {
         return 1
     fi
 
+    if [[ "$(detect_distro)" == "alpine" ]]; then
+        local rust_llvm_major
+        rust_llvm_major=$(
+            rustc +nightly -vV |
+                awk -F': ' '/^LLVM version:/ { split($2, version, "."); print version[1] }'
+        )
+        if [[ -z "$rust_llvm_major" ]] ||
+            ! find /usr/lib -maxdepth 3 -name "libLLVM-${rust_llvm_major}*.so" -print -quit |
+                grep -q .; then
+            log_error "Alpine source builds require LLVM $rust_llvm_major to match the pinned Rust nightly"
+            log_info "Use ./install.sh --install-only on stable Alpine, or build with a repository providing matching LLVM"
+            return 1
+        fi
+    fi
+
     # bpf-linker
     if ! command -v bpf-linker &>/dev/null; then
         log_info "Installing bpf-linker (this may take several minutes)..."
-        cargo +nightly install bpf-linker || {
+        local bpf_linker_status=0
+        if [[ "$(detect_distro)" == "alpine" ]]; then
+            # A fully static musl bpf-linker cannot dlopen Alpine's shared LLVM.
+            RUSTFLAGS="-C target-feature=-crt-static" cargo +nightly install bpf-linker ||
+                bpf_linker_status=$?
+        else
+            cargo +nightly install bpf-linker || bpf_linker_status=$?
+        fi
+        if [[ $bpf_linker_status -ne 0 ]]; then
             log_error "Failed to install bpf-linker"
             log_info "Common fix: ensure llvm and clang are installed"
             log_info "Manual: cargo +nightly install bpf-linker"
             return 1
-        }
+        fi
     fi
 
     log_ok "Nightly + rust-src + bpf-linker ready"
@@ -466,11 +585,13 @@ Wants=network.target
 
 [Service]
 Type=simple
+WorkingDirectory=/etc/aegis
+EnvironmentFile=-/etc/aegis/service.env
 ExecStart=/usr/local/bin/aegis-cli -i %i daemon
-ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+UMask=0077
 
 # ============================================================
 # SECURITY HARDENING
@@ -479,10 +600,13 @@ TimeoutStopSec=30
 # Capabilities - minimum required for eBPF/XDP/TC
 # CAP_BPF: load BPF programs (kernel 5.8+)
 # CAP_NET_ADMIN: attach XDP/TC, manage network
-# CAP_PERFMON: perf_event_open for eBPF stats
+# CAP_SETUID/CAP_SETGID/CAP_SETPCAP: required only while the CLI drops
+# privileges to the dedicated service account after loading/attaching eBPF.
+# The CLI then retains only CAP_BPF and CAP_NET_ADMIN.
+# CAP_PERFMON: perf_event_open for eBPF stats.
 # No CAP_SYS_ADMIN fallback in production.
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SETUID CAP_SETGID CAP_SETPCAP
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SETUID CAP_SETGID CAP_SETPCAP
 
 # Filesystem protection
 ProtectSystem=strict
@@ -533,8 +657,7 @@ SyslogIdentifier=aegis
 [Install]
 WantedBy=multi-user.target
 EOF
-    mkdir -p /var/log/aegis
-    chmod 755 /var/log/aegis
+    install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 /var/log/aegis
 
     systemctl daemon-reload
     log_ok "Systemd service installed: aegis@<interface>.service"
@@ -550,6 +673,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+WorkingDirectory=/etc/aegis
 ExecStart=/usr/local/bin/aegis-cli feeds update
 ExecStart=/usr/local/bin/aegis-cli feeds load
 EOF
@@ -584,9 +708,11 @@ install_logrotate() {
     compress
     missingok
     notifempty
-    create 0640 root root
+    create 0640 aegis aegis
     postrotate
-        systemctl try-restart aegis@*.service >/dev/null 2>&1 || true
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl try-restart 'aegis@*.service' >/dev/null 2>&1 || true
+        fi
     endscript
 }
 LOGRATEEOF
@@ -610,6 +736,8 @@ description="Aegis eBPF Firewall"
 
 command="/usr/local/bin/aegis-cli"
 command_args="-i ${AEGIS_INTERFACE} daemon"
+directory="/etc/aegis"
+export SUDO_UID SUDO_GID
 command_background=true
 pidfile="/run/aegis.pid"
 
@@ -619,7 +747,7 @@ depend() {
 }
 
 start_pre() {
-    checkpath --directory --owner root:root --mode 0755 /var/log/aegis
+    checkpath --directory --owner aegis:aegis --mode 0750 /var/log/aegis
 }
 INITEOF
     chmod +x /etc/init.d/aegis
@@ -629,6 +757,10 @@ INITEOF
 # Interface to protect
 AEGIS_INTERFACE=eth0
 CONFEOF
+    {
+        printf 'SUDO_UID=%s\n' "$(id -u "$SERVICE_USER")"
+        printf 'SUDO_GID=%s\n' "$(id -g "$SERVICE_USER")"
+    } >> /etc/conf.d/aegis
 
     log_ok "OpenRC service installed"
 }
@@ -652,6 +784,15 @@ install_sysvinit_service() {
 AEGIS_INTERFACE=${AEGIS_INTERFACE:-eth0}
 DAEMON=/usr/local/bin/aegis-cli
 PIDFILE=/run/aegis.pid
+
+if [ -r /etc/aegis/service.env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . /etc/aegis/service.env
+    set +a
+fi
+
+cd /etc/aegis || exit 1
 
 case "$1" in
     start)
@@ -788,14 +929,16 @@ install_prebuilt() {
         return 1
     fi
 
-    cp "$cli_bin" "$BIN_DIR/aegis-cli"
-    chmod +x "$BIN_DIR/aegis-cli"
+    install -m 0755 "$cli_bin" "$BIN_DIR/aegis-cli.new"
+    mv -f "$BIN_DIR/aegis-cli.new" "$BIN_DIR/aegis-cli"
     log_ok "Installed: $BIN_DIR/aegis-cli"
 
-    cp "$xdp_obj" "$SHARE_DIR/aegis.o"
+    install -m 0644 "$xdp_obj" "$SHARE_DIR/aegis.o.new"
+    mv -f "$SHARE_DIR/aegis.o.new" "$SHARE_DIR/aegis.o"
     log_ok "Installed: $SHARE_DIR/aegis.o"
 
-    cp "$tc_obj" "$SHARE_DIR/aegis-tc.o"
+    install -m 0644 "$tc_obj" "$SHARE_DIR/aegis-tc.o.new"
+    mv -f "$SHARE_DIR/aegis-tc.o.new" "$SHARE_DIR/aegis-tc.o"
     log_ok "Installed: $SHARE_DIR/aegis-tc.o"
 
     if [[ ! -x "$BIN_DIR/aegis-cli" \
@@ -846,16 +989,19 @@ cleanup_old_install() {
 
 install_default_config() {
     local config_dir="/etc/aegis"
-    local config_file="$config_dir/config.toml"
+    local system_config="$config_dir/config.toml"
+    local rule_config="$config_dir/aegis.yaml"
+    local config_group="root"
 
-    mkdir -p "$config_dir"
-
-    if [[ -f "$config_file" ]]; then
-        log_ok "Config exists: $config_file (preserved)"
-        return 0
+    if getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+        config_group="$SERVICE_GROUP"
     fi
+    install -d -o root -g "$config_group" -m 0750 "$config_dir"
 
-    cat > "$config_file" << 'CONFIGEOF'
+    if [[ -f "$system_config" ]]; then
+        log_ok "Config exists: $system_config (preserved)"
+    else
+        cat > "$system_config" << 'CONFIGEOF'
 # Aegis eBPF Firewall Configuration
 # https://github.com/m4rba4s/Aegis-eBPF
 
@@ -884,10 +1030,45 @@ json = false
 
 [allowlist]
 ips = []
-CONFIGEOF
 
-    chmod 0640 "$config_file"
-    log_ok "Default config: $config_file"
+[webhooks]
+enabled = false
+slack_url = ""
+pagerduty_key = ""
+generic_url = ""
+min_severity = "high"
+
+[dpi]
+enabled = false
+auto_block_threshold = 80
+rules_path = "/etc/aegis/rules"
+
+[fleet]
+enabled = false
+endpoint = "http://127.0.0.1:50051"
+token = ""
+
+[pcap]
+enabled = false
+CONFIGEOF
+        log_ok "Default config: $system_config"
+    fi
+
+    if [[ -f "$rule_config" ]]; then
+        log_ok "Config exists: $rule_config (preserved)"
+    else
+        cat > "$rule_config" << 'RULESEOF'
+# Aegis rule configuration.
+rules: []
+egress_rules: []
+egress_cidrs: []
+blocked_countries: []
+RULESEOF
+        log_ok "Default config: $rule_config"
+    fi
+
+    chown root:"$config_group" "$system_config" "$rule_config"
+    chmod 0640 "$system_config" "$rule_config"
 }
 
 install_completions() {
@@ -980,10 +1161,22 @@ run_checks() {
 
     # Rust
     if find_cargo; then
-        log_ok "cargo: $(cargo --version)"
+        local cargo_version
+        if cargo_version=$(cargo --version 2>/dev/null); then
+            log_ok "cargo: $cargo_version"
+        else
+            log_error "cargo exists but cannot execute successfully"
+            ((++errors))
+        fi
 
         if find_rustup; then
-            log_ok "rustup: $(rustup --version | head -n1)"
+            local rustup_version
+            if rustup_version=$(rustup --version 2>/dev/null); then
+                log_ok "rustup: ${rustup_version%%$'\n'*}"
+            else
+                log_error "rustup exists but cannot execute successfully"
+                ((++errors))
+            fi
         else
             log_warn "rustup: NOT installed (will be auto-installed)"
         fi
@@ -1039,8 +1232,14 @@ uninstall_aegis() {
     init_system=$(detect_init_system)
     case "$init_system" in
         systemd)
-            systemctl disable "aegis@*" 2>/dev/null || true
+            local unit
+            while IFS= read -r unit; do
+                [[ -n "$unit" ]] && systemctl disable "$unit" 2>/dev/null || true
+            done < <(systemctl list-unit-files --no-legend "aegis@*.service" 2>/dev/null | awk '{print $1}')
+            systemctl disable --now aegis-feeds.timer 2>/dev/null || true
             rm -f /etc/systemd/system/aegis@.service
+            rm -f /etc/systemd/system/aegis-feeds.service
+            rm -f /etc/systemd/system/aegis-feeds.timer
             systemctl daemon-reload 2>/dev/null || true
             log_ok "Systemd service removed"
             ;;
@@ -1071,8 +1270,6 @@ uninstall_aegis() {
     rm -f /usr/share/zsh/site-functions/_aegis-cli 2>/dev/null
     rm -f /usr/share/fish/vendor_completions.d/aegis-cli.fish 2>/dev/null
     rm -f /etc/logrotate.d/aegis 2>/dev/null
-    rm -f /etc/systemd/system/aegis-feeds.service 2>/dev/null
-    rm -f /etc/systemd/system/aegis-feeds.timer 2>/dev/null
     rm -f /etc/periodic/weekly/aegis-logclean 2>/dev/null
 
     if [[ -d /etc/aegis ]]; then
@@ -1146,6 +1343,10 @@ update_aegis() {
         after_hash=$(git rev-parse HEAD 2>/dev/null || echo "none")
         if [[ "$before_hash" == "$after_hash" ]]; then
             log_info "Already up-to-date ($before_hash)"
+            if [[ ! -t 0 ]]; then
+                log_ok "Nothing to do."
+                exit 0
+            fi
             read -rp "  Force rebuild anyway? [y/N] " ans
             if [[ ! "$ans" =~ ^[Yy]$ ]]; then
                 log_ok "Nothing to do."
@@ -1161,7 +1362,12 @@ update_aegis() {
         tmpdir=$(mktemp -d /tmp/aegis-update.XXXXXX)
         if curl -fsSL "$AEGIS_TARBALL_URL" | tar -xz -C "$tmpdir" --strip-components=1; then
             # Copy new source files over (preserve local config)
-            rsync -a --exclude='.git' --exclude='target' "$tmpdir/" "$SCRIPT_DIR/"
+            if command -v rsync >/dev/null 2>&1; then
+                rsync -a --exclude='.git' --exclude='target' "$tmpdir/" "$SCRIPT_DIR/"
+            else
+                tar -C "$tmpdir" --exclude='.git' --exclude='target' -cf - . |
+                    tar -C "$SCRIPT_DIR" -xf -
+            fi
             rm -rf "$tmpdir"
             log_ok "Source updated from tarball"
         else
@@ -1278,9 +1484,18 @@ main() {
                 echo "  --help           Show this help"
                 exit 0
                 ;;
-            *) shift ;;
+            *)
+                log_error "Unknown option: $1"
+                log_info "Run '$0 --help' for supported options"
+                exit 2
+                ;;
         esac
     done
+
+    if $check_only; then
+        run_checks
+        exit $?
+    fi
 
     show_banner
 
@@ -1298,23 +1513,25 @@ main() {
 
     log_info "Distro: $distro | Init: $init_system | Kernel: $(uname -r)"
 
-    # Check-only mode
-    if $check_only; then
-        run_checks
-        exit $?
-    fi
-
     # Validate kernel + BPF
     check_kernel_version
     check_bpf_fs
 
-    # Install system deps FIRST (gcc, clang, llvm, curl, etc.)
-    install_system_deps
-    check_runtime_tools
+    if $install_only; then
+        install_runtime_deps
+    else
+        # Install build dependencies before Rust and eBPF compilation.
+        install_system_deps
+        check_runtime_tools
+    fi
 
-    # Stop running services
-    stop_running_services
-    cleanup_old_install
+    if ! $skip_service; then
+        stop_running_services
+        cleanup_old_install
+        ensure_service_account
+    else
+        log_info "Leaving existing services and BPF pins untouched (--skip-service)"
+    fi
 
     # Build or install
     if $install_only; then
@@ -1346,7 +1563,9 @@ main() {
         esac
     fi
 
-    restart_services
+    if ! $skip_service; then
+        restart_services
+    fi
     show_usage
 }
 
