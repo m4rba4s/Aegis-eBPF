@@ -621,13 +621,11 @@ case "${1:-nonpriv}" in
     ;;
   privileged-lab)
     non_privileged
-    rm -rf /sys/fs/bpf/aegis 2>/dev/null || true
     privileged_lab
     ;;
   stress-lab)
     export AEGIS_STRESS_ITERATIONS="${AEGIS_STRESS_ITERATIONS:-25}"
     non_privileged
-    rm -rf /sys/fs/bpf/aegis 2>/dev/null || true
     privileged_lab
     ;;
   evidence-only)

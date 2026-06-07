@@ -686,7 +686,7 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
     let mut src_port = 0u16;
     let mut dst_port = 0u16;
     let mut tcp_flags = 0u8;
-    let mut ext_hdr_count: u8 = 0;
+    let ext_hdr_count: u8 = 0;
 
     // --- EARLY IPv6 BLOCKLIST/ALLOWLIST CHECKS ---
     // --- IPv6 WHITELIST (Link-local, Loopback, Multicast) ---
