@@ -164,3 +164,16 @@ A release candidate requires:
 - deploy/install start and rollback evidence
 - supply-chain gates pass or signed waiver
 - documentation that matches the evidence
+
+### Systemd Smoke-Test Evidence (Commit 8b2184d)
+- service started via systemd on veth interface
+- privilege drop succeeded
+- runtime UID/GID: 65534/65534
+- no "Failed to drop privileges"
+- service stopped cleanly
+- veth cleaned up
+
+### Lab & Stress Validation Evidence (Commit 8b2184d)
+- `privileged-lab` on clean disposable VM: PASS (18 cases)
+- `stress-lab` on clean disposable VM: PASS (25 iterations)
+- Archive SHA256: `1830aac91ef2caa96e5e17a99e06b964c63844b7a9f1b0d7830d29171b567cc8`
