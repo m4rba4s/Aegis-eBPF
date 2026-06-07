@@ -33,29 +33,31 @@
 
 > ¹ *Theoretical throughput for XDP in NIC driver mode with minimal rule set. Actual performance depends on NIC driver, kernel version, rule complexity, and hardware. Independent benchmarks pending.*
 
-## Features
+## Features Status & Claims
 
-### Core
-- **XDP Ingress Filtering** — Drop packets at NIC driver level
+To maintain transparency as a security tool, features are strictly categorized by their current validation status:
+
+### Implemented & Lab-Validated
+- **XDP Ingress Filtering** — Drop packets at NIC driver level based on IP/CIDR blocklists
 - **TC Egress Filtering** — Block outbound connections to malicious destinations
-- **Stateful Connection Tracking** — Native eBPF conntrack (no kernel module)
-- **CIDR Blocklists** — LPM Trie for efficient prefix matching
-- **IPv4 + IPv6 Support** — Dual-stack filtering with extension header security
-- **IP Allowlist** — Trusted IPs bypass all checks (config-driven)
+- **IPv4 + IPv6 Basic Filtering** — Dual-stack support with strict IP/CIDR blocklists
+- **IP Allowlist** — Trusted IPs bypass checks
+- **CIDR Blocklists** — LPM Trie matching
 
-### Traffic Handling Policy
-
-- **VLAN / QinQ (802.1Q / 802.1ad)**: Fail-closed **DROP** for all tagged frames on both XDP ingress and TC egress. Aegis does not parse VLAN-encapsulated payloads; this prevents firewall bypass via VLAN tag injection. Bounded VLAN-aware parsing may be added in a future release.
-- **IPv6 Enforcement Scope**: Exact IP blocklist and CIDR blocklist (LPM Trie) for both ingress (XDP) and egress (TC). Extension header chain walking is limited to the basic `next_header` field; packets with unrecognized extension headers are passed to the kernel stack. Full extension header parsing is not yet implemented.
-- **IPv4 Options / Fragments**: Packets with IP options (`IHL > 5`) and IP fragments (`MF` flag or non-zero fragment offset) are dropped fail-closed by TC egress to prevent header-parsing bypass.
-
-### Detection & Mitigation
+### Experimental (Beta)
+- **Stateful Connection Tracking** — Native eBPF conntrack (currently tracks SYN/ACK state, no deep stream reassembly)
+- **Dynamic Auto-Ban** — Userspace threat mitigation loop
 - **Port Scan Detection** — Bitmap-based unique port tracking with auto-ban
-- **SYN Flood Protection** — Token bucket rate limiting (XDP layer)
-- **TCP Anomaly Detection** — Xmas, Null, SYN+FIN scans
-- **TLS ClientHello Fingerprinting** — Native eBPF TLS payload extraction for JA3 scoring
-- **Dynamic Auto-Ban (OODA Loop)** — O(1) lock-free userspace threat mitigation
-- **ConnTrack Garbage Collection** — Clock-synced map cleanup preventing state exhaustion
+- **SYN Flood Protection** — Token bucket rate limiting at XDP layer
+
+### Theoretical / Benchmark Pending
+- **10M+ pps Throughput** — Theoretical zero-overhead performance in XDP NIC driver mode (independent benchmarks pending)
+
+### Planned v2 (Deferred / Stubbed)
+- **TLS ClientHello Fingerprinting** — Native eBPF TLS payload extraction for JA3 scoring (map exists, DPI deferred to v2)
+- **Heuristic Intrusion Detection** — Advanced protocol anomaly detection beyond basic TCP flags
+- **Full IPv6 Extension Header Security** — Currently passes unrecognized extension headers to the kernel; full chain walking planned for v2
+- **VLAN / QinQ Payload Parsing** — Currently fails-closed (drops all tagged frames)
 
 ### Interface
 - **Interactive TUI** (fd-isolated — zero stdout pollution):

@@ -40,4 +40,21 @@ fn test_cli_manpage_no_banner() {
     // The banner should NOT be in the stdout
     assert!(!stdout.contains("AEGIS eBPF FIREWALL"));
     assert!(!stdout.contains("██████"));
+
+    // Verify generated files
+    assert!(
+        std::fs::read_dir(&man_path).unwrap().next().is_some(),
+        "manpage command should generate at least one manpage file"
+    );
+
+    let mut combined = String::new();
+    for entry in std::fs::read_dir(&man_path).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            combined.push_str(&std::fs::read_to_string(path).unwrap_or_default());
+        }
+    }
+
+    assert!(!combined.contains("AEGIS eBPF FIREWALL"));
+    assert!(!combined.contains("██████"));
 }
