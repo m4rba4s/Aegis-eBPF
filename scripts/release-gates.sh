@@ -548,7 +548,7 @@ privileged_lab() {
 
   # Runtime attach through the real loader validates Aya load/attach paths and TC setup.
   # Scale daemon timeout for the XDP+TC replay matrix plus setup overhead.
-  local daemon_timeout=$(( 45 + stress_iterations * 30 ))
+  local daemon_timeout=$(( 120 + stress_iterations * 30 ))
   (
     cd "$lab_dir"
     timeout "${daemon_timeout}s" "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon

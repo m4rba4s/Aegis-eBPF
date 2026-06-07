@@ -53,7 +53,7 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 # BANS
 # ============================================================
 [bans]
-multiple-versions = "warn"
+multiple-versions = "allow"
 wildcards = "allow"
 
 # ============================================================

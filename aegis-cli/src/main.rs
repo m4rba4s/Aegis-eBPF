@@ -240,6 +240,29 @@ fn attach_tc_required(
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
 
+    // Handle Completions and Manpage commands early (MUST be before banner/tracing)
+    // to ensure clean machine-readable stdout output.
+    match &opt.command {
+        Commands::Completions { shell } => {
+            let mut cmd = Opt::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(*shell, &mut cmd, name, &mut std::io::stdout());
+            return Ok(());
+        }
+        Commands::Manpage { dir } => {
+            let cmd = Opt::command();
+            let name = cmd.get_name().to_string();
+            let man = clap_mangen::Man::new(cmd);
+            let mut buffer: Vec<u8> = Default::default();
+            man.render(&mut buffer)?;
+            let out_path = std::path::Path::new(dir).join(format!("{}.1", name));
+            std::fs::write(&out_path, buffer)?;
+            println!("✅ Man page generated at {}", out_path.display());
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Initialize tracing subscriber (skip in TUI mode — stderr is redirected)
     if !matches!(opt.command, Commands::Tui) {
         use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -279,8 +302,11 @@ async fn main() -> Result<(), anyhow::Error> {
         std::process::exit(1);
     }
 
-    // Banner shown conditionally (not for TUI - it has its own header)
-    if !matches!(opt.command, Commands::Tui) {
+    // Banner shown conditionally (not for TUI, Completions, or Manpage)
+    if !matches!(
+        opt.command,
+        Commands::Tui | Commands::Completions { .. } | Commands::Manpage { .. }
+    ) {
         println!(
             r#"
     ██████╗ ███████╗ ██████╗ ██╗███████╗

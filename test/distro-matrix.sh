@@ -23,14 +23,14 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # ─── Distro definitions ────────────────────────────────────────────
-# Format: name|image|pkg_cmd
+# Format: name|image
 DISTROS=(
-    "ubuntu|ubuntu:22.04|apt-get"
-    "debian|debian:12|apt-get"
-    "fedora|fedora:40|dnf"
-    "arch|archlinux:latest|pacman"
-    "alpine|alpine:3.19|apk"
-    "rocky|rockylinux:9|dnf"
+    "ubuntu|ubuntu:22.04"
+    "debian|debian:12"
+    "fedora|fedora:40"
+    "arch|archlinux:latest"
+    "alpine|alpine:edge"
+    "rocky|rockylinux:9"
 )
 
 # ─── Generate Dockerfile for each distro ───────────────────────────
@@ -44,25 +44,25 @@ FROM ${image}
 # Install system deps based on distro
 $(case "$name" in
     ubuntu|debian)
-        echo 'RUN apt-get update && apt-get install -y \'
-        echo '    build-essential pkg-config curl git \'
-        echo '    llvm clang libelf-dev \'
-        echo '    && rm -rf /var/lib/apt/lists/*'
+        printf '%s\n' "RUN apt-get update && apt-get install -y \\"
+        printf '%s\n' "    build-essential pkg-config curl git \\"
+        printf '%s\n' "    llvm clang libelf-dev protobuf-compiler \\"
+        printf '%s\n' "    && rm -rf /var/lib/apt/lists/*"
         ;;
     fedora|rocky)
-        echo 'RUN dnf install -y \'
-        echo '    gcc make pkg-config curl git \'
-        echo '    llvm clang llvm-devel elfutils-libelf-devel \'
-        echo '    && dnf clean all'
+        printf '%s\n' "RUN dnf install -y \\"
+        printf '%s\n' "    gcc make pkg-config curl git \\"
+        printf '%s\n' "    llvm clang llvm-devel elfutils-libelf-devel protobuf-compiler \\"
+        printf '%s\n' "    && dnf clean all"
         ;;
     arch)
-        echo 'RUN pacman -Sy --noconfirm \'
-        echo '    base-devel llvm clang libelf curl git'
+        printf '%s\n' "RUN pacman -Sy --noconfirm \\"
+        printf '%s\n' "    base-devel llvm clang libelf protobuf curl git"
         ;;
     alpine)
-        echo 'RUN apk add --no-cache \'
-        echo '    build-base musl-dev linux-headers \'
-        echo '    llvm clang libelf-dev curl git'
+        printf '%s\n' "RUN apk add --no-cache \\"
+        printf '%s\n' "    build-base musl-dev linux-headers \\"
+        printf '%s\n' "    llvm22 llvm22-dev clang22 clang elfutils-dev protobuf curl git"
         ;;
 esac)
 
@@ -73,7 +73,11 @@ ENV PATH="/root/.cargo/bin:\${PATH}"
 # Install nightly + bpf-linker
 RUN rustup install nightly && \\
     rustup component add rust-src --toolchain nightly
-RUN cargo install bpf-linker
+$(if [[ "$name" == "alpine" ]]; then
+    echo 'RUN RUSTFLAGS="-C target-feature=-crt-static" cargo install bpf-linker'
+else
+    echo 'RUN cargo install bpf-linker'
+fi)
 
 # Copy source
 WORKDIR /build
@@ -97,8 +101,8 @@ DOCKERFILE
 # ─── Run test for a single distro ──────────────────────────────────
 run_test() {
     local entry="$1"
-    local name image pkg_cmd
-    IFS='|' read -r name image pkg_cmd <<< "$entry"
+    local name image
+    IFS='|' read -r name image <<< "$entry"
 
     echo ""
     echo -e "${BOLD}═══════════════════════════════════════════════════${NC}"
@@ -110,13 +114,17 @@ run_test() {
     tmpdir=$(mktemp -d)
     local dockerfile="$tmpdir/Dockerfile"
     local tag="aegis-test-${name}"
+    local before_images="$tmpdir/images.before"
+    local after_images="$tmpdir/images.after"
 
     generate_dockerfile "$name" "$image" > "$dockerfile"
+    "$CONTAINER_ENGINE" images --filter dangling=true --quiet |
+        sort -u > "$before_images"
 
     local start_time
     start_time=$(date +%s)
 
-    if docker build \
+    if "$CONTAINER_ENGINE" build \
         -t "$tag" \
         -f "$dockerfile" \
         "$SCRIPT_DIR" \
@@ -142,16 +150,32 @@ run_test() {
     fi
 
     # Cleanup image (keep disk space)
-    docker rmi "$tag" 2>/dev/null || true
+    "$CONTAINER_ENGINE" rmi "$tag" 2>/dev/null || true
+    "$CONTAINER_ENGINE" images --filter dangling=true --quiet |
+        sort -u > "$after_images"
+    mapfile -t new_dangling_images < <(comm -13 "$before_images" "$after_images")
+    if [[ ${#new_dangling_images[@]} -gt 0 ]]; then
+        "$CONTAINER_ENGINE" rmi -f "${new_dangling_images[@]}" >/dev/null 2>&1 || true
+    fi
     rm -rf "$tmpdir"
 }
 
 # ─── Main ──────────────────────────────────────────────────────────
 main() {
-    if ! command -v docker &>/dev/null; then
-        echo -e "${RED}❌ Docker is required to run the test matrix${NC}"
+    if [[ -n "${CONTAINER_ENGINE:-}" ]]; then
+        command -v "$CONTAINER_ENGINE" >/dev/null 2>&1 || {
+            echo -e "${RED}❌ Container engine not found: $CONTAINER_ENGINE${NC}"
+            exit 1
+        }
+    elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        CONTAINER_ENGINE=docker
+    elif command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+        CONTAINER_ENGINE=podman
+    else
+        echo -e "${RED}❌ A working Docker or Podman engine is required${NC}"
         exit 1
     fi
+    export CONTAINER_ENGINE
 
     local filter="${1:-}"
     declare -a RESULTS=()
@@ -163,7 +187,7 @@ main() {
 
     for entry in "${DISTROS[@]}"; do
         local name
-        IFS='|' read -r name _ _ <<< "$entry"
+        IFS='|' read -r name _ <<< "$entry"
 
         # Filter by name if specified
         if [[ -n "$filter" ]] && [[ "$name" != "$filter" ]]; then

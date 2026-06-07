@@ -10,32 +10,3 @@ kind: ServiceAccount
 metadata:
   name: aegis
   namespace: aegis-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: aegis
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "nodes", "namespaces"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["patch"]
-    resourceNames: []
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: aegis
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: aegis
-subjects:
-  - kind: ServiceAccount
-    name: aegis
-    namespace: aegis-system
