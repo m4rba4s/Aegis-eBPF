@@ -1,6 +1,6 @@
 [package]
 name = "aegis-cni"
-version = "4.1.5"
+version = "4.3.0-rc.1"
 edition = "2021"
 license = "MIT"
 description = "Aegis eBPF Firewall — Kubernetes CNI plugin for per-pod XDP policy"

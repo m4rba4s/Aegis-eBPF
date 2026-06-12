@@ -173,8 +173,8 @@ fn read_bpf_stats() -> Option<(u64, u64, u64, u64, u64, u64, u64)> {
     use aegis_common::Stats;
     use aya::maps::PerCpuArray;
 
-    let path = "/sys/fs/bpf/aegis/STATS";
-    let md = aya::maps::MapData::from_pin(path).ok()?;
+    let path = crate::map_manager::map_path("STATS");
+    let md = aya::maps::MapData::from_pin(&path).ok()?;
     let map = aya::maps::Map::PerCpuArray(md);
     let arr = PerCpuArray::<_, Stats>::try_from(map).ok()?;
     let per_cpu = arr.get(&0, 0).ok()?;

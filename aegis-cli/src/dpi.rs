@@ -113,8 +113,8 @@ pub fn auto_block_ip(ip: u32) -> bool {
     use aegis_common::FlowKey;
     use aya::maps::HashMap;
 
-    let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let md = match aya::maps::MapData::from_pin(path) {
+    let path = crate::map_manager::map_path("BLOCKLIST");
+    let md = match aya::maps::MapData::from_pin(&path) {
         Ok(md) => md,
         Err(_) => return false,
     };

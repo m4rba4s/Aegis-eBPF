@@ -72,6 +72,31 @@ Run this after `privileged-lab` and before cutting a production release
 candidate. It is still lab-only and uses the same disposable veth/netns setup;
 it does not touch a production NIC.
 
+### Host Resource Stop Rules
+
+Check the virtualization host before starting the disposable VM:
+
+```bash
+free -h
+awk '/MemAvailable|SwapTotal|SwapFree/ {print}' /proc/meminfo
+ps -eo pid,comm,rss,%mem,%cpu --sort=-rss | head -20
+```
+
+Do not start or continue the stress gate when any of these conditions is true:
+
+- host `MemAvailable` is below 8 GiB,
+- more than 50% of host swap is already used,
+- the VM plus active desktop applications consume more than 80% of host RAM,
+- a package update, large build, browser workload, or another VM is competing
+  for memory or I/O,
+- the desktop, SSH session, or VM console starts lagging.
+
+The gate also performs an in-environment preflight. Stress mode requires at
+least 4096 MiB `MemAvailable` and refuses more than 75% swap use by default.
+`AEGIS_MIN_AVAILABLE_MB` and `AEGIS_MAX_SWAP_USED_PERCENT` may make the limits
+stricter. `AEGIS_ALLOW_LOW_RESOURCE_LAB=1` is an explicit waiver and must be
+recorded with the evidence; do not use it for release qualification.
+
 ```bash
 sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay-stress \
   AEGIS_STRESS_ITERATIONS=25 \
@@ -84,13 +109,30 @@ The stress gate repeats the full packet replay matrix for
 It is a stability/enforcement stress check, not a throughput benchmark. Do not
 publish packets-per-second claims from this gate.
 
+Safety bounds:
+
+- maximum stress iterations: `50`,
+- calculated whole-replay watchdog, capped at `7200` seconds,
+- `SIGTERM` followed by `SIGKILL` after 30 seconds if replay ignores shutdown,
+- resource preflight archived as `resource-preflight.log`.
+
+Stop the run immediately if the host begins swapping heavily, thermal
+throttling persists, the VM console stops responding, or cleanup cannot be
+verified. A hard-reset run is failed evidence, not a stress PASS.
+
 Required stress evidence:
 
 - `stress-summary.log`
 - `case: stress_replay_matrix`
 - `stress_iterations: <AEGIS_STRESS_ITERATIONS>`
-- `stress_total_case_runs: <iterations * 14>`
+- `stress_total_case_runs: <iterations * current case count>`
 - `pass: true`
+
+The current case count is `18`, obtained from:
+
+```bash
+python3 scripts/packet-replay-lab.py --list-cases | wc -l
+```
 
 ## Packet Replay Artifacts
 
@@ -115,10 +157,24 @@ Each log must include:
 
 ```text
 case: <case_name>
+commit: <full-sha>
+release_version: <version>
+timestamp: <utc-iso8601>
+distribution: <os-release>
+kernel: <uname -r>
+architecture: <uname -m>
+interface: <iface>
+xdp_mode: <driver|skb|attached|not_attached>
+tc_attached: <true|false>
 packet: <description>
 expected_verdict: pass|drop
 observed_verdict: pass|drop|unknown
 command: <exact command>
+command_output: <path to raw command transcript>
+counter_before: <raw counter snapshot>
+counter_after: <raw counter snapshot>
+input_pcap: <path to generated input pcap>
+capture_pcap: <path to generated receiver pcap>
 pass: true|false
 ```
 
@@ -165,15 +221,11 @@ A release candidate requires:
 - supply-chain gates pass or signed waiver
 - documentation that matches the evidence
 
-### Systemd Smoke-Test Evidence (Commit 8b2184d)
-- service started via systemd on veth interface
-- privilege drop succeeded
-- runtime UID/GID: 65534/65534
-- no "Failed to drop privileges"
-- service stopped cleanly
-- veth cleaned up
+### Historical v4.2.0 Claim
 
-### Lab & Stress Validation Evidence (Commit 8b2184d)
-- `privileged-lab` on clean disposable VM: PASS (18 cases)
-- `stress-lab` on clean disposable VM: PASS (25 iterations)
-- Archive SHA256: `1830aac91ef2caa96e5e17a99e06b964c63844b7a9f1b0d7830d29171b567cc8`
+Commit `0dadb3e` recorded a systemd smoke test, an 18-case privileged lab PASS,
+a 25-iteration stress PASS, and archive SHA-256
+`1830aac91ef2caa96e5e17a99e06b964c63844b7a9f1b0d7830d29171b567cc8`.
+The raw archive is not present or linked as a retrievable release asset in this
+repository, so these entries are `historical_unverified`, not current release
+evidence. See `ENTERPRISE_QA_REPORT_v4.2.0.md` for the retraction.

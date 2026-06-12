@@ -1,37 +1,22 @@
-import socket
-import threading
-import time
+#!/usr/bin/env python3
+"""Retired legacy load generator.
 
-target_ip = "127.0.0.1"
-target_port = 80
-threads = 100
-running = True
+The old implementation opened sockets from 100 tight-loop threads and had no
+resource guardrails. Keep this path as an explicit refusal so old instructions
+cannot accidentally start it.
+"""
 
-def attack():
-    while running:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(1)
-            s.connect((target_ip, target_port))
-            s.send(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            s.close()
-        except:
-            pass
+import sys
 
-print(f"Starting {threads} threads for stress test...")
-thread_list = []
-for i in range(threads):
-    t = threading.Thread(target=attack)
-    t.start()
-    thread_list.append(t)
 
-try:
-    time.sleep(10)
-except KeyboardInterrupt:
-    pass
+def main() -> int:
+    print(
+        "stress_test.py is retired. Use the isolated bounded stress-lab gate "
+        "documented in docs/RELEASE_VALIDATION.md.",
+        file=sys.stderr,
+    )
+    return 2
 
-running = False
-print("Stopping threads...")
-for t in thread_list:
-    t.join()
-print("Stress test finished.")
+
+if __name__ == "__main__":
+    raise SystemExit(main())

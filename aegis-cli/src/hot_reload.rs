@@ -19,6 +19,10 @@ const POLL_INTERVAL_SECS: u64 = 5;
 
 /// Spawn the config hot-reload watcher as a background tokio task.
 pub fn spawn_config_watcher(toml_path: &str, yaml_path: &str) {
+    if std::env::var("AEGIS_ENABLE_HOT_RELOAD").ok().as_deref() != Some("1") {
+        info!("hot reload disabled by default; set AEGIS_ENABLE_HOT_RELOAD=1 to enable");
+        return;
+    }
     let toml_path = toml_path.to_string();
     let yaml_path = yaml_path.to_string();
 
@@ -36,7 +40,9 @@ pub fn spawn_config_watcher(toml_path: &str, yaml_path: &str) {
             if current_toml != last_toml_modified {
                 info!(path = %toml_path, "config change detected — reloading");
                 last_toml_modified = current_toml;
-                apply_toml_config(&toml_path);
+                if let Err(e) = apply_toml_config(&toml_path) {
+                    error!(error = %e, "TOML reload rejected; preserving last-known-good policy");
+                }
             }
 
             // Check YAML rules
@@ -44,7 +50,9 @@ pub fn spawn_config_watcher(toml_path: &str, yaml_path: &str) {
             if current_yaml != last_yaml_modified {
                 info!(path = %yaml_path, "rules change detected — reloading");
                 last_yaml_modified = current_yaml;
-                apply_yaml_rules(&yaml_path);
+                if let Err(e) = apply_yaml_rules(&yaml_path) {
+                    error!(error = %e, "YAML reload rejected; preserving last-known-good policy");
+                }
             }
         }
     });
@@ -67,8 +75,9 @@ fn get_modified(path: &str) -> u64 {
 }
 
 /// Apply TOML config changes to BPF CONFIG map
-fn apply_toml_config(path: &str) {
-    let cfg = AegisConfig::load(Some(path));
+fn apply_toml_config(path: &str) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let cfg: AegisConfig = toml::from_str(&content)?;
 
     // Update BPF CONFIG map with module toggles
     use aegis_common::{
@@ -77,12 +86,12 @@ fn apply_toml_config(path: &str) {
     };
     use aya::maps::HashMap;
 
-    let map_path = "/sys/fs/bpf/aegis/CONFIG";
-    let md = match aya::maps::MapData::from_pin(map_path) {
+    let map_path = crate::map_manager::map_path("CONFIG");
+    let md = match aya::maps::MapData::from_pin(&map_path) {
         Ok(md) => md,
         Err(e) => {
             warn!(error = %e, "cannot open CONFIG map for hot-reload");
-            return;
+            return Ok(());
         }
     };
     let map = aya::maps::Map::HashMap(md);
@@ -90,9 +99,12 @@ fn apply_toml_config(path: &str) {
         Ok(hm) => hm,
         Err(e) => {
             warn!(error = %e, "CONFIG map type error");
-            return;
+            return Ok(());
         }
     };
+    // Snapshot the current state before any mutation so a failed reload can
+    // restore the prior policy instead of leaving a partially applied update.
+    let snapshot: Vec<(u32, u32)> = hm.iter().filter_map(|result| result.ok()).collect();
 
     let toggles: [(u32, bool); 8] = [
         (CFG_PORT_SCAN, cfg.modules.port_scan),
@@ -108,36 +120,41 @@ fn apply_toml_config(path: &str) {
     let mut updated = 0u32;
     for (key, enabled) in toggles {
         let val = if enabled { 1u32 } else { 0u32 };
-        if hm.insert(key, val, 0).is_ok() {
-            updated += 1;
+        if let Err(e) = hm.insert(key, val, 0) {
+            for (restore_key, restore_val) in snapshot.iter().copied() {
+                let _ = hm.insert(restore_key, restore_val, 0);
+            }
+            return Err(e.into());
         }
+        updated += 1;
     }
 
     info!(
         updated = updated,
         "BPF CONFIG map reloaded — {} module toggles applied", updated
     );
+    Ok(())
 }
 
 /// Apply YAML rule changes to BPF BLOCKLIST map
-fn apply_yaml_rules(path: &str) {
+fn apply_yaml_rules(path: &str) -> anyhow::Result<()> {
     let cfg = match crate::config::Config::load(path) {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e, "failed to parse YAML rules on reload");
-            return;
+            return Err(e);
         }
     };
 
     use aegis_common::FlowKey;
     use aya::maps::HashMap;
 
-    let map_path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let md = match aya::maps::MapData::from_pin(map_path) {
+    let map_path = crate::map_manager::map_path("BLOCKLIST");
+    let md = match aya::maps::MapData::from_pin(&map_path) {
         Ok(md) => md,
         Err(e) => {
             warn!(error = %e, "cannot open BLOCKLIST map for rule reload");
-            return;
+            return Ok(());
         }
     };
     let map = aya::maps::Map::HashMap(md);
@@ -145,27 +162,53 @@ fn apply_yaml_rules(path: &str) {
         Ok(hm) => hm,
         Err(e) => {
             warn!(error = %e, "BLOCKLIST map type error");
-            return;
+            return Ok(());
         }
     };
+    // The reload path is transactional at the map level: capture the current
+    // contents first, then replace them as a unit and restore the snapshot on
+    // any insertion failure.
+    let snapshot: Vec<(FlowKey, u32)> = hm.iter().filter_map(|result| result.ok()).collect();
+    let mut desired: Vec<(FlowKey, u32)> = Vec::new();
 
-    let mut loaded = 0u32;
     for rule in &cfg.rules {
         if rule.action.to_lowercase() == "drop" {
-            let key = FlowKey {
-                src_ip: u32::from(rule.ip).to_be(), // Network Byte Order for BPF map
-                dst_port: rule.port,
-                proto: crate::config::parse_proto(&rule.proto),
-                _pad: 0,
-            };
-            if hm.insert(key, 1, 0).is_ok() {
-                loaded += 1;
-            }
+            desired.push((
+                FlowKey {
+                    src_ip: u32::from(rule.ip).to_be(),
+                    dst_port: rule.port,
+                    proto: crate::config::parse_proto(&rule.proto),
+                    _pad: 0,
+                },
+                1,
+            ));
         }
+    }
+
+    let current_keys: Vec<FlowKey> = snapshot.iter().map(|(key, _)| *key).collect();
+    for key in &current_keys {
+        let _ = hm.remove(key);
+    }
+
+    let mut loaded = 0u32;
+    let mut inserted: Vec<FlowKey> = Vec::new();
+    for (key, value) in desired {
+        if let Err(e) = hm.insert(key, value, 0) {
+            for inserted_key in inserted.iter().rev() {
+                let _ = hm.remove(inserted_key);
+            }
+            for (restore_key, restore_val) in snapshot.iter().copied() {
+                let _ = hm.insert(restore_key, restore_val, 0);
+            }
+            return Err(e.into());
+        }
+        inserted.push(key);
+        loaded += 1;
     }
 
     info!(
         rules = loaded,
         "BLOCKLIST reloaded — {} drop rules applied", loaded
     );
+    Ok(())
 }

@@ -158,11 +158,11 @@ pub fn handle_allow_command(action: &AllowAction) -> anyhow::Result<()> {
 
     // 2. Update runtime BPF Map (Dynamic)
     // Try to open pinned maps
-    let map_path = "/sys/fs/bpf/aegis/ALLOWLIST";
-    let map_path_v6 = "/sys/fs/bpf/aegis/ALLOWLIST_IPV6";
+    let map_path = crate::map_manager::map_path("ALLOWLIST");
+    let map_path_v6 = crate::map_manager::map_path("ALLOWLIST_IPV6");
 
     // IPv4 Map Update
-    if let Ok(md) = MapData::from_pin(map_path) {
+    if let Ok(md) = MapData::from_pin(&map_path) {
         let map = Map::HashMap(md);
         if let Ok(mut hash_map) = HashMap::try_from(map) {
             if let AllowAction::Add {
@@ -208,21 +208,23 @@ pub fn handle_allow_command(action: &AllowAction) -> anyhow::Result<()> {
 
 pub fn handle_status_command() -> anyhow::Result<()> {
     // 1. Read STATS map (pinned)
-    let map_path = "/sys/fs/bpf/aegis/STATS";
+    let map_path = crate::map_manager::map_path("STATS");
     use aya::maps::PerCpuArray;
 
     // Load map from path
-    let map = match aya::maps::MapData::from_pin(map_path) {
+    let map = match aya::maps::MapData::from_pin(&map_path) {
         Ok(md) => aya::maps::Map::PerCpuArray(md),
         Err(_) => {
-            println!("❌ Aegis is not running (maps not found at {})", map_path);
+            println!(
+                "❌ Aegis is not running (maps not found at {})",
+                map_path.display()
+            );
             return Ok(());
         }
     };
     let array = PerCpuArray::<_, Stats>::try_from(map)
         .map_err(|e| anyhow::anyhow!("Failed into PerCpuArray: {}", e))?;
 
-    // Aggregate stats
     // Aggregate stats
     let mut total = Stats::default();
 
@@ -243,7 +245,7 @@ pub fn handle_status_command() -> anyhow::Result<()> {
     }
 
     // 2. Read BLOCKLIST count
-    let block_path = "/sys/fs/bpf/aegis/BLOCKLIST";
+    let block_path = crate::map_manager::map_path("BLOCKLIST");
     let block_count = if let Ok(md) = aya::maps::MapData::from_pin(block_path) {
         let map = aya::maps::Map::HashMap(md);
         if let Ok(hm) = HashMap::<_, aegis_common::FlowKey, u32>::try_from(map) {

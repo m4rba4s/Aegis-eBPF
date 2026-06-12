@@ -321,6 +321,14 @@ impl AegisConfig {
         std::fs::write(config_path, content)?;
         Ok(())
     }
+
+    pub fn load_strict(path: Option<&str>) -> anyhow::Result<Self> {
+        let config_path = path.unwrap_or(DEFAULT_SYSTEM_CONFIG);
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("Failed to read config file: {}", config_path))?;
+        toml::from_str(&content)
+            .with_context(|| format!("Failed to parse TOML config: {}", config_path))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

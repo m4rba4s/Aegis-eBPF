@@ -25,6 +25,9 @@ pub const PACKET_LOG_SIZE_INVARIANT: usize = 32;
 /// Invariant: Stats struct must be safe for per-CPU access
 pub const STATS_ALIGNMENT_INVARIANT: usize = 8;
 
+/// Invariant: userspace and both eBPF programs must agree on the Stats map value size.
+pub const STATS_SIZE_INVARIANT: usize = 112;
+
 /// Invariant: All reason codes must be < 256 (u8)
 pub const MAX_REASON_CODE: u8 = 255;
 
@@ -51,6 +54,9 @@ const _: () = {
     // LpmKeyIpv4 contains only address data; Aya's LPM Key wrapper owns prefix_len.
     assert!(core::mem::size_of::<LpmKeyIpv4>() == 4);
     assert!(core::mem::size_of::<LpmKeyIpv6>() == 16);
+
+    assert!(core::mem::size_of::<Stats>() == STATS_SIZE_INVARIANT);
+    assert!(core::mem::align_of::<Stats>() == STATS_ALIGNMENT_INVARIANT);
 
     // Reason codes must not overlap with threat codes conceptually
     // (enforced by separate constant namespaces)

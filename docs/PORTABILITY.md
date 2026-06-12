@@ -5,13 +5,13 @@ supported only after the listed evidence is archived for the release commit.
 
 | target | xdp mode | tc egress | support level | required evidence |
 | --- | --- | --- | --- | --- |
-| Fedora latest x86_64 | driver when available, SKB fallback | clsact egress | supported after proof | `release-gates.sh privileged-lab` log plus replay artifacts |
-| Ubuntu LTS x86_64 | SKB minimum, driver when available | clsact egress | supported after proof | privileged lab log plus replay artifacts |
-| Debian stable x86_64 | SKB minimum, driver when available | clsact egress | supported after proof | privileged lab log plus replay artifacts |
-| RHEL/CentOS 9 x86_64 | SKB minimum, driver when available | clsact egress | supported after proof | privileged lab log; use static musl binary or build from source |
-| Arch latest x86_64 | driver when available, SKB fallback | clsact egress | best_effort until repeated | privileged lab log plus replay artifacts |
-| Alpine x86_64 | SKB minimum | clsact egress | supported via musl binary | static musl binary; privileged lab log plus replay artifacts |
-| arm64 | SKB minimum | clsact egress | unsupported unless tested | native arm64 build, verifier/load/attach, and replay logs |
+| Fedora latest x86_64 | driver when available, SKB fallback | clsact egress | tested_supported after archived evidence | `release-gates.sh privileged-lab` log plus replay artifacts |
+| Ubuntu LTS x86_64 | SKB minimum, driver when available | clsact egress | tested_supported after archived evidence | privileged lab log plus replay artifacts |
+| Debian stable x86_64 | SKB minimum, driver when available | clsact egress | tested_supported after archived evidence | privileged lab log plus replay artifacts |
+| RHEL/CentOS 9 x86_64 | SKB minimum, driver when available | clsact egress | tested_with_limitations | privileged lab log; use static musl binary or build from source |
+| Arch latest x86_64 | driver when available, SKB fallback | clsact egress | best_effort until repeated evidence | privileged lab log plus replay artifacts |
+| Alpine x86_64 | SKB minimum | clsact egress | best_effort until runtime evidence | static musl binary; privileged lab log plus replay artifacts |
+| arm64 | SKB minimum | clsact egress | unsupported unless tested natively | native arm64 build, verifier/load/attach, and replay logs |
 | veth/netns lab | SKB/generic expected | clsact egress | required release lab | `sudo -E AEGIS_PACKET_REPLAY_DIR=... ./scripts/release-gates.sh privileged-lab` |
 | physical NIC | driver preferred, SKB fallback | clsact egress | supported only if tested | NIC/driver/kernel log plus replay or equivalent packet evidence |
 | systemd host | same as host target | clsact egress | supported after service proof | install log, `systemctl start/stop/status`, `ip` and `tc` cleanup state |
@@ -25,9 +25,11 @@ Aegis supports two distribution modes with different portability characteristics
 | mode | glibc dependency | distro scope | how to build |
 | --- | --- | --- | --- |
 | **From source** (`install.sh`) | Links to host glibc | Any distro with kernel ≥ 5.4 + gcc/clang | `sudo ./install.sh` |
-| **Static musl binary** (Docker/CI) | None (fully static) | Any x86_64 Linux ≥ 5.4 | `docker build --output=dist .` or CI `portable-static-build` job |
+| **Static musl binary** (Docker/CI) | None (fully static) | x86_64 Linux, evidence-bound | `docker build --output=dist .` or CI `portable-static-build` job |
 
-The from-source path always produces a binary compatible with the build host. The static musl binary is the recommended distribution artifact for pre-built releases.
+The from-source path builds a host-specific binary. The static musl binary is
+the recommended distribution artifact for pre-built releases, but it still
+requires release-commit runtime evidence before it can be called supported.
 
 ## Requirements
 

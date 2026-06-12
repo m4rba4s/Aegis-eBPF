@@ -5,6 +5,18 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|output| output.trim().to_string())
+        .filter(|output| !output.is_empty())
+}
 
 fn main() {
     // Tell cargo about custom cfg flags
@@ -13,9 +25,14 @@ fn main() {
     // Re-run if eBPF objects change
     println!("cargo:rerun-if-changed=../target/bpfel-unknown-none/release/aegis");
     println!("cargo:rerun-if-changed=../target/bpfel-unknown-none/release/aegis-tc");
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/index");
+    println!("cargo:rerun-if-env-changed=AEGIS_REQUIRE_EMBEDDED");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.parent().unwrap();
+    let require_embedded = env::var_os("AEGIS_REQUIRE_EMBEDDED").is_some();
 
     // Check for XDP eBPF object
     let xdp_path = workspace_root.join("target/bpfel-unknown-none/release/aegis");
@@ -25,6 +42,11 @@ fn main() {
         println!("cargo:rustc-cfg=embedded_xdp");
         eprintln!("build.rs: Found XDP object at {}", canonical.display());
     } else {
+        assert!(
+            !require_embedded,
+            "release build requires the XDP object at {}",
+            xdp_path.display()
+        );
         eprintln!(
             "build.rs: XDP object not found at {:?}, embedding disabled",
             xdp_path
@@ -39,6 +61,11 @@ fn main() {
         println!("cargo:rustc-cfg=embedded_tc");
         eprintln!("build.rs: Found TC object at {}", canonical.display());
     } else {
+        assert!(
+            !require_embedded,
+            "release build requires the TC object at {}",
+            tc_path.display()
+        );
         eprintln!(
             "build.rs: TC object not found at {:?}, embedding disabled",
             tc_path
@@ -46,34 +73,27 @@ fn main() {
     }
 
     // ── Build metadata for --version ──────────────────────────
-    let git_hash = std::process::Command::new("git")
-        .args(["rev-parse", "--short=8", "HEAD"])
+    let mut git_hash =
+        command_output("git", &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let worktree_dirty = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=normal"])
         .output()
         .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.is_empty());
+    if worktree_dirty {
+        git_hash.push_str("-dirty");
+    }
     println!("cargo:rustc-env=AEGIS_GIT_HASH={}", git_hash);
 
-    let build_date = std::process::Command::new("date")
-        .args(["+%Y-%m-%d"])
-        .output()
+    let build_date = env::var("SOURCE_DATE_EPOCH")
         .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
+        .filter(|value| value.parse::<u64>().is_ok())
+        .or_else(|| command_output("git", &["show", "-s", "--format=%cI", "HEAD"]))
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=AEGIS_BUILD_DATE={}", build_date);
 
-    let rustc_ver = std::process::Command::new("rustc")
-        .args(["--version"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
+    let rustc_ver = command_output("rustc", &["--version"]).unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=AEGIS_RUSTC={}", rustc_ver);
 
     println!("cargo:rerun-if-changed=../proto/aegis.proto");

@@ -83,6 +83,10 @@ fn read_bpf_stats_shared(handles: &SharedHandles) -> Option<Stats> {
         total.block_cidr += stat.block_cidr;
         total.portscan_hits += stat.portscan_hits;
         total.conntrack_hits += stat.conntrack_hits;
+        total.xdp_exec_time_sum_ns += stat.xdp_exec_time_sum_ns;
+        if stat.xdp_exec_time_max_ns > total.xdp_exec_time_max_ns {
+            total.xdp_exec_time_max_ns = stat.xdp_exec_time_max_ns;
+        }
     }
     Some(total)
 }
@@ -146,8 +150,8 @@ fn read_softnet_stats() -> Option<SoftnetStats> {
 
 /// Count current CONN_TRACK entries (LRU map utilization)
 fn read_conntrack_count() -> u64 {
-    let path = "/sys/fs/bpf/aegis/CONN_TRACK";
-    let md = match aya::maps::MapData::from_pin(path) {
+    let path = crate::map_manager::map_path("CONN_TRACK");
+    let md = match aya::maps::MapData::from_pin(&path) {
         Ok(md) => md,
         Err(_) => return 0,
     };
@@ -208,6 +212,20 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
         );
         let _ = writeln!(buf, "# TYPE aegis_events_fail_total counter");
         let _ = writeln!(buf, "aegis_events_fail_total {}", s.events_fail);
+
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_xdp_exec_time_sum_ns Sum of measured XDP program execution time in nanoseconds"
+        );
+        let _ = writeln!(buf, "# TYPE aegis_xdp_exec_time_sum_ns counter");
+        let _ = writeln!(buf, "aegis_xdp_exec_time_sum_ns {}", s.xdp_exec_time_sum_ns);
+
+        let _ = writeln!(
+            buf,
+            "# HELP aegis_xdp_exec_time_max_ns Maximum measured XDP program execution time in nanoseconds"
+        );
+        let _ = writeln!(buf, "# TYPE aegis_xdp_exec_time_max_ns gauge");
+        let _ = writeln!(buf, "aegis_xdp_exec_time_max_ns {}", s.xdp_exec_time_max_ns);
     } else {
         let _ = writeln!(buf, "# aegis: BPF maps not available (is aegis running?)");
     }
@@ -253,19 +271,24 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
 
 fn json_stats(stats: &Option<Stats>, blocklist_count: u64) -> String {
     match stats {
-        Some(s) => format!(
-            r#"{{"up":true,"packets":{{"seen":{},"drop":{},"pass":{}}},"blocks":{{"manual":{},"cidr_feed":{}}},"portscan_hits":{},"conntrack_hits":{},"events":{{"ok":{},"fail":{}}},"blocklist_entries":{}}}"#,
-            s.pkts_seen,
-            s.pkts_drop,
-            s.pkts_pass,
-            s.block_manual,
-            s.block_cidr,
-            s.portscan_hits,
-            s.conntrack_hits,
-            s.events_ok,
-            s.events_fail,
-            blocklist_count
-        ),
+        Some(s) => {
+            let avg_ns = s.xdp_exec_time_sum_ns.checked_div(s.pkts_seen).unwrap_or(0);
+            format!(
+                r#"{{"up":true,"packets":{{"seen":{},"drop":{},"pass":{}}},"blocks":{{"manual":{},"cidr_feed":{}}},"portscan_hits":{},"conntrack_hits":{},"events":{{"ok":{},"fail":{}}},"blocklist_entries":{},"xdp_execution_time":{{"avg_ns":{},"max_ns":{}}}}}"#,
+                s.pkts_seen,
+                s.pkts_drop,
+                s.pkts_pass,
+                s.block_manual,
+                s.block_cidr,
+                s.portscan_hits,
+                s.conntrack_hits,
+                s.events_ok,
+                s.events_fail,
+                blocklist_count,
+                avg_ns,
+                s.xdp_exec_time_max_ns
+            )
+        }
         None => r#"{"up":false,"error":"BPF maps not available"}"#.to_string(),
     }
 }
@@ -693,5 +716,40 @@ async fn route_request(
 
         // ── 404 ─────────────────────────────────────────
         _ => http_json(404, r#"{"error":"not found"}"#),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{json_stats, render_prometheus};
+    use aegis_common::Stats;
+
+    #[test]
+    fn exports_xdp_execution_time_metrics() {
+        let stats = Stats {
+            pkts_seen: 4,
+            xdp_exec_time_sum_ns: 120,
+            xdp_exec_time_max_ns: 50,
+            ..Stats::default()
+        };
+
+        let prometheus = render_prometheus(&Some(stats), 7);
+        assert!(prometheus.contains("aegis_xdp_exec_time_sum_ns 120"));
+        assert!(prometheus.contains("aegis_xdp_exec_time_max_ns 50"));
+
+        let json = json_stats(&Some(stats), 7);
+        assert!(json.contains(r#""xdp_execution_time":{"avg_ns":30,"max_ns":50}"#));
+    }
+
+    #[test]
+    fn zero_packets_produce_zero_average_execution_time() {
+        let stats = Stats {
+            xdp_exec_time_sum_ns: 120,
+            xdp_exec_time_max_ns: 50,
+            ..Stats::default()
+        };
+
+        let json = json_stats(&Some(stats), 0);
+        assert!(json.contains(r#""xdp_execution_time":{"avg_ns":0,"max_ns":50}"#));
     }
 }

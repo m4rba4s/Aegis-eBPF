@@ -188,8 +188,8 @@ fn is_on_blocklist(ip: u32) -> bool {
     use aegis_common::FlowKey;
     use aya::maps::HashMap;
 
-    let path = "/sys/fs/bpf/aegis/BLOCKLIST";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+    let path = crate::map_manager::map_path("BLOCKLIST");
+    let Ok(md) = aya::maps::MapData::from_pin(&path) else {
         return false;
     };
     let map = aya::maps::Map::HashMap(md);
@@ -208,8 +208,8 @@ fn is_on_blocklist(ip: u32) -> bool {
 
 fn is_on_allowlist(ip: u32) -> bool {
     use aya::maps::HashMap;
-    let path = "/sys/fs/bpf/aegis/ALLOWLIST";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+    let path = crate::map_manager::map_path("ALLOWLIST");
+    let Ok(md) = aya::maps::MapData::from_pin(&path) else {
         return false;
     };
     let map = aya::maps::Map::HashMap(md);
@@ -223,8 +223,8 @@ fn is_on_cidr_feed(ip: u32) -> bool {
     // LPM Trie lookup from pinned CIDR_BLOCKLIST map
     use aegis_common::{CidrBlockEntry, LpmKeyIpv4};
 
-    let path = "/sys/fs/bpf/aegis/CIDR_BLOCKLIST";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+    let path = crate::map_manager::map_path("CIDR_BLOCKLIST");
+    let Ok(md) = aya::maps::MapData::from_pin(&path) else {
         return false;
     };
     let map = aya::maps::Map::LpmTrie(md);

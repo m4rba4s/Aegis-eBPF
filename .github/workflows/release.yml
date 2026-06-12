@@ -27,7 +27,7 @@ jobs:
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum aegis-cli aegis.o aegis-tc.o > SHA256SUMS
+          sha256sum aegis-cli aegis.o aegis-tc.o install.sh > SHA256SUMS
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -36,13 +36,16 @@ jobs:
             dist/aegis-cli
             dist/aegis.o
             dist/aegis-tc.o
+            dist/install.sh
             dist/SHA256SUMS
           body: |
             ## Aegis eBPF Firewall ${{ github.ref_name }}
 
             ### Quick Install
             ```bash
-            curl -sSfL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sudo bash
+            curl -sSfL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh -o install.sh
+            sha256sum install.sh
+            sudo bash install.sh --check
             ```
 
             ### Pre-built Binary
@@ -56,7 +59,7 @@ jobs:
             ```
 
             ### Platform Support
-            Platform support is evidence-bound. See `docs/PORTABILITY.md` in this release source for the current support matrix.
+            Platform support is evidence-bound. See `docs/PORTABILITY.md` in this release source for the current support matrix and treat any unsupported row as best-effort only.
 
             Do not treat this release as production-validated unless the release assets or CI evidence include:
             - non-privileged release gate log

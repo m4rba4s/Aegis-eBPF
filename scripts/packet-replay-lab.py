@@ -29,6 +29,7 @@ IPV6_ALLOWED = "fd00:ae9:1::2"
 IPV6_EXACT_BLOCKED = "2001:db8:dead::10"
 IPV6_CIDR_BLOCKED = "2001:db8:dead::20"
 DROP_SEND_ERRNOS = {errno.ENOBUFS}
+MAX_STRESS_ITERATIONS = 50
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,79 @@ class ReplayCase:
     packet: str
     expected: str
     spec: Dict[str, object]
+
+
+@dataclass(frozen=True)
+class RuntimeMetadata:
+    commit: str
+    release_version: str
+    timestamp: str
+    distribution: str
+    kernel: str
+    architecture: str
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    """Structured replay evidence for a single case.
+
+    The release gate treats this as the canonical schema for commit-bound
+    packet replay proof. If any field is missing, the artifact is not
+    release-grade evidence.
+    """
+
+    case: str
+    commit: str
+    release_version: str
+    timestamp: str
+    distribution: str
+    kernel: str
+    architecture: str
+    interface: str
+    xdp_mode: str
+    tc_attached: bool
+    packet: str
+    expected_verdict: str
+    observed_verdict: str
+    command: str
+    command_output: str
+    counter_before: str
+    counter_after: str
+    input_pcap: str
+    capture_pcap: str
+    passed: bool
+
+
+def git_output(args: List[str]) -> str:
+    return run_text(["git", *args]).strip()
+
+
+def runtime_metadata() -> RuntimeMetadata:
+    os_release = {}
+    try:
+        with open("/etc/os-release", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if "=" in line:
+                    key, value = line.rstrip().split("=", 1)
+                    os_release[key] = value.strip().strip('"')
+    except OSError:
+        pass
+    distribution = os_release.get("PRETTY_NAME") or os_release.get("ID") or "unknown"
+    release_version = "unknown"
+    cargo_toml = Path(__file__).resolve().parent.parent / "aegis-cli" / "Cargo.toml"
+    if cargo_toml.exists():
+        for line in cargo_toml.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version = "):
+                release_version = line.split("=", 1)[1].strip().strip('"')
+                break
+    return RuntimeMetadata(
+        commit=git_output(["rev-parse", "HEAD"]),
+        release_version=release_version,
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        distribution=distribution,
+        kernel=run_text(["uname", "-r"]),
+        architecture=run_text(["uname", "-m"]),
+    )
 
 
 CASES: List[ReplayCase] = [
@@ -188,6 +262,7 @@ def require_scapy():
             IPv6ExtHdrFragment,
             Raw,
             conf,
+            wrpcap,
             sendp,
             sniff,
         )
@@ -216,6 +291,7 @@ def require_scapy():
         Raw,
         sendp,
         sniff,
+        wrpcap,
     )
 
 
@@ -257,7 +333,247 @@ def mac_for(iface: str, namespace: str | None = None) -> str:
 
 def first_line(text: str) -> str:
     line = text.replace("\n", " | ").strip()
-    return line[:500] if line else "unavailable"
+    return line if line else "unavailable"
+
+
+def xdp_mode_from_state(state: str) -> str:
+    lowered = state.lower()
+    if "xdp" not in lowered:
+        return "not_attached"
+    if "skb" in lowered or "generic" in lowered:
+        return "skb"
+    if "driver" in lowered or "drv" in lowered:
+        return "driver"
+    return "attached"
+
+
+def tc_attached_from_state(state: str) -> bool:
+    lowered = state.lower()
+    return "clsact" in lowered or "egress" in lowered
+
+
+def write_pcap(path: Path, packet) -> None:
+    (_, _, _, _, _, _, _, _, _, _, _, wrpcap) = require_scapy()
+    wrpcap(str(path), [packet] if packet is not None else [])
+
+
+def write_command_output(
+    out_dir: Path,
+    case: ReplayCase,
+    command: str,
+    sender_stdout: str,
+    sender_stderr: str,
+    receiver_stdout: str,
+    receiver_stderr: str,
+) -> Path:
+    output_path = out_dir / f"{case.name}.command.log"
+    output_path.write_text(
+        "\n".join(
+            [
+                f"case: {case.name}",
+                f"command: {command}",
+                "[sender.stdout]",
+                sender_stdout.strip() or "",
+                "[sender.stderr]",
+                sender_stderr.strip() or "",
+                "[receiver.stdout]",
+                receiver_stdout.strip() or "",
+                "[receiver.stderr]",
+                receiver_stderr.strip() or "",
+                "",
+            ]
+        )
+    )
+    return output_path
+
+
+def evidence_fields(log_path: Path) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+    for raw_line in log_path.read_text(encoding="utf-8").splitlines():
+        if ":" not in raw_line:
+            continue
+        key, value = raw_line.split(":", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def validate_log(
+    log_path: Path,
+    expected_case: str,
+    expected_commit: str,
+) -> int:
+    """Reject partial or cross-commit replay evidence.
+
+    The validator is intentionally strict: it requires the full release
+    metadata, a matching commit SHA, a verdict match, and concrete artifact
+    paths for the generated input/capture pcaps and raw command transcript.
+    """
+
+    required = {
+        "case",
+        "commit",
+        "release_version",
+        "timestamp",
+        "distribution",
+        "kernel",
+        "architecture",
+        "interface",
+        "xdp_mode",
+        "tc_attached",
+        "packet",
+        "expected_verdict",
+        "observed_verdict",
+        "command",
+        "command_output",
+        "counter_before",
+        "counter_after",
+        "input_pcap",
+        "capture_pcap",
+        "pass",
+    }
+    fields = evidence_fields(log_path)
+    missing = sorted(required - fields.keys())
+    if missing:
+        raise SystemExit(f"{log_path}: missing required fields: {', '.join(missing)}")
+    if fields["case"] != expected_case:
+        raise SystemExit(
+            f"{log_path}: case mismatch: expected {expected_case}, got {fields['case']}"
+        )
+    if fields["commit"] != expected_commit:
+        raise SystemExit(
+            f"{log_path}: commit mismatch: expected {expected_commit}, got {fields['commit']}"
+        )
+    if fields["expected_verdict"] != fields["observed_verdict"]:
+        raise SystemExit(
+            f"{log_path}: expected_verdict != observed_verdict "
+            f"({fields['expected_verdict']} != {fields['observed_verdict']})"
+        )
+    if fields["pass"].lower() != "true":
+        raise SystemExit(f"{log_path}: pass must be true for release evidence")
+    if fields["xdp_mode"] not in {"not_attached", "attached", "skb", "driver"}:
+        raise SystemExit(f"{log_path}: invalid xdp_mode {fields['xdp_mode']}")
+    if fields["tc_attached"].lower() not in {"true", "false"}:
+        raise SystemExit(f"{log_path}: invalid tc_attached {fields['tc_attached']}")
+    if fields["counter_before"] != "unavailable" and fields["counter_before"] == fields["counter_after"]:
+        raise SystemExit(f"{log_path}: counter evidence did not change")
+    for key in ("input_pcap", "capture_pcap", "command_output"):
+        path_text = fields.get(key, "")
+        if not path_text:
+            raise SystemExit(f"{log_path}: missing {key}")
+        if not Path(path_text).exists():
+            raise SystemExit(f"{log_path}: {key} does not exist: {path_text}")
+    return 0
+
+
+def self_test_validator() -> int:
+    """Exercise the evidence validator against good and bad artifacts."""
+
+    metadata = runtime_metadata()
+
+    def write_log(
+        out_dir: Path,
+        *,
+        case: str = "validator_case",
+        commit: str = metadata.commit,
+        expected: str = "pass",
+        observed: str = "pass",
+        passed: str = "true",
+        include_input_pcap: bool = True,
+        include_capture_pcap: bool = True,
+        include_command_output: bool = True,
+        counter_before: str = "before: 1",
+        counter_after: str = "after: 2",
+    ) -> Path:
+        input_pcap = out_dir / f"{case}.input.pcap"
+        capture_pcap = out_dir / f"{case}.capture.pcap"
+        command_output = out_dir / f"{case}.command.log"
+        input_pcap.write_bytes(b"pcap")
+        capture_pcap.write_bytes(b"pcap")
+        command_output.write_text("command transcript\n", encoding="utf-8")
+        log_path = out_dir / f"{case}.log"
+        lines = [
+            f"case: {case}",
+            f"commit: {commit}",
+            f"release_version: {metadata.release_version}",
+            f"timestamp: {metadata.timestamp}",
+            f"distribution: {metadata.distribution}",
+            f"kernel: {metadata.kernel}",
+            f"architecture: {metadata.architecture}",
+            "interface: aegis-host0",
+            "xdp_mode: driver",
+            "tc_attached: true",
+            "packet: synthetic validator case",
+            f"expected_verdict: {expected}",
+            f"observed_verdict: {observed}",
+            "command: synthetic command",
+        ]
+        if include_command_output:
+            lines.append(f"command_output: {command_output}")
+        lines.extend(
+            [
+                f"counter_before: {counter_before}",
+                f"counter_after: {counter_after}",
+            ]
+        )
+        if include_input_pcap:
+            lines.append(f"input_pcap: {input_pcap}")
+        if include_capture_pcap:
+            lines.append(f"capture_pcap: {capture_pcap}")
+        lines.extend([f"pass: {passed}", ""])
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+        return log_path
+
+    with tempfile.TemporaryDirectory(prefix="aegis-validator-selftest.") as tmp:
+        out_dir = Path(tmp)
+        good = write_log(out_dir)
+        assert validate_log(good, "validator_case", metadata.commit) == 0
+
+        missing = write_log(out_dir, case="missing_field")
+        missing.write_text(
+            missing.read_text(encoding="utf-8").replace("capture_pcap:", "capture_pcap_missing:"),
+            encoding="utf-8",
+        )
+        try:
+            validate_log(missing, "missing_field", metadata.commit)
+            raise AssertionError("missing field should fail")
+        except SystemExit:
+            pass
+
+        wrong_commit = write_log(out_dir, case="wrong_commit", commit="deadbeef")
+        try:
+            validate_log(wrong_commit, "wrong_commit", metadata.commit)
+            raise AssertionError("wrong commit should fail")
+        except SystemExit:
+            pass
+
+        mismatch = write_log(out_dir, case="mismatch", expected="drop", observed="pass")
+        try:
+            validate_log(mismatch, "mismatch", metadata.commit)
+            raise AssertionError("verdict mismatch should fail")
+        except SystemExit:
+            pass
+
+        missing_pcap = write_log(out_dir, case="missing_pcap", include_capture_pcap=False)
+        try:
+            validate_log(missing_pcap, "missing_pcap", metadata.commit)
+            raise AssertionError("missing capture pcap should fail")
+        except SystemExit:
+            pass
+
+        stale_counters = write_log(
+            out_dir,
+            case="stale_counters",
+            counter_before="same: 1",
+            counter_after="same: 1",
+        )
+        try:
+            validate_log(stale_counters, "stale_counters", metadata.commit)
+            raise AssertionError("stale counters should fail")
+        except SystemExit:
+            pass
+
+    print("validator self-test passed")
+    return 0
 
 
 def non_negative_int(value: str) -> int:
@@ -267,6 +583,15 @@ def non_negative_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def bounded_stress_iterations(value: str) -> int:
+    parsed = non_negative_int(value)
+    if parsed > MAX_STRESS_ITERATIONS:
+        raise argparse.ArgumentTypeError(
+            f"must be at most {MAX_STRESS_ITERATIONS}"
+        )
     return parsed
 
 
@@ -286,19 +611,8 @@ def wait_for_receiver_ready(receiver: subprocess.Popen[str], ready_marker: Path)
 
 
 def build_packet(spec: Dict[str, object], host_mac: str, peer_mac: str):
-    (
-        Dot1Q,
-        Ether,
-        ICMP,
-        ICMPv6EchoRequest,
-        IP,
-        IPOption_NOP,
-        IPv6,
-        IPv6ExtHdrFragment,
-        Raw,
-        _,
-        _,
-    ) = require_scapy()
+    deps = require_scapy()
+    Dot1Q, Ether, ICMP, ICMPv6EchoRequest, IP, IPOption_NOP, IPv6, IPv6ExtHdrFragment, Raw = deps[:9]
 
     direction = spec.get("direction", "egress")
     if direction == "ingress":
@@ -352,32 +666,41 @@ def build_packet(spec: Dict[str, object], host_mac: str, peer_mac: str):
 def write_log(
     out_dir: Path,
     case: ReplayCase,
+    metadata: RuntimeMetadata,
     observed: str,
     passed: bool,
     command: str,
-    counters_before: str,
-    counters_after: str,
-    xdp_state: str,
-    tc_state: str,
+    command_output: Path,
+    counter_before: str,
+    counter_after: str,
+    xdp_mode: str,
+    tc_attached: bool,
     interface: str,
+    input_pcap: Path,
+    capture_pcap: Path,
     error: str = "",
 ) -> None:
     log_file = out_dir / f"{case.name}.log"
-    direction = str(case.spec.get("direction", "egress"))
-    hook = "xdp" if direction == "ingress" else "tc_egress"
     lines = [
         f"case: {case.name}",
+        f"commit: {metadata.commit}",
+        f"release_version: {metadata.release_version}",
+        f"timestamp: {metadata.timestamp}",
+        f"distribution: {metadata.distribution}",
+        f"kernel: {metadata.kernel}",
+        f"architecture: {metadata.architecture}",
+        f"interface: {interface}",
+        f"xdp_mode: {xdp_mode}",
+        f"tc_attached: {'true' if tc_attached else 'false'}",
         f"packet: {case.packet}",
         f"expected_verdict: {case.expected}",
         f"observed_verdict: {observed}",
         f"command: {command}",
-        f"direction: {direction}",
-        f"hook: {hook}",
-        f"interface: {interface}",
-        f"counters_before: {first_line(counters_before)}",
-        f"counters_after: {first_line(counters_after)}",
-        f"xdp_state: {first_line(xdp_state)}",
-        f"tc_state: {first_line(tc_state)}",
+        f"command_output: {command_output}",
+        f"counter_before: {first_line(counter_before)}",
+        f"counter_after: {first_line(counter_after)}",
+        f"input_pcap: {input_pcap}",
+        f"capture_pcap: {capture_pcap}",
     ]
     if error:
         lines.append(f"error: {first_line(error)}")
@@ -390,22 +713,38 @@ def write_log(
 def write_error_log(
     out_dir: Path,
     case: ReplayCase,
+    metadata: RuntimeMetadata,
+    command: str,
+    command_output: Path,
+    input_pcap: Path,
+    capture_pcap: Path,
+    interface: str,
     error: str,
 ) -> None:
     """Write a structured failure log when a case raises an exception."""
     log_file = out_dir / f"{case.name}.log"
-    direction = str(case.spec.get("direction", "egress"))
-    hook = "xdp" if direction == "ingress" else "tc_egress"
     log_file.write_text(
         "\n".join(
             [
                 f"case: {case.name}",
+                f"commit: {metadata.commit}",
+                f"release_version: {metadata.release_version}",
+                f"timestamp: {metadata.timestamp}",
+                f"distribution: {metadata.distribution}",
+                f"kernel: {metadata.kernel}",
+                f"architecture: {metadata.architecture}",
+                f"interface: {interface}",
+                "xdp_mode: unknown",
+                "tc_attached: false",
                 f"packet: {case.packet}",
                 f"expected_verdict: {case.expected}",
                 "observed_verdict: unknown",
-                "command: error during case execution",
-                f"direction: {direction}",
-                f"hook: {hook}",
+                f"command: {command}",
+                f"command_output: {command_output}",
+                "counter_before: unavailable",
+                "counter_after: unavailable",
+                f"input_pcap: {input_pcap}",
+                f"capture_pcap: {capture_pcap}",
                 f"error: {first_line(error)}",
                 "pass: false",
                 "",
@@ -457,9 +796,11 @@ def write_stress_summary(
 
 
 def receive_one(args: argparse.Namespace) -> int:
-    _, _, _, _, IP, _, IPv6, _, _, _, sniff = require_scapy()
+    deps = require_scapy()
+    IP, IPv6, sniff = deps[4], deps[6], deps[10]
     spec = json.loads(args.match_json)
     marker = Path(args.marker)
+    capture_pcap = Path(args.capture_pcap)
 
     def matches(pkt) -> bool:
         if spec["family"] == "ipv4":
@@ -479,6 +820,10 @@ def receive_one(args: argparse.Namespace) -> int:
     if args.ready_marker:
         Path(args.ready_marker).write_text("ready\n")
     packets = sniff(iface=args.iface, timeout=args.timeout, count=1, lfilter=matches)
+    try:
+        write_pcap(capture_pcap, packets[0] if packets else None)
+    except Exception as exc:
+        raise SystemExit(f"failed to write capture pcap {capture_pcap}: {exc}")
     if packets:
         marker.write_text("received\n")
         return 0
@@ -494,7 +839,7 @@ def send_one(args: argparse.Namespace) -> int:
     require_lab_name(args.iface, "send interface")
     spec = json.loads(args.spec_json)
     packet = build_packet(spec, args.host_mac, args.peer_mac)
-    *_, sendp, _ = require_scapy()
+    sendp = require_scapy()[9]
     sendp(packet, iface=args.iface, count=1, verbose=False)
     return 0
 
@@ -511,9 +856,17 @@ def validate_packets() -> int:
     return 0
 
 
-def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac: str) -> bool:
-    *_, sendp, _ = require_scapy()
+def run_case(
+    args: argparse.Namespace,
+    case: ReplayCase,
+    host_mac: str,
+    peer_mac: str,
+    metadata: RuntimeMetadata,
+) -> bool:
+    sendp = require_scapy()[9]
     out_dir = Path(args.out_dir)
+    input_pcap = out_dir / f"{case.name}.input.pcap"
+    capture_pcap = out_dir / f"{case.name}.capture.pcap"
     marker = temp_marker_path(prefix=f"{case.name}.", suffix=".seen")
     ready_marker = temp_marker_path(prefix=f"{case.name}.", suffix=".ready")
     marker.unlink(missing_ok=True)
@@ -528,15 +881,17 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
             "--receive-one",
             "--iface",
             args.peer_if if direction == "egress" else args.host_if,
-            "--marker",
-            str(marker),
-            "--ready-marker",
-            str(ready_marker),
-            "--match-json",
-            json.dumps(
-                {
-                    key: case.spec[key]
-                    for key in ("family", "src", "dst")
+                "--marker",
+                str(marker),
+                "--ready-marker",
+                str(ready_marker),
+                "--capture-pcap",
+                str(capture_pcap),
+                "--match-json",
+                json.dumps(
+                    {
+                        key: case.spec[key]
+                        for key in ("family", "src", "dst")
                     if key in case.spec
                 }
             ),
@@ -554,8 +909,11 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
         counters_before = run_text(["tc", "-s", "filter", "show", "dev", args.host_if, "egress"])
         xdp_state = run_text(["ip", "-details", "link", "show", "dev", args.host_if])
         tc_state = run_text(["tc", "qdisc", "show", "dev", args.host_if])
+        xdp_mode = xdp_mode_from_state(xdp_state)
+        tc_attached = tc_attached_from_state(tc_state)
 
         packet = build_packet(case.spec, host_mac, peer_mac)
+        write_pcap(input_pcap, packet)
         send_iface = args.host_if if direction == "egress" else args.peer_if
         command = f"sendp({packet.summary()}, iface={send_iface}, direction={direction}, count=1)"
         send_error = ""
@@ -616,17 +974,30 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
         seen = marker.exists()
         observed = "pass" if seen else "drop"
         passed = observed == case.expected
+        command_output = write_command_output(
+            out_dir,
+            case,
+            command,
+            "",
+            send_error,
+            stdout,
+            stderr,
+        )
         write_log(
             out_dir,
             case,
+            metadata,
             observed,
             passed,
             command,
+            command_output,
             counters_before,
             counters_after,
-            xdp_state,
-            tc_state,
+            xdp_mode,
+            tc_attached,
             args.host_if,
+            input_pcap,
+            capture_pcap,
             send_error,
         )
         return passed
@@ -645,15 +1016,26 @@ def run_case(args: argparse.Namespace, case: ReplayCase, host_mac: str, peer_mac
 def run_stress(args: argparse.Namespace, host_mac: str, peer_mac: str) -> bool:
     failures: List[str] = []
     start = time.monotonic()
+    metadata = runtime_metadata()
 
     for iteration in range(1, args.stress_iterations + 1):
         for case in CASES:
             try:
-                if not run_case(args, case, host_mac, peer_mac):
+                if not run_case(args, case, host_mac, peer_mac, metadata):
                     failures.append(f"iteration={iteration}:case={case.name}")
             except Exception as exc:
                 failures.append(f"iteration={iteration}:case={case.name}:error={first_line(str(exc))}")
-                write_error_log(Path(args.out_dir), case, str(exc))
+                write_error_log(
+                    Path(args.out_dir),
+                    case,
+                    metadata,
+                    "stress replay matrix",
+                    Path(args.out_dir) / f"{case.name}.command.log",
+                    Path(args.out_dir) / f"{case.name}.input.pcap",
+                    Path(args.out_dir) / f"{case.name}.capture.pcap",
+                    args.host_if,
+                    str(exc),
+                )
 
     duration = time.monotonic() - start
     write_stress_summary(Path(args.out_dir), args.stress_iterations, failures, duration, args)
@@ -667,17 +1049,28 @@ def run_replay(args: argparse.Namespace) -> int:
     require_lab_name(args.peer_if, "peer interface")
 
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    metadata = runtime_metadata()
     host_mac = mac_for(args.host_if)
     peer_mac = mac_for(args.peer_if, args.peer_ns)
 
     failed = []
     for case in CASES:
         try:
-            if not run_case(args, case, host_mac, peer_mac):
+            if not run_case(args, case, host_mac, peer_mac, metadata):
                 failed.append(case.name)
         except Exception as exc:
             print(f"case {case.name} raised: {exc}", file=sys.stderr)
-            write_error_log(Path(args.out_dir), case, str(exc))
+            write_error_log(
+                Path(args.out_dir),
+                case,
+                metadata,
+                "packet replay",
+                Path(args.out_dir) / f"{case.name}.command.log",
+                Path(args.out_dir) / f"{case.name}.input.pcap",
+                Path(args.out_dir) / f"{case.name}.capture.pcap",
+                args.host_if,
+                str(exc),
+            )
             failed.append(case.name)
 
     if failed:
@@ -710,17 +1103,25 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1.5)
     parser.add_argument(
         "--stress-iterations",
-        type=non_negative_int,
+        type=bounded_stress_iterations,
         default=None,
-        help="run a bounded repeated replay matrix after the required one-shot cases",
+        help=(
+            "run a bounded repeated replay matrix after the required one-shot cases "
+            f"(maximum: {MAX_STRESS_ITERATIONS})"
+        ),
     )
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument("--validate-packets", action="store_true")
     parser.add_argument("--receive-one", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--send-one", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--validate-log", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-case", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-commit", help=argparse.SUPPRESS)
+    parser.add_argument("--self-test-validator", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--iface", help=argparse.SUPPRESS)
     parser.add_argument("--marker", help=argparse.SUPPRESS)
     parser.add_argument("--ready-marker", help=argparse.SUPPRESS)
+    parser.add_argument("--capture-pcap", help=argparse.SUPPRESS)
     parser.add_argument("--match-json", help=argparse.SUPPRESS)
     parser.add_argument("--spec-json", help=argparse.SUPPRESS)
     parser.add_argument("--host-mac", help=argparse.SUPPRESS)
@@ -743,9 +1144,19 @@ def main() -> int:
     if args.send_one:
         return send_one(args)
 
+    if args.validate_log:
+        if not args.expected_case or not args.expected_commit:
+            raise SystemExit("--validate-log requires --expected-case and --expected-commit")
+        return validate_log(Path(args.validate_log), args.expected_case, args.expected_commit)
+
+    if args.self_test_validator:
+        return self_test_validator()
+
     if args.stress_iterations is None:
         try:
-            args.stress_iterations = non_negative_int(os.environ.get("AEGIS_STRESS_ITERATIONS", "0"))
+            args.stress_iterations = bounded_stress_iterations(
+                os.environ.get("AEGIS_STRESS_ITERATIONS", "0")
+            )
         except argparse.ArgumentTypeError as exc:
             parser.error(f"AEGIS_STRESS_ITERATIONS {exc}")
 

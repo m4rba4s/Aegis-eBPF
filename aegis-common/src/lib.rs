@@ -75,18 +75,20 @@ pub struct DpiEvent {
 #[cfg_attr(feature = "user", derive(Debug, Serialize, Deserialize))]
 #[repr(C)]
 pub struct Stats {
-    pub pkts_seen: u64,      // Total packets seen
-    pub pkts_pass: u64,      // Packets passed
-    pub pkts_drop: u64,      // Packets dropped
-    pub events_ok: u64,      // Events sent to userspace successfully
-    pub events_fail: u64,    // Events failed to send (perf overflow)
-    pub ipv6_seen: u64,      // IPv6 packets seen
-    pub ipv6_pass: u64,      // IPv6 packets passed
-    pub ipv6_drop: u64,      // IPv6 packets dropped
-    pub block_manual: u64,   // Manual block hits
-    pub block_cidr: u64,     // CIDR feed block hits
-    pub portscan_hits: u64,  // Port scan detections
-    pub conntrack_hits: u64, // Connection tracking fast-path hits
+    pub pkts_seen: u64,            // Total packets seen
+    pub pkts_pass: u64,            // Packets passed
+    pub pkts_drop: u64,            // Packets dropped
+    pub events_ok: u64,            // Events sent to userspace successfully
+    pub events_fail: u64,          // Events failed to send (perf overflow)
+    pub ipv6_seen: u64,            // IPv6 packets seen
+    pub ipv6_pass: u64,            // IPv6 packets passed
+    pub ipv6_drop: u64,            // IPv6 packets dropped
+    pub block_manual: u64,         // Manual block hits
+    pub block_cidr: u64,           // CIDR feed block hits
+    pub portscan_hits: u64,        // Port scan detections
+    pub conntrack_hits: u64,       // Connection tracking fast-path hits
+    pub xdp_exec_time_sum_ns: u64, // Sum of measured XDP execution time (ns)
+    pub xdp_exec_time_max_ns: u64, // Maximum measured XDP execution time (ns)
 }
 
 // ============================================================
@@ -514,3 +516,6 @@ pub const MAP_CAP_EGRESS_BLOCKLIST: u32 = 8192;
 pub const MAP_CAP_EVENT_RING_BYTES: u32 = 1 << 20;
 /// DPI suspect event ring buffer size. Must be a power-of-two byte size.
 pub const MAP_CAP_DPI_RING_BYTES: u32 = 1 << 18;
+
+/// Map ABI version for pinned state layout compatibility.
+pub const MAP_ABI_VERSION: u32 = 1;

@@ -193,6 +193,13 @@ fn detach_loaded_programs(
     }
 }
 
+fn cleanup_owned_pin_state(pin_root: &std::path::Path, iface: &str) {
+    // Shutdown cleanup is scoped to the same instance identity we attached.
+    if let Err(e) = map_manager::cleanup_instance_pin_dir(pin_root, iface) {
+        tracing::warn!(error = %e, "failed to clean owned bpffs state");
+    }
+}
+
 fn required_tc_error(iface: &str, operation: &str, error: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!(
         "TC egress is required by default; {operation} failed on interface '{iface}': {error}. \
@@ -207,8 +214,10 @@ fn is_existing_clsact_error(error: &str) -> bool {
 fn attach_tc_required(
     iface: &str,
     tc_path: &str,
+    pin_root: &std::path::Path,
 ) -> Result<(Ebpf, SchedClassifierLinkId), anyhow::Error> {
-    let mut tc = loader::load_tc_program(tc_path)
+    let pin_root_str = pin_root.to_string_lossy();
+    let mut tc = loader::load_tc_program(tc_path, &pin_root_str)
         .map_err(|e| required_tc_error(iface, "TC object load", e))?;
 
     if let Err(e) = tc::qdisc_add_clsact(iface) {
@@ -362,27 +371,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Load system config (TOML — /etc/aegis/config.toml)
     let sys_cfg = config::AegisConfig::load(None);
-
-    // Handle Completions command early (no eBPF needed)
-    if let Commands::Completions { shell } = &opt.command {
-        let mut cmd = Opt::command();
-        let name = cmd.get_name().to_string();
-        clap_complete::generate(*shell, &mut cmd, name, &mut std::io::stdout());
-        return Ok(());
-    }
-
-    // Handle Manpage command early (no eBPF needed)
-    if let Commands::Manpage { dir } = &opt.command {
-        let cmd = Opt::command();
-        let name = cmd.get_name().to_string();
-        let man = clap_mangen::Man::new(cmd);
-        let mut buffer: Vec<u8> = Default::default();
-        man.render(&mut buffer)?;
-        let out_path = std::path::Path::new(dir).join(format!("{}.1", name));
-        std::fs::write(&out_path, buffer)?;
-        println!("✅ Man page generated at {}", out_path.display());
-        return Ok(());
-    }
+    std::env::set_var(
+        map_manager::INSTANCE_ENV,
+        map_manager::instance_id_for_interface(&opt.iface),
+    );
+    let pin_root = map_manager::ensure_instance_pin_dir(&opt.iface)?;
 
     // Handle Allow command early (no eBPF needed)
     if let Commands::Allow { action } = &opt.command {
@@ -478,24 +471,9 @@ async fn main() -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    // Load eBPF (only for commands that need it)
-    // Ensure pin directory exists and clean stale maps from previous runs
-    let pin_dir = std::path::Path::new("/sys/fs/bpf/aegis");
-    if pin_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(pin_dir) {
-            for entry in entries.flatten() {
-                if let Err(e) = std::fs::remove_file(entry.path()) {
-                    tracing::debug!(path = %entry.path().display(), error = %e, "stale pin cleanup skipped");
-                }
-            }
-        }
-    } else {
-        std::fs::create_dir_all(pin_dir).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to create BPF pin directory");
-        });
-    }
     // Try embedded bytecode first, fallback to file
-    let mut bpf = loader::load_xdp_program(&opt.ebpf_path)?;
+    let pin_root_str = pin_root.to_string_lossy().to_string();
+    let mut bpf = loader::load_xdp_program(&opt.ebpf_path, &pin_root_str)?;
 
     // Common setup for Load, Tui, and Daemon
     match opt.command {
@@ -534,14 +512,10 @@ async fn main() -> Result<(), anyhow::Error> {
             };
 
             // Pin maps for external tools (status, allow CLI)
-            let _ = std::fs::create_dir_all("/sys/fs/bpf/aegis");
-
-            // Clean stale maps from previous SIGKILL'd instances
-            if let Ok(entries) = std::fs::read_dir("/sys/fs/bpf/aegis") {
-                for entry in entries.flatten() {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-                tracing::debug!("cleaned stale pinned maps from /sys/fs/bpf/aegis/");
+            // Clean stale maps only for this owned instance path.
+            if let Err(e) = map_manager::verify_instance_marker(&pin_root, &opt.iface) {
+                tracing::error!(error = %e, "instance ownership check failed");
+                return Err(e);
             }
             let maps_to_pin = [
                 "BLOCKLIST",
@@ -557,7 +531,7 @@ async fn main() -> Result<(), anyhow::Error> {
             ];
             for mark in maps_to_pin {
                 if let Some(map) = bpf.map_mut(mark) {
-                    let path = format!("/sys/fs/bpf/aegis/{}", mark);
+                    let path = pin_root.join(mark);
                     let _ = std::fs::remove_file(&path); // Force overwrite
                     if let Err(e) = map.pin(&path) {
                         tracing::warn!(map = mark, error = %e, "failed to pin BPF map");
@@ -569,7 +543,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let mut tc_bpf: Option<Ebpf> = None;
             let mut tc_link_id: Option<SchedClassifierLinkId> = None;
             if !opt.no_tc {
-                match attach_tc_required(&opt.iface, &opt.tc_path) {
+                match attach_tc_required(&opt.iface, &opt.tc_path, &pin_root) {
                     Ok((tc, link_id)) => {
                         tracing::info!(iface = %opt.iface, "TC egress attached");
                         tc_link_id = Some(link_id);
@@ -693,6 +667,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 .await?;
                 println!("\n🔌 Detaching programs from {}...", opt.iface);
                 detach_loaded_programs(&mut bpf, &mut xdp_link_id, &mut tc_bpf, &mut tc_link_id);
+                cleanup_owned_pin_state(&pin_root, &opt.iface);
                 drop(tc_bpf); // TC first
                 drop(bpf); // Then XDP
                 println!("✅ Programs detached. Exiting Aegis...");
@@ -720,10 +695,14 @@ async fn main() -> Result<(), anyhow::Error> {
                 tracing::info!(iface = %opt.iface, "daemon mode active, send SIGTERM or SIGINT to stop");
 
                 // Freeze read-only maps (Anti-Tamper Layer 2)
-                privilege::freeze_map("/sys/fs/bpf/aegis/STATS");
-                privilege::freeze_map("/sys/fs/bpf/aegis/DPI_EVENTS");
-                privilege::freeze_map("/sys/fs/bpf/aegis/EVENTS");
-                privilege::freeze_map("/sys/fs/bpf/aegis/EVENTS_IPV6");
+                let stats_pin = pin_root.join("STATS");
+                let dpi_pin = pin_root.join("DPI_EVENTS");
+                let events_pin = pin_root.join("EVENTS");
+                let events_v6_pin = pin_root.join("EVENTS_IPV6");
+                privilege::freeze_map(stats_pin.to_string_lossy().as_ref());
+                privilege::freeze_map(dpi_pin.to_string_lossy().as_ref());
+                privilege::freeze_map(events_pin.to_string_lossy().as_ref());
+                privilege::freeze_map(events_v6_pin.to_string_lossy().as_ref());
 
                 // Drop privileges to non-root (Anti-Tamper Layer 1)
                 if let Err(e) = privilege::drop_privileges() {
@@ -798,10 +777,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
 
                 tracing::info!(iface = %iface_for_shutdown, "detaching programs");
-                // NOTE: pinned maps in /sys/fs/bpf/aegis/ survive shutdown.
-                // They are cleaned on next startup (before new pins are created).
-                // This is intentional — after privilege drop we can't unlink root-owned bpffs.
+                // Cleanup is restricted to the current instance identity.
                 detach_loaded_programs(&mut bpf, &mut xdp_link_id, &mut tc_bpf, &mut tc_link_id);
+                cleanup_owned_pin_state(&pin_root, &opt.iface);
                 drop(tc_bpf); // TC first
                 drop(bpf); // Then XDP
                 tracing::info!("shutdown complete");
@@ -863,6 +841,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             println!("Detaching programs from {}...", opt.iface);
             detach_loaded_programs(&mut bpf, &mut xdp_link_id, &mut tc_bpf, &mut tc_link_id);
+            cleanup_owned_pin_state(&pin_root, &opt.iface);
         }
         Commands::Save { file: _ } => {
             println!("Please use the 'save' command inside the running 'load' session.");

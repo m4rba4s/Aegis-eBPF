@@ -1,12 +1,94 @@
-use aegis_common::{CidrBlockEntry, LpmKeyIpv4, LpmKeyIpv6, CAT_MANUAL};
+use aegis_common::{CidrBlockEntry, LpmKeyIpv4, LpmKeyIpv6, CAT_MANUAL, MAP_ABI_VERSION};
 use aya::maps::lpm_trie::{Key, LpmTrie};
 use aya::maps::{HashMap, MapData};
 use aya::Ebpf;
+use std::env;
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Type alias to reduce type complexity (clippy::type_complexity)
 pub type ConfigMap = Arc<Mutex<HashMap<MapData, u32, u32>>>;
+
+pub const PIN_ROOT: &str = "/sys/fs/bpf/aegis";
+pub const INSTANCE_ENV: &str = "AEGIS_INSTANCE_ID";
+
+pub fn instance_id_for_interface(iface: &str) -> String {
+    iface.to_string()
+}
+
+pub fn current_instance_id() -> anyhow::Result<String> {
+    env::var(INSTANCE_ENV).map_err(|_| {
+        anyhow::anyhow!(
+            "missing {} environment variable for Aegis instance identity",
+            INSTANCE_ENV
+        )
+    })
+}
+
+pub fn instance_pin_dir(instance_id: &str) -> PathBuf {
+    Path::new(PIN_ROOT)
+        .join(instance_id)
+        .join(format!("abi-v{}", MAP_ABI_VERSION))
+}
+
+/// Resolve the pin directory for the current instance identity.
+///
+/// The hot path uses this to keep map pins scoped to a single interface
+/// instance and map ABI version.
+pub fn current_pin_dir() -> anyhow::Result<PathBuf> {
+    Ok(instance_pin_dir(&current_instance_id()?))
+}
+
+/// Resolve a pinned map path under the current instance directory.
+pub fn current_map_path(name: &str) -> anyhow::Result<PathBuf> {
+    Ok(current_pin_dir()?.join(name))
+}
+
+/// Best-effort compatibility shim for legacy call sites that still expect a
+/// direct `PathBuf`. If the instance identity is not available, fall back to
+/// the historical shared root path instead of panicking.
+pub fn map_path(name: &str) -> PathBuf {
+    current_map_path(name).unwrap_or_else(|_| Path::new(PIN_ROOT).join(name))
+}
+
+pub fn ensure_instance_pin_dir(iface: &str) -> anyhow::Result<PathBuf> {
+    let instance_id = instance_id_for_interface(iface);
+    let pin_dir = instance_pin_dir(&instance_id);
+    fs::create_dir_all(&pin_dir)?;
+    Ok(pin_dir)
+}
+
+pub fn verify_instance_marker(_pin_dir: &Path, _iface: &str) -> anyhow::Result<()> {
+    // The BPF filesystem does not support regular files, so we removed ownership.json.
+    // Ownership is implicitly tied to the interface identity in the pin_dir path.
+    Ok(())
+}
+
+/// Remove only the pins owned by the current instance directory.
+///
+/// This intentionally leaves sibling instance directories and unrelated bpffs
+/// state untouched.
+pub fn cleanup_instance_pin_dir(pin_dir: &Path, _iface: &str) -> anyhow::Result<()> {
+    // verify_instance_marker(pin_dir, _iface)?;
+    if pin_dir.exists() {
+        for entry in fs::read_dir(pin_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let _ = fs::remove_file(&path);
+            } else if path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+    let _ = fs::remove_dir(pin_dir);
+    if let Some(parent) = pin_dir.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    Ok(())
+}
 
 pub fn setup_config_map(
     bpf: &mut Ebpf,
@@ -289,7 +371,8 @@ pub fn setup_egress_blocklists(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_egress_cidr, ParsedCidr};
+    use super::{instance_pin_dir, parse_egress_cidr, ParsedCidr};
+    use crate::map_manager::MAP_ABI_VERSION;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -312,6 +395,15 @@ mod tests {
             }
             ParsedCidr::V4 { .. } => panic!("expected IPv6 CIDR"),
         }
+    }
+
+    #[test]
+    fn test_instance_pin_dir_is_scoped_by_interface_and_abi() {
+        let pin_dir = instance_pin_dir("eth0");
+        let pin_dir_text = pin_dir.to_string_lossy();
+        assert!(pin_dir_text.ends_with("/sys/fs/bpf/aegis/eth0/abi-v1"));
+        assert!(pin_dir_text.contains("/aegis/eth0/"));
+        assert_eq!(MAP_ABI_VERSION, 1);
     }
 
     #[test]

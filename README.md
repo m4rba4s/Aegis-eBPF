@@ -17,7 +17,7 @@
 
 ## Overview
 
-**Aegis** is a next-generation firewall built on **eBPF (Extended Berkeley Packet Filter)**, **XDP (eXpress Data Path)**, and **TC (Traffic Control)**. It operates at the earliest possible point in the networking stack, filtering both ingress and egress traffic before the OS kernel processes it.
+**Aegis** is a Rust/Aya firewall built on **eBPF (Extended Berkeley Packet Filter)**, **XDP (eXpress Data Path)**, and **TC (Traffic Control)**. It filters ingress and egress traffic early in the networking stack, with runtime support bounded by the evidence matrix in `docs/PORTABILITY.md`.
 
 ### Why Aegis?
 
@@ -85,7 +85,7 @@ To maintain transparency as a security tool, features are strictly categorized b
 - **Save/Restore** — Persist and reload block rules
 - **Status Command** — Query running daemon state via pinned BPF maps
 - **Single Binary** — eBPF bytecode embedded, no external files
-- **Multi-Distro Installer** — Fedora, Ubuntu, Debian, Arch, Alpine
+- **Installer Scripts** — documented for the current release matrix in `docs/PORTABILITY.md`
 - **Auto XDP Mode** — Automatic fallback from driver to SKB mode
 - **Systemd Integration** — Hardened service file with `CAP_BPF` + `CAP_NET_ADMIN`
 
@@ -107,7 +107,9 @@ Production release claims require archived verifier/load/attach/detach logs and 
 
 ### One-Line Install (SSH/Remote)
 ```bash
-curl -sSfL https://raw.githubusercontent.com/m4rba4s/Aegis-eBPF/main/install.sh | sudo bash
+curl -sSfL https://github.com/m4rba4s/Aegis-eBPF/releases/download/v4.3.0-rc.1/install.sh -o install.sh
+sha256sum install.sh
+sudo bash install.sh --check
 ```
 
 ### Manual Install
@@ -141,7 +143,7 @@ sudo ./target/release/aegis-cli -i eth0 tui
 ### Docker Build (Portable Static Binary)
 
 ```bash
-# Build fully static musl binary — runs on any x86_64 Linux ≥ 5.4
+# Build fully static musl binary for the documented x86_64 Linux release matrix
 docker build --output=dist .
 
 # Outputs:
@@ -150,9 +152,10 @@ docker build --output=dist .
 # dist/aegis-tc      - Standalone TC object (optional)
 ```
 
-The Docker build produces a **statically linked musl binary** that works on all
-x86_64 Linux distributions regardless of glibc version: Fedora, Ubuntu, Debian,
-RHEL, CentOS, Arch, Alpine, and others.
+The Docker build produces a **statically linked musl binary**. Static linking
+removes the glibc dependency, but it does not prove kernel, XDP, or TC runtime
+support. Distribution support is evidence-bound; see
+[docs/PORTABILITY.md](docs/PORTABILITY.md).
 
 ## Usage
 

@@ -1,11 +1,11 @@
 #!/bin/bash
-# Aegis XDP Firewall - Universal Installer
+# Aegis XDP Firewall - Installer and maintenance script
 # Supports: Ubuntu, Debian, Fedora, CentOS, RHEL, Arch, Alpine, OpenSUSE
 # Init systems: systemd, openrc, sysvinit
 #
 # Usage:
 #   sudo ./install.sh              # Full build + install
-#   sudo ./install.sh --update     # Update to latest version
+#   sudo ./install.sh --update     # Update from the tracked source tree
 #   sudo ./install.sh --check      # Dry-run: validate all prerequisites
 #   sudo ./install.sh --install-only  # Install pre-built binaries only
 #   sudo ./install.sh --uninstall  # Remove Aegis completely
@@ -978,9 +978,20 @@ build_and_install() {
 }
 
 cleanup_old_install() {
-    if [[ -d "/sys/fs/bpf/aegis" ]]; then
-        log_info "Cleaning up pinned BPF maps..."
-        rm -rf /sys/fs/bpf/aegis
+    local iface=""
+    local pin_dir=""
+
+    if [[ -r /etc/aegis/config.toml ]]; then
+        iface="$(awk -F'"' '/^interface[[:space:]]*=/{print $2; exit}' /etc/aegis/config.toml)"
+    fi
+    iface="${iface:-eth0}"
+    pin_dir="/sys/fs/bpf/aegis/${iface}/abi-v1"
+
+    if [[ -d "$pin_dir" ]]; then
+        log_info "Cleaning up pinned BPF maps for owned instance: $pin_dir"
+        rm -rf "$pin_dir"
+        rmdir "/sys/fs/bpf/aegis/${iface}" 2>/dev/null || true
+        rmdir /sys/fs/bpf/aegis 2>/dev/null || true
     fi
 }
 
@@ -1262,9 +1273,18 @@ uninstall_aegis() {
     rm -rf "$SHARE_DIR"
     log_ok "Shared data removed"
 
-    if [[ -d /sys/fs/bpf/aegis ]]; then
-        rm -rf /sys/fs/bpf/aegis
-        log_ok "BPF maps cleaned"
+    local iface=""
+    local pin_dir=""
+    if [[ -r /etc/aegis/config.toml ]]; then
+        iface="$(awk -F'"' '/^interface[[:space:]]*=/{print $2; exit}' /etc/aegis/config.toml)"
+    fi
+    iface="${iface:-eth0}"
+    pin_dir="/sys/fs/bpf/aegis/${iface}/abi-v1"
+    if [[ -d "$pin_dir" ]]; then
+        rm -rf "$pin_dir"
+        rmdir "/sys/fs/bpf/aegis/${iface}" 2>/dev/null || true
+        rmdir /sys/fs/bpf/aegis 2>/dev/null || true
+        log_ok "BPF maps cleaned for owned instance"
     fi
 
     rm -f /etc/bash_completion.d/aegis-cli 2>/dev/null
@@ -1477,7 +1497,7 @@ main() {
                 echo ""
                 echo "Options:"
                 echo "  (no args)        Full build from source + install"
-                echo "  --update         Update to latest version (preserves config)"
+                echo "  --update         Update from the tracked source tree (preserves config)"
                 echo "  --check          Dry-run: validate prerequisites"
                 echo "  --install-only   Install pre-built binaries only"
                 echo "  --skip-service   Don't install init service"

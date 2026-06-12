@@ -64,8 +64,8 @@ fn get_ktime_ns() -> u64 {
 fn gc_conntrack_v4() -> u32 {
     use aya::maps::HashMap;
 
-    let path = "/sys/fs/bpf/aegis/CONN_TRACK";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+    let path = crate::map_manager::map_path("CONN_TRACK");
+    let Ok(md) = aya::maps::MapData::from_pin(&path) else {
         return 0;
     };
     let map = aya::maps::Map::LruHashMap(md);
@@ -114,8 +114,8 @@ fn gc_conntrack_v6() -> u32 {
     use aegis_common::ConnTrackKeyIpv6;
     use aya::maps::HashMap;
 
-    let path = "/sys/fs/bpf/aegis/CONN_TRACK_IPV6";
-    let Ok(md) = aya::maps::MapData::from_pin(path) else {
+    let path = crate::map_manager::map_path("CONN_TRACK_IPV6");
+    let Ok(md) = aya::maps::MapData::from_pin(&path) else {
         return 0;
     };
     let map = aya::maps::Map::LruHashMap(md);

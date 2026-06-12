@@ -40,3 +40,13 @@ Thumbs.db
 
 # Internal engineering documentation (sensitive architecture details)
 guide/gemini/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Debug/build output artifacts
+file_info.txt
+ldd_info.txt
+microbench.rs
+target_test/

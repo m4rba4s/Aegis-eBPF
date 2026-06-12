@@ -6,7 +6,8 @@
 #   - aegis.o (XDP eBPF object, optional)
 #   - aegis-tc.o (TC eBPF object, optional)
 #
-# The aegis-cli binary runs on any x86_64 Linux ≥ 5.4 without glibc dependencies.
+# The aegis-cli binary is statically linked for x86_64 Linux; runtime support
+# still depends on the kernel, XDP/TC attach mode, and the release evidence matrix.
 
 # =============================================================================
 # STAGE 1: Build Environment (musl for static linking)

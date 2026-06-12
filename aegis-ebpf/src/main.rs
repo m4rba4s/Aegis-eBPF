@@ -253,12 +253,26 @@ fn stats_inc_event_fail() {
     }
 }
 
+#[inline(always)]
+fn stats_add_exec_time(delta: u64) {
+    unsafe {
+        if let Some(s) = STATS.get_ptr_mut(0) {
+            (*s).xdp_exec_time_sum_ns = (*s).xdp_exec_time_sum_ns.wrapping_add(delta);
+            if delta > (*s).xdp_exec_time_max_ns {
+                (*s).xdp_exec_time_max_ns = delta;
+            }
+        }
+    }
+}
+
 // ============================================================
 // XDP ENTRY POINT
 // ============================================================
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
+    let start_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
     let ret = match try_xdp_firewall(ctx) {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_ABORTED,
@@ -270,6 +284,9 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     } else if ret == xdp_action::XDP_PASS {
         stats_inc_pass();
     }
+
+    let end_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+    stats_add_exec_time(end_ns.saturating_sub(start_ns));
 
     ret
 }

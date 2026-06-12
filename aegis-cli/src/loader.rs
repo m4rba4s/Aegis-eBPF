@@ -2,7 +2,7 @@ use aya::{Ebpf, EbpfLoader};
 use std::path::Path;
 
 /// Load XDP eBPF program - uses embedded bytecode if available and path is default
-pub fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
+pub fn load_xdp_program(path: &str, pin_root: &str) -> Result<Ebpf, anyhow::Error> {
     // If embedded and using default path, use embedded bytecode
     #[cfg(embedded_xdp)]
     if path == crate::DEFAULT_XDP_PATH {
@@ -12,22 +12,20 @@ pub fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
         );
         println!("📦 Loading embedded XDP program");
         return Ok(EbpfLoader::new()
-            .map_pin_path("/sys/fs/bpf/aegis")
+            .map_pin_path(pin_root)
             .load(crate::EMBEDDED_XDP)?);
     }
 
     // Otherwise load from file
     if Path::new(path).exists() {
         println!("📁 Loading XDP program from: {}", path);
-        Ok(EbpfLoader::new()
-            .map_pin_path("/sys/fs/bpf/aegis")
-            .load_file(path)?)
+        Ok(EbpfLoader::new().map_pin_path(pin_root).load_file(path)?)
     } else {
         #[cfg(embedded_xdp)]
         {
             println!("⚠️  File {} not found, using embedded XDP", path);
             return Ok(EbpfLoader::new()
-                .map_pin_path("/sys/fs/bpf/aegis")
+                .map_pin_path(pin_root)
                 .load(crate::EMBEDDED_XDP)?);
         }
         #[cfg(not(embedded_xdp))]
@@ -42,7 +40,7 @@ pub fn load_xdp_program(path: &str) -> Result<Ebpf, anyhow::Error> {
 
 /// Load TC eBPF program - uses embedded bytecode if available and path is default.
 /// Uses map_pin_path to reuse pinned maps/ring buffers such as CONFIG and EVENTS.
-pub fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
+pub fn load_tc_program(path: &str, pin_root: &str) -> Result<Ebpf, anyhow::Error> {
     // If embedded and using default path, use embedded bytecode
     #[cfg(embedded_tc)]
     if path == crate::DEFAULT_TC_PATH {
@@ -52,22 +50,20 @@ pub fn load_tc_program(path: &str) -> Result<Ebpf, anyhow::Error> {
         );
         // Reuse pinned maps so TC shares CONFIG/EVENTS and owns its conntrack maps.
         return Ok(EbpfLoader::new()
-            .map_pin_path("/sys/fs/bpf/aegis")
+            .map_pin_path(pin_root)
             .load(crate::EMBEDDED_TC)?);
     }
 
     // Otherwise load from file
     if Path::new(path).exists() {
         println!("📁 Loading TC program from: {}", path);
-        Ok(EbpfLoader::new()
-            .map_pin_path("/sys/fs/bpf/aegis")
-            .load_file(path)?)
+        Ok(EbpfLoader::new().map_pin_path(pin_root).load_file(path)?)
     } else {
         #[cfg(embedded_tc)]
         {
             println!("⚠️  File {} not found, using embedded TC", path);
             return Ok(EbpfLoader::new()
-                .map_pin_path("/sys/fs/bpf/aegis")
+                .map_pin_path(pin_root)
                 .load(crate::EMBEDDED_TC)?);
         }
         #[cfg(not(embedded_tc))]

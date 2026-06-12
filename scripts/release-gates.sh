@@ -8,6 +8,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+MAX_STRESS_ITERATIONS=50
+MAX_REPLAY_TIMEOUT_SECONDS=7200
+
 # AEGIS: "полная автоматизация" - auto-inject cargo path if missing due to sudo env_reset
 if ! command -v cargo >/dev/null 2>&1; then
   if [ -n "${SUDO_USER:-}" ] && [ -d "/home/$SUDO_USER/.cargo/bin" ]; then
@@ -29,19 +32,115 @@ require_cmd() {
   }
 }
 
+validate_stress_iterations() {
+  local value="$1"
+
+  if [[ ! "$value" =~ ^(0|[1-9][0-9]*)$ || "${#value}" -gt 2 ]]; then
+    echo "AEGIS_STRESS_ITERATIONS must be an integer from 0 to $MAX_STRESS_ITERATIONS, got: $value" >&2
+    return 2
+  fi
+  if (( 10#$value > MAX_STRESS_ITERATIONS )); then
+    echo "AEGIS_STRESS_ITERATIONS exceeds the safety limit ($MAX_STRESS_ITERATIONS): $value" >&2
+    return 2
+  fi
+}
+
+validate_replay_timeout() {
+  local value="$1"
+
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ || "${#value}" -gt 4 ]]; then
+    echo "AEGIS_REPLAY_TIMEOUT_SECONDS must be an integer from 1 to $MAX_REPLAY_TIMEOUT_SECONDS, got: $value" >&2
+    return 2
+  fi
+  if (( 10#$value > MAX_REPLAY_TIMEOUT_SECONDS )); then
+    echo "AEGIS_REPLAY_TIMEOUT_SECONDS exceeds the safety limit ($MAX_REPLAY_TIMEOUT_SECONDS): $value" >&2
+    return 2
+  fi
+}
+
+require_resource_headroom() {
+  local mode="$1"
+  local min_available_mb="${AEGIS_MIN_AVAILABLE_MB:-}"
+  local max_swap_used_percent="${AEGIS_MAX_SWAP_USED_PERCENT:-75}"
+  local allow_low_resource="${AEGIS_ALLOW_LOW_RESOURCE_LAB:-0}"
+  local mem_total_kb=0
+  local mem_available_kb=0
+  local swap_total_kb=0
+  local swap_free_kb=0
+  local swap_used_percent=0
+  local failed=0
+
+  if [[ -z "$min_available_mb" ]]; then
+    if [[ "$mode" == "stress" ]]; then
+      min_available_mb=4096
+    else
+      min_available_mb=2048
+    fi
+  fi
+
+  if [[ ! "$min_available_mb" =~ ^[1-9][0-9]*$ ]]; then
+    echo "AEGIS_MIN_AVAILABLE_MB must be a positive integer, got: $min_available_mb" >&2
+    return 2
+  fi
+  if [[ ! "$max_swap_used_percent" =~ ^(0|[1-9][0-9]*)$ ]] || (( max_swap_used_percent > 100 )); then
+    echo "AEGIS_MAX_SWAP_USED_PERCENT must be an integer from 0 to 100, got: $max_swap_used_percent" >&2
+    return 2
+  fi
+
+  mem_total_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  mem_available_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+  swap_free_kb="$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)"
+
+  if [[ -z "$mem_total_kb" || -z "$mem_available_kb" || -z "$swap_total_kb" || -z "$swap_free_kb" ]]; then
+    echo "could not read memory headroom from /proc/meminfo" >&2
+    return 1
+  fi
+
+  if (( swap_total_kb > 0 )); then
+    swap_used_percent=$(( (swap_total_kb - swap_free_kb) * 100 / swap_total_kb ))
+  fi
+
+  {
+    echo "resource_preflight_mode: $mode"
+    echo "timestamp_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "mem_total_mb: $((mem_total_kb / 1024))"
+    echo "mem_available_mb: $((mem_available_kb / 1024))"
+    echo "required_mem_available_mb: $min_available_mb"
+    echo "swap_total_mb: $((swap_total_kb / 1024))"
+    echo "swap_free_mb: $((swap_free_kb / 1024))"
+    echo "swap_used_percent: $swap_used_percent"
+    echo "maximum_swap_used_percent: $max_swap_used_percent"
+    echo "loadavg: $(cat /proc/loadavg)"
+  }
+
+  if (( mem_available_kb < min_available_mb * 1024 )); then
+    echo "insufficient memory headroom: need at least ${min_available_mb} MiB MemAvailable" >&2
+    failed=1
+  fi
+  if (( swap_total_kb > 0 && swap_used_percent > max_swap_used_percent )); then
+    echo "swap pressure is too high: ${swap_used_percent}% used, maximum is ${max_swap_used_percent}%" >&2
+    failed=1
+  fi
+
+  if (( failed != 0 )); then
+    if [[ "$allow_low_resource" == "1" ]]; then
+      echo "WARNING: AEGIS_ALLOW_LOW_RESOURCE_LAB=1 bypassed the resource preflight" >&2
+      return 0
+    fi
+    echo "close memory-heavy applications or resize the disposable VM before running the lab gate" >&2
+    return 1
+  fi
+}
+
 require_packet_replay_evidence() {
   local evidence_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
   local missing=0
   local case_output=""
   local cases=()
-  local fields=(
-    packet
-    expected_verdict
-    observed_verdict
-    command
-    direction
-    hook
-  )
+  local expected_commit
+
+  expected_commit="$(git rev-parse HEAD 2>/dev/null || true)"
 
   if ! case_output="$(python3 scripts/packet-replay-lab.py --list-cases)"; then
     echo "could not load the canonical packet replay case list" >&2
@@ -68,20 +167,18 @@ require_packet_replay_evidence() {
       continue
     fi
 
-    if ! grep -Eq "^case:[[:space:]]*$case_name[[:space:]]*$" "$log_file"; then
+    if ! grep -Eq "^case:[[:space:]]*${case_name}[[:space:]]*$" "$log_file"; then
       echo "packet replay log does not identify case '$case_name': $log_file" >&2
       missing=1
     fi
 
-    for field in "${fields[@]}"; do
-      if ! grep -Eq "^$field:[[:space:]]*.+" "$log_file"; then
-        echo "packet replay log missing '$field:' for case: $case_name ($log_file)" >&2
-        missing=1
-      fi
-    done
-
-    if ! grep -Eq "^pass:[[:space:]]*true[[:space:]]*$" "$log_file"; then
-      echo "packet replay log did not record pass: true for case: $case_name ($log_file)" >&2
+    # Validate the replay artifact as a commit-bound evidence record instead
+    # of trusting a bare `pass: true` flag in the log body.
+    if ! python3 scripts/packet-replay-lab.py \
+      --validate-log "$log_file" \
+      --expected-case "$case_name" \
+      --expected-commit "$expected_commit"; then
+      echo "packet replay log validation failed for case: $case_name ($log_file)" >&2
       missing=1
     fi
   done
@@ -125,17 +222,17 @@ require_stress_evidence() {
     return 1
   fi
 
-  if ! grep -Eq "^stress_iterations:[[:space:]]*$expected_iterations[[:space:]]*$" "$log_file"; then
+  if ! grep -Eq "^stress_iterations:[[:space:]]*${expected_iterations}[[:space:]]*$" "$log_file"; then
     echo "stress replay summary does not record expected iteration count ($expected_iterations): $log_file" >&2
     return 1
   fi
 
-  if ! grep -Eq "^stress_cases_per_iteration:[[:space:]]*$expected_cases_per_iteration[[:space:]]*$" "$log_file"; then
+  if ! grep -Eq "^stress_cases_per_iteration:[[:space:]]*${expected_cases_per_iteration}[[:space:]]*$" "$log_file"; then
     echo "stress replay summary does not record $expected_cases_per_iteration cases per iteration: $log_file" >&2
     return 1
   fi
 
-  if ! grep -Eq "^stress_total_case_runs:[[:space:]]*$expected_total_case_runs[[:space:]]*$" "$log_file"; then
+  if ! grep -Eq "^stress_total_case_runs:[[:space:]]*${expected_total_case_runs}[[:space:]]*$" "$log_file"; then
     echo "stress replay summary does not record expected total case runs ($expected_total_case_runs): $log_file" >&2
     return 1
   fi
@@ -243,9 +340,11 @@ capture_cleanup_state() {
   local netns_state=""
   local prog_state=""
   local remaining_pin=""
+  local pin_dir="/sys/fs/bpf/aegis/${host_if}/abi-v1"
 
-  if [[ -d /sys/fs/bpf/aegis ]]; then
-    if ! remaining_pin="$(find /sys/fs/bpf/aegis -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+  # Cleanup evidence is checked against the owned instance directory only.
+  if [[ -d "$pin_dir" ]]; then
+    if ! remaining_pin="$(find "$pin_dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
       cleanup_ok=0
     fi
   fi
@@ -269,8 +368,8 @@ capture_cleanup_state() {
   {
     echo "--- cleanup verification ---"
     echo
-    echo "command: ls /sys/fs/bpf/aegis/ 2>&1"
-    ls /sys/fs/bpf/aegis/ 2>&1 || true
+    echo "command: find $pin_dir -mindepth 1 -maxdepth 1 -ls 2>&1"
+    find "$pin_dir" -mindepth 1 -maxdepth 1 -ls 2>&1 || true
     echo
     echo "command: ip link show dev $host_if 2>&1"
     ip link show dev "$host_if" 2>&1 || true
@@ -298,7 +397,8 @@ capture_cleanup_state() {
 }
 
 cleanup_aegis_lab_pins() {
-  local pin_dir="/sys/fs/bpf/aegis"
+  local host_if="${1:-aegis-host0}"
+  local pin_dir="/sys/fs/bpf/aegis/${host_if}/abi-v1"
   local pins=(
     BLOCKLIST
     ALLOWLIST
@@ -323,16 +423,21 @@ cleanup_aegis_lab_pins() {
   )
 
   [[ -d "$pin_dir" ]] || return 0
+  # Never delete the shared bpffs root blindly; only remove the owned
+  # instance directory that matches the lab interface identity.
   for pin in "${pins[@]}"; do
     rm -f "$pin_dir/$pin" 2>/dev/null
   done
+  rm -f "$pin_dir/ownership.json" 2>/dev/null
   rmdir "$pin_dir" 2>/dev/null || true
+  rmdir "$(dirname "$pin_dir")" 2>/dev/null || true
+  rmdir "/sys/fs/bpf/aegis" 2>/dev/null || true
 }
 
 require_clean_privileged_lab_host() {
   local host_if="$1"
   local ns="$2"
-  local pin_dir="/sys/fs/bpf/aegis"
+  local pin_dir="/sys/fs/bpf/aegis/${host_if}/abi-v1"
   local first_pin=""
   local netns_state=""
   local prog_state=""
@@ -379,8 +484,13 @@ require_clean_privileged_lab_host() {
 non_privileged() {
   require_cmd cargo
   local doc_target_dir="${AEGIS_DOC_TARGET_DIR:-}"
+  local cargo_target_dir="${CARGO_TARGET_DIR:-target}"
   local doc_target_is_temporary=0
   local doc_rc=0
+
+  if [[ "$cargo_target_dir" != /* ]]; then
+    cargo_target_dir="$ROOT_DIR/$cargo_target_dir"
+  fi
 
   run git status --short
   run rustc --version
@@ -408,7 +518,7 @@ non_privileged() {
     return "$doc_rc"
   fi
   run cargo run -p xtask -- build-all --profile release
-  run cargo build --release -p aegis-cli -p aegis-cni -p xtask
+  run cargo build --locked --release -p aegis-cli -p aegis-cni -p aegis-tower -p xtask
 
   require_cmd file
   run file target/bpfel-unknown-none/release/aegis
@@ -444,7 +554,7 @@ non_privileged() {
     exit 127
   fi
 
-  run target/release/aegis-cli --iface lo daemon --help >/dev/null
+  run "$cargo_target_dir/release/aegis-cli" --iface lo daemon --help >/dev/null
 }
 
 privileged_lab() {
@@ -469,10 +579,7 @@ privileged_lab() {
   lab_daemon_started=0
   cleanup_state_written=0
 
-  if [[ ! "$stress_iterations" =~ ^[0-9]+$ ]]; then
-    echo "AEGIS_STRESS_ITERATIONS must be a non-negative integer, got: $stress_iterations" >&2
-    exit 2
-  fi
+  validate_stress_iterations "$stress_iterations"
 
   if [[ -z "$replay_dir" ]]; then
     replay_dir="$(mktemp -d /tmp/aegis-replay.XXXXXX)"
@@ -481,6 +588,11 @@ privileged_lab() {
   require_clean_evidence_dir "$replay_dir"
   export AEGIS_PACKET_REPLAY_DIR="$replay_dir"
   mkdir -p "$replay_dir"
+  if (( stress_iterations > 0 )); then
+    require_resource_headroom stress >"$replay_dir/resource-preflight.log"
+  else
+    require_resource_headroom privileged >"$replay_dir/resource-preflight.log"
+  fi
   require_clean_privileged_lab_host "$host_if" "$ns"
 
   cleanup() {
@@ -495,7 +607,7 @@ privileged_lab() {
     ip link del "${host_if:-aegis-host0}" 2>/dev/null
     ip netns del "${ns:-aegis-reltest}" 2>/dev/null
     if [[ "${lab_daemon_started:-0}" -eq 1 ]]; then
-      cleanup_aegis_lab_pins
+      cleanup_aegis_lab_pins "${host_if:-aegis-host0}"
     fi
     [[ -n "${lab_dir:-}" ]] && rm -rf "$lab_dir"
     set -e
@@ -587,7 +699,26 @@ privileged_lab() {
   if (( stress_iterations > 0 )); then
     replay_cmd+=(--stress-iterations "$stress_iterations")
   fi
-  run "${replay_cmd[@]}"
+
+  local case_output=""
+  local replay_cases=()
+  local replay_timeout="${AEGIS_REPLAY_TIMEOUT_SECONDS:-}"
+  if ! case_output="$(python3 scripts/packet-replay-lab.py --list-cases)"; then
+    echo "could not calculate the packet replay watchdog timeout" >&2
+    exit 1
+  fi
+  mapfile -t replay_cases <<<"$case_output"
+  if [[ "${#replay_cases[@]}" -eq 0 || -z "${replay_cases[0]}" ]]; then
+    echo "canonical packet replay case list is empty" >&2
+    exit 1
+  fi
+  if [[ -z "$replay_timeout" ]]; then
+    replay_timeout=$((300 + (stress_iterations + 1) * ${#replay_cases[@]} * 5))
+  fi
+  validate_replay_timeout "$replay_timeout"
+  echo "replay_timeout_seconds: $replay_timeout" >>"$replay_dir/resource-preflight.log"
+
+  run timeout --signal=TERM --kill-after=30s "${replay_timeout}s" "${replay_cmd[@]}"
 
   kill -TERM "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
@@ -620,11 +751,14 @@ case "${1:-nonpriv}" in
     exit 0
     ;;
   privileged-lab)
+    require_resource_headroom privileged
     non_privileged
     privileged_lab
     ;;
   stress-lab)
     export AEGIS_STRESS_ITERATIONS="${AEGIS_STRESS_ITERATIONS:-25}"
+    validate_stress_iterations "$AEGIS_STRESS_ITERATIONS"
+    require_resource_headroom stress
     non_privileged
     privileged_lab
     ;;
@@ -632,10 +766,7 @@ case "${1:-nonpriv}" in
     require_cmd python3
     require_packet_replay_evidence
     stress_iterations="${AEGIS_STRESS_ITERATIONS:-0}"
-    if [[ ! "$stress_iterations" =~ ^[0-9]+$ ]]; then
-      echo "AEGIS_STRESS_ITERATIONS must be a non-negative integer, got: $stress_iterations" >&2
-      exit 2
-    fi
+    validate_stress_iterations "$stress_iterations"
     if (( stress_iterations > 0 )); then
       require_stress_evidence "$stress_iterations"
     fi
