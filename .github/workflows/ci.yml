@@ -113,7 +113,7 @@ jobs:
               source_commit: $source_commit,
               ci_checkout_commit: $ci_checkout_commit,
               event: $event,
-              note: "For pull_request events, ci_checkout_commit is GitHub's temporary merge commit."
+              note: "For pull_request events, ci_checkout_commit is the temporary GitHub merge commit."
             }' > target/aegis-ci-build-identity.json
 
           sha256sum \
