@@ -50,3 +50,4 @@ file_info.txt
 ldd_info.txt
 microbench.rs
 target_test/
+/release-artifacts/

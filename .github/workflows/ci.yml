@@ -11,44 +11,30 @@ jobs:
   nonpriv-release-gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
       - name: Install release gate tools
         run: |
           sudo apt-get update
           sudo apt-get install -y file llvm protobuf-compiler python3-scapy
-          cargo install bpf-linker --locked
-          cargo install cargo-audit --locked
-          cargo install cargo-deny --locked
+          cargo install bpf-linker --version 0.10.1 --locked
+          cargo install cargo-audit --version 0.22.1 --locked
+          cargo install cargo-deny --version 0.19.8 --locked
           cargo audit --stale || true
       - name: Non-privileged release gate
         run: ./scripts/release-gates.sh nonpriv
-      - name: Verification crate tests
-        run: |
-          cargo fmt --manifest-path verification/Cargo.toml --all -- --check
-          cargo clippy --manifest-path verification/Cargo.toml --all-targets --all-features -- -D warnings
-          cargo test --manifest-path verification/Cargo.toml
-      - name: Verification fuzz target checks
-        run: |
-          cargo fmt --manifest-path verification/fuzz/Cargo.toml --all -- --check
-          cargo clippy --manifest-path verification/fuzz/Cargo.toml --all-targets --all-features -- -D warnings
-      - name: CLI config fuzz target checks
-        run: |
-          cargo fmt --manifest-path aegis-cli/fuzz/Cargo.toml --all -- --check
-          cargo clippy --locked --manifest-path aegis-cli/fuzz/Cargo.toml --all-targets --all-features -- -D warnings
-      - name: Shell syntax
-        run: bash -n install.sh deploy/deploy.sh scripts/check-tla.sh scripts/release-gates.sh verify.sh
       - name: Packet replay driver syntax
         run: |
-          python3 -m py_compile scripts/packet-replay-lab.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/packet-replay-lab.py
           test "$(python3 scripts/packet-replay-lab.py --list-cases | wc -l)" -eq 18
+          python3 scripts/packet-replay-lab.py --self-test-validator
           python3 scripts/packet-replay-lab.py --validate-packets
 
   formal-verification:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
       - name: Install formal verification tools
         run: |
           sudo apt-get update
@@ -66,7 +52,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, aegis-ebpf-lab]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Privileged lab release gate with bounded stress
         run: |
           sudo -E AEGIS_PACKET_REPLAY_DIR=/tmp/aegis-replay-${{ github.run_id }}-${{ github.run_attempt }} \
@@ -74,7 +60,7 @@ jobs:
             CARGO_HOME=/tmp/aegis-cargo-home \
             ./scripts/release-gates.sh stress-lab
       - name: Archive replay artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: aegis-replay-${{ github.sha }}-${{ github.run_attempt }}
@@ -83,25 +69,25 @@ jobs:
   portable-static-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
       - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm clang libelf-dev musl-tools protobuf-compiler
-          cargo install bpf-linker --locked
+          cargo install bpf-linker --version 0.10.1 --locked
           rustup target add x86_64-unknown-linux-musl
       - name: Build eBPF objects
-        run: cargo run -p xtask -- build-all --profile release
+        run: cargo run --locked -p xtask -- build-all --profile release
       - name: Build static musl binary
-        run: cargo build --release --target x86_64-unknown-linux-musl -p aegis-cli
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p aegis-cli
       - name: Validate portability
         run: |
           file target/x86_64-unknown-linux-musl/release/aegis-cli
           ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "not a dynamic executable" || ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "statically linked"
           target/x86_64-unknown-linux-musl/release/aegis-cli --version
       - name: Upload portable binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: aegis-portable-${{ github.sha }}
           path: |

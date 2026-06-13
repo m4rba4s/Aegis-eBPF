@@ -24,10 +24,10 @@ if ! command -v cargo-generate-rpm &>/dev/null; then
 fi
 
 echo "🔨 Compiling eBPF objects..."
-cargo run -p xtask -- build-all --profile release
+cargo run --locked -p xtask -- build-all --profile release
 
 echo "🔨 Compiling release binary..."
-cargo build --release -p aegis-cli
+cargo build --locked --release -p aegis-cli
 
 mkdir -p target/packages
 find target/packages -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) -delete

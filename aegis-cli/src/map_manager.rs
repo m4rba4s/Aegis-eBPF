@@ -2,9 +2,15 @@ use aegis_common::{CidrBlockEntry, LpmKeyIpv4, LpmKeyIpv6, CAT_MANUAL, MAP_ABI_V
 use aya::maps::lpm_trie::{Key, LpmTrie};
 use aya::maps::{HashMap, MapData};
 use aya::Ebpf;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +18,42 @@ use std::sync::{Arc, Mutex};
 pub type ConfigMap = Arc<Mutex<HashMap<MapData, u32, u32>>>;
 
 pub const PIN_ROOT: &str = "/sys/fs/bpf/aegis";
+pub const RUNTIME_ROOT: &str = "/run/aegis";
 pub const INSTANCE_ENV: &str = "AEGIS_INSTANCE_ID";
+const PROJECT_ID: &str = "Aegis-eBPF";
+const OWNERSHIP_FILE: &str = "ownership.json";
+
+const OWNED_PIN_NAMES: &[&str] = &[
+    "ALLOWLIST",
+    "ALLOWLIST_IPV6",
+    "BLOCKLIST",
+    "BLOCKLIST_IPV6",
+    "CIDR_BLOCKLIST",
+    "CIDR_BLOCKLIST_IPV6",
+    "CONFIG",
+    "CONN_TRACK",
+    "CONN_TRACK_IPV6",
+    "DPI_EVENTS",
+    "EGRESS_BLOCKLIST",
+    "EGRESS_BLOCKLIST_IPV6",
+    "EGRESS_CIDR_BLOCKLIST",
+    "EGRESS_CIDR_BLOCKLIST_IPV6",
+    "EVENTS",
+    "EVENTS_IPV6",
+    "GLOBAL_SYN_CTR",
+    "PORT_SCAN",
+    "RATE_LIMIT",
+    "STATS",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OwnershipMarker {
+    project: String,
+    instance_id: String,
+    map_abi_version: u32,
+    created_by_version: String,
+    interface: String,
+}
 
 pub fn instance_id_for_interface(iface: &str) -> String {
     iface.to_string()
@@ -28,9 +69,31 @@ pub fn current_instance_id() -> anyhow::Result<String> {
 }
 
 pub fn instance_pin_dir(instance_id: &str) -> PathBuf {
-    Path::new(PIN_ROOT)
+    instance_pin_dir_at(Path::new(PIN_ROOT), instance_id)
+}
+
+fn instance_pin_dir_at(pin_root: &Path, instance_id: &str) -> PathBuf {
+    pin_root
         .join(instance_id)
         .join(format!("abi-v{}", MAP_ABI_VERSION))
+}
+
+fn ownership_marker_path_at(runtime_root: &Path, instance_id: &str) -> PathBuf {
+    runtime_root
+        .join("instances")
+        .join(instance_id)
+        .join(format!("abi-v{}", MAP_ABI_VERSION))
+        .join(OWNERSHIP_FILE)
+}
+
+fn expected_marker(iface: &str) -> OwnershipMarker {
+    OwnershipMarker {
+        project: PROJECT_ID.to_string(),
+        instance_id: instance_id_for_interface(iface),
+        map_abi_version: MAP_ABI_VERSION,
+        created_by_version: env!("CARGO_PKG_VERSION").to_string(),
+        interface: iface.to_string(),
+    }
 }
 
 /// Resolve the pin directory for the current instance identity.
@@ -54,40 +117,315 @@ pub fn map_path(name: &str) -> PathBuf {
 }
 
 pub fn ensure_instance_pin_dir(iface: &str) -> anyhow::Result<PathBuf> {
-    let instance_id = instance_id_for_interface(iface);
-    let pin_dir = instance_pin_dir(&instance_id);
-    fs::create_dir_all(&pin_dir)?;
+    let pin_dir = ensure_instance_pin_dir_at(Path::new(PIN_ROOT), Path::new(RUNTIME_ROOT), iface)?;
+    assign_runtime_path_ownership(&pin_dir, iface)?;
     Ok(pin_dir)
 }
 
-pub fn verify_instance_marker(_pin_dir: &Path, _iface: &str) -> anyhow::Result<()> {
-    // The BPF filesystem does not support regular files, so we removed ownership.json.
-    // Ownership is implicitly tied to the interface identity in the pin_dir path.
+fn ensure_instance_pin_dir_at(
+    pin_root: &Path,
+    runtime_root: &Path,
+    iface: &str,
+) -> anyhow::Result<PathBuf> {
+    let instance_id = instance_id_for_interface(iface);
+    let pin_dir = instance_pin_dir_at(pin_root, &instance_id);
+    let marker_path = ownership_marker_path_at(runtime_root, &instance_id);
+
+    if marker_path.exists() {
+        verify_instance_marker_at(&pin_dir, pin_root, runtime_root, iface)?;
+        fs::create_dir_all(&pin_dir)?;
+        return Ok(pin_dir);
+    }
+
+    if pin_dir.exists() && fs::read_dir(&pin_dir)?.next().transpose()?.is_some() {
+        anyhow::bail!(
+            "refusing to claim non-empty bpffs directory without ownership marker: {}",
+            pin_dir.display()
+        );
+    }
+
+    fs::create_dir_all(&pin_dir)?;
+    write_ownership_marker(&marker_path, &expected_marker(iface))?;
+    Ok(pin_dir)
+}
+
+fn write_ownership_marker(path: &Path, marker: &OwnershipMarker) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("ownership marker has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create ownership marker {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+    let body = serde_json::to_vec_pretty(marker)?;
+    file.write_all(&body)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
     Ok(())
 }
 
-/// Remove only the pins owned by the current instance directory.
+fn runtime_identity() -> (u32, u32) {
+    let uid = env::var("SUDO_UID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(65534);
+    let gid = env::var("SUDO_GID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(65534);
+    (uid, gid)
+}
+
+fn assign_runtime_path_ownership(pin_dir: &Path, iface: &str) -> anyhow::Result<()> {
+    let (uid, gid) = runtime_identity();
+    let instance_id = instance_id_for_interface(iface);
+    let marker_path = ownership_marker_path_at(Path::new(RUNTIME_ROOT), &instance_id);
+    let shared_paths = [
+        PathBuf::from(PIN_ROOT),
+        PathBuf::from(RUNTIME_ROOT),
+        Path::new(RUNTIME_ROOT).join("instances"),
+    ];
+    let instance_paths = [
+        pin_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("pin directory has no instance parent"))?
+            .to_path_buf(),
+        pin_dir.to_path_buf(),
+        Path::new(RUNTIME_ROOT).join("instances").join(&instance_id),
+        marker_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("marker has no ABI directory"))?
+            .to_path_buf(),
+    ];
+
+    for path in shared_paths {
+        set_shared_directory(&path)?;
+    }
+    for path in instance_paths {
+        set_owned_directory(&path, uid, gid)?;
+    }
+    set_path_owner(&marker_path, uid, gid)?;
+    fs::set_permissions(&marker_path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn set_shared_directory(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "shared Aegis path is not a real directory: {}",
+            path.display()
+        );
+    }
+    set_path_owner(path, 0, 0)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o711))?;
+    Ok(())
+}
+
+fn set_owned_directory(path: &Path, uid: u32, gid: u32) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "managed Aegis path is not a real directory: {}",
+            path.display()
+        );
+    }
+    set_path_owner(path, uid, gid)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn set_path_owner(path: &Path, uid: u32, gid: u32) -> anyhow::Result<()> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        anyhow::anyhow!(
+            "managed Aegis path contains an interior NUL: {}",
+            path.display()
+        )
+    })?;
+    // SAFETY: `c_path` is a live, NUL-terminated CString for the duration of
+    // the call, and `chown` does not retain the pointer.
+    let rc = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(anyhow::anyhow!(
+            "failed to chown {} to {}:{}: {}",
+            path.display(),
+            uid,
+            gid,
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+pub fn verify_instance_marker(pin_dir: &Path, iface: &str) -> anyhow::Result<()> {
+    verify_instance_marker_at(pin_dir, Path::new(PIN_ROOT), Path::new(RUNTIME_ROOT), iface)
+}
+
+fn verify_instance_marker_at(
+    pin_dir: &Path,
+    pin_root: &Path,
+    runtime_root: &Path,
+    iface: &str,
+) -> anyhow::Result<()> {
+    let expected = expected_marker(iface);
+    let expected_pin_dir = instance_pin_dir_at(pin_root, &expected.instance_id);
+    if pin_dir != expected_pin_dir {
+        anyhow::bail!(
+            "pin directory {} does not match instance {} expected path {}",
+            pin_dir.display(),
+            expected.instance_id,
+            expected_pin_dir.display()
+        );
+    }
+
+    let marker_path = ownership_marker_path_at(runtime_root, &expected.instance_id);
+    let body = fs::read(&marker_path).map_err(|e| {
+        anyhow::anyhow!(
+            "missing or unreadable ownership marker {}: {}",
+            marker_path.display(),
+            e
+        )
+    })?;
+    let actual: OwnershipMarker = serde_json::from_slice(&body).map_err(|e| {
+        anyhow::anyhow!("invalid ownership marker {}: {}", marker_path.display(), e)
+    })?;
+
+    if actual.project != expected.project
+        || actual.instance_id != expected.instance_id
+        || actual.interface != expected.interface
+    {
+        anyhow::bail!(
+            "ownership marker {} does not belong to Aegis instance {}",
+            marker_path.display(),
+            expected.instance_id
+        );
+    }
+    if actual.map_abi_version != MAP_ABI_VERSION {
+        anyhow::bail!(
+            "incompatible map ABI in {}: found {}, expected {}",
+            marker_path.display(),
+            actual.map_abi_version,
+            MAP_ABI_VERSION
+        );
+    }
+    Ok(())
+}
+
+/// Remove only pins from the current instance after verifying ownership.
+pub fn cleanup_instance_pin_dir(pin_dir: &Path, iface: &str) -> anyhow::Result<()> {
+    cleanup_instance_pin_dir_at(
+        pin_dir,
+        Path::new(PIN_ROOT),
+        Path::new(RUNTIME_ROOT),
+        iface,
+        false,
+    )
+}
+
+/// Explicit operator recovery for stale state whose runtime marker was lost.
 ///
-/// This intentionally leaves sibling instance directories and unrelated bpffs
-/// state untouched.
-pub fn cleanup_instance_pin_dir(pin_dir: &Path, _iface: &str) -> anyhow::Result<()> {
-    // verify_instance_marker(pin_dir, _iface)?;
+/// The force path still removes only known Aegis pin names and refuses unknown
+/// entries, so it cannot recursively erase arbitrary bpffs contents.
+pub fn cleanup_orphaned_instance_pin_dir(iface: &str) -> anyhow::Result<()> {
+    let pin_dir = instance_pin_dir(&instance_id_for_interface(iface));
+    cleanup_instance_pin_dir_at(
+        &pin_dir,
+        Path::new(PIN_ROOT),
+        Path::new(RUNTIME_ROOT),
+        iface,
+        true,
+    )
+}
+
+fn cleanup_instance_pin_dir_at(
+    pin_dir: &Path,
+    pin_root: &Path,
+    runtime_root: &Path,
+    iface: &str,
+    allow_missing_marker: bool,
+) -> anyhow::Result<()> {
+    let instance_id = instance_id_for_interface(iface);
+    let marker_path = ownership_marker_path_at(runtime_root, &instance_id);
+
+    if marker_path.exists() || !allow_missing_marker {
+        verify_instance_marker_at(pin_dir, pin_root, runtime_root, iface)?;
+    }
+
     if pin_dir.exists() {
+        let mut owned_entries = Vec::new();
         for entry in fs::read_dir(pin_dir)? {
             let entry = entry?;
-            let path = entry.path();
-            if path.is_file() {
-                let _ = fs::remove_file(&path);
-            } else if path.is_dir() {
-                let _ = fs::remove_dir_all(&path);
+            let name = entry.file_name().into_string().map_err(|_| {
+                anyhow::anyhow!(
+                    "refusing to clean {} because a non-UTF-8 entry remains",
+                    pin_dir.display()
+                )
+            })?;
+            if !OWNED_PIN_NAMES.contains(&name.as_str()) {
+                anyhow::bail!(
+                    "refusing to clean {} because unknown entry remains: {}",
+                    pin_dir.display(),
+                    entry.path().display()
+                );
+            }
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() || metadata.file_type().is_dir() {
+                anyhow::bail!(
+                    "refusing to remove non-pin entry from {}: {}",
+                    pin_dir.display(),
+                    entry.path().display()
+                );
+            }
+            owned_entries.push(entry.path());
+        }
+
+        for path in owned_entries {
+            fs::remove_file(&path).map_err(|e| {
+                anyhow::anyhow!("failed to remove owned pin {}: {}", path.display(), e)
+            })?;
+        }
+        fs::remove_dir(pin_dir)?;
+    }
+
+    if let Some(parent) = pin_dir.parent() {
+        remove_dir_if_empty(parent)?;
+    }
+
+    if marker_path.exists() {
+        fs::remove_file(&marker_path)?;
+        if let Some(abi_dir) = marker_path.parent() {
+            remove_dir_if_empty(abi_dir)?;
+            if let Some(instance_dir) = abi_dir.parent() {
+                remove_dir_if_empty(instance_dir)?;
+                if let Some(instances_dir) = instance_dir.parent() {
+                    remove_dir_if_empty(instances_dir)?;
+                }
             }
         }
     }
-    let _ = fs::remove_dir(pin_dir);
-    if let Some(parent) = pin_dir.parent() {
-        let _ = fs::remove_dir(parent);
-    }
     Ok(())
+}
+
+fn remove_dir_if_empty(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::DirectoryNotEmpty =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn setup_config_map(
@@ -371,9 +709,38 @@ pub fn setup_egress_blocklists(
 
 #[cfg(test)]
 mod tests {
-    use super::{instance_pin_dir, parse_egress_cidr, ParsedCidr};
+    use super::{
+        cleanup_instance_pin_dir_at, ensure_instance_pin_dir_at, instance_pin_dir,
+        instance_pin_dir_at, ownership_marker_path_at, parse_egress_cidr,
+        verify_instance_marker_at, OwnershipMarker, ParsedCidr, OWNED_PIN_NAMES,
+    };
     use crate::map_manager::MAP_ABI_VERSION;
+    use std::fs;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn test_roots(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let unique = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "aegis-map-manager-{}-{}-{}",
+            name,
+            std::process::id(),
+            unique
+        ));
+        let pin_root = root.join("bpffs");
+        let runtime_root = root.join("run");
+        fs::create_dir_all(&pin_root).unwrap();
+        fs::create_dir_all(&runtime_root).unwrap();
+        (root, pin_root, runtime_root)
+    }
+
+    fn write_marker(path: &Path, marker: &OwnershipMarker) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(marker).unwrap()).unwrap();
+    }
 
     #[test]
     fn test_parse_egress_cidr_ipv4() {
@@ -404,6 +771,128 @@ mod tests {
         assert!(pin_dir_text.ends_with("/sys/fs/bpf/aegis/eth0/abi-v1"));
         assert!(pin_dir_text.contains("/aegis/eth0/"));
         assert_eq!(MAP_ABI_VERSION, 1);
+    }
+
+    #[test]
+    fn matching_marker_allows_owned_cleanup() {
+        let (root, pin_root, runtime_root) = test_roots("owned-cleanup");
+        let pin_dir = ensure_instance_pin_dir_at(&pin_root, &runtime_root, "eth0").unwrap();
+        fs::write(pin_dir.join(OWNED_PIN_NAMES[0]), b"pin").unwrap();
+
+        cleanup_instance_pin_dir_at(&pin_dir, &pin_root, &runtime_root, "eth0", false).unwrap();
+
+        assert!(!pin_dir.exists());
+        assert!(!ownership_marker_path_at(&runtime_root, "eth0").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_marker_prevents_destructive_cleanup() {
+        let (root, pin_root, runtime_root) = test_roots("missing-marker");
+        let pin_dir = instance_pin_dir_at(&pin_root, "eth0");
+        fs::create_dir_all(&pin_dir).unwrap();
+        let pin = pin_dir.join(OWNED_PIN_NAMES[0]);
+        fs::write(&pin, b"pin").unwrap();
+
+        let result = cleanup_instance_pin_dir_at(&pin_dir, &pin_root, &runtime_root, "eth0", false);
+
+        assert!(result.is_err());
+        assert!(pin.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_orphan_cleanup_removes_only_known_pins() {
+        let (root, pin_root, runtime_root) = test_roots("orphan-cleanup");
+        let pin_dir = instance_pin_dir_at(&pin_root, "eth0");
+        fs::create_dir_all(&pin_dir).unwrap();
+        fs::write(pin_dir.join(OWNED_PIN_NAMES[0]), b"pin").unwrap();
+
+        cleanup_instance_pin_dir_at(&pin_dir, &pin_root, &runtime_root, "eth0", true).unwrap();
+
+        assert!(!pin_dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_entry_prevents_recursive_cleanup() {
+        let (root, pin_root, runtime_root) = test_roots("unknown-entry");
+        let pin_dir = ensure_instance_pin_dir_at(&pin_root, &runtime_root, "eth0").unwrap();
+        let known = pin_dir.join(OWNED_PIN_NAMES[0]);
+        let unknown = pin_dir.join("NOT_OWNED");
+        fs::write(&known, b"preserve-until-preflight-passes").unwrap();
+        fs::write(&unknown, b"preserve").unwrap();
+
+        let result = cleanup_instance_pin_dir_at(&pin_dir, &pin_root, &runtime_root, "eth0", false);
+
+        assert!(result.is_err());
+        assert!(known.exists());
+        assert!(unknown.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn instance_cleanup_cannot_remove_sibling_instance() {
+        let (root, pin_root, runtime_root) = test_roots("sibling-instance");
+        let pin_a = ensure_instance_pin_dir_at(&pin_root, &runtime_root, "eth0").unwrap();
+        let pin_b = ensure_instance_pin_dir_at(&pin_root, &runtime_root, "eth1").unwrap();
+        fs::write(pin_a.join(OWNED_PIN_NAMES[0]), b"a").unwrap();
+        let sibling_pin = pin_b.join(OWNED_PIN_NAMES[0]);
+        fs::write(&sibling_pin, b"b").unwrap();
+
+        cleanup_instance_pin_dir_at(&pin_a, &pin_root, &runtime_root, "eth0", false).unwrap();
+
+        assert!(sibling_pin.exists());
+        assert!(ownership_marker_path_at(&runtime_root, "eth1").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incompatible_map_abi_is_rejected() {
+        let (root, pin_root, runtime_root) = test_roots("abi-mismatch");
+        let pin_dir = instance_pin_dir_at(&pin_root, "eth0");
+        fs::create_dir_all(&pin_dir).unwrap();
+        let marker_path = ownership_marker_path_at(&runtime_root, "eth0");
+        write_marker(
+            &marker_path,
+            &OwnershipMarker {
+                project: "Aegis-eBPF".to_string(),
+                instance_id: "eth0".to_string(),
+                map_abi_version: MAP_ABI_VERSION + 1,
+                created_by_version: "older-release".to_string(),
+                interface: "eth0".to_string(),
+            },
+        );
+
+        let result = verify_instance_marker_at(&pin_dir, &pin_root, &runtime_root, "eth0");
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("incompatible map ABI"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_abi_marker_survives_userspace_upgrade() {
+        let (root, pin_root, runtime_root) = test_roots("version-upgrade");
+        let pin_dir = instance_pin_dir_at(&pin_root, "eth0");
+        fs::create_dir_all(&pin_dir).unwrap();
+        let marker_path = ownership_marker_path_at(&runtime_root, "eth0");
+        write_marker(
+            &marker_path,
+            &OwnershipMarker {
+                project: "Aegis-eBPF".to_string(),
+                instance_id: "eth0".to_string(),
+                map_abi_version: MAP_ABI_VERSION,
+                created_by_version: "4.2.0".to_string(),
+                interface: "eth0".to_string(),
+            },
+        );
+
+        verify_instance_marker_at(&pin_dir, &pin_root, &runtime_root, "eth0").unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

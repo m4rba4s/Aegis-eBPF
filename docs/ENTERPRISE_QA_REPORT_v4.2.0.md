@@ -27,8 +27,9 @@ retrieved or verified.
 
 - Do not cite this document as proof of production or enterprise readiness.
 - Treat the v4.2.0 runtime and stress claims as historical and unverified until
-  the original raw archive is recovered and matched to commit `8b2184d`, or the
-  gates are rerun on the exact target commit.
+  the original raw archive is recovered and matched to tagged commit
+  `0dadb3efb737f7a857548383c4d4eeab859dd732`, or the gates are rerun on the
+  exact target commit.
 - Current release status remains governed by
   [RELEASE_VALIDATION.md](RELEASE_VALIDATION.md) and
   [RELEASE_EVIDENCE_INDEX.md](RELEASE_EVIDENCE_INDEX.md).

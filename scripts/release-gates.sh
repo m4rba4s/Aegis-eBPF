@@ -198,6 +198,9 @@ require_stress_evidence() {
   local expected_total_case_runs=0
   local evidence_dir="${AEGIS_PACKET_REPLAY_DIR:-}"
   local log_file="$evidence_dir/stress-summary.log"
+  local expected_commit=""
+
+  expected_commit="$(git rev-parse HEAD 2>/dev/null || true)"
 
   if ! case_output="$(python3 scripts/packet-replay-lab.py --list-cases)"; then
     echo "could not load the canonical packet replay case list" >&2
@@ -219,6 +222,11 @@ require_stress_evidence() {
 
   if ! grep -Eq "^case:[[:space:]]*stress_replay_matrix[[:space:]]*$" "$log_file"; then
     echo "stress replay summary has wrong case name: $log_file" >&2
+    return 1
+  fi
+
+  if ! grep -Eq "^commit:[[:space:]]*${expected_commit}[[:space:]]*$" "$log_file"; then
+    echo "stress replay summary does not match current commit ($expected_commit): $log_file" >&2
     return 1
   fi
 
@@ -341,6 +349,7 @@ capture_cleanup_state() {
   local prog_state=""
   local remaining_pin=""
   local pin_dir="/sys/fs/bpf/aegis/${host_if}/abi-v1"
+  local marker="/run/aegis/instances/${host_if}/abi-v1/ownership.json"
 
   # Cleanup evidence is checked against the owned instance directory only.
   if [[ -d "$pin_dir" ]]; then
@@ -349,6 +358,9 @@ capture_cleanup_state() {
     fi
   fi
   if [[ -n "$remaining_pin" ]]; then
+    cleanup_ok=0
+  fi
+  if [[ -e "$marker" ]]; then
     cleanup_ok=0
   fi
   if ip link show dev "$host_if" >/dev/null 2>&1; then
@@ -370,6 +382,9 @@ capture_cleanup_state() {
     echo
     echo "command: find $pin_dir -mindepth 1 -maxdepth 1 -ls 2>&1"
     find "$pin_dir" -mindepth 1 -maxdepth 1 -ls 2>&1 || true
+    echo
+    echo "command: ls -l $marker 2>&1"
+    ls -l "$marker" 2>&1 || true
     echo
     echo "command: ip link show dev $host_if 2>&1"
     ip link show dev "$host_if" 2>&1 || true
@@ -398,46 +413,20 @@ capture_cleanup_state() {
 
 cleanup_aegis_lab_pins() {
   local host_if="${1:-aegis-host0}"
-  local pin_dir="/sys/fs/bpf/aegis/${host_if}/abi-v1"
-  local pins=(
-    BLOCKLIST
-    ALLOWLIST
-    STATS
-    CONFIG
-    BLOCKLIST_IPV6
-    ALLOWLIST_IPV6
-    CIDR_BLOCKLIST
-    CIDR_BLOCKLIST_IPV6
-    DPI_EVENTS
-    EGRESS_BLOCKLIST
-    EGRESS_BLOCKLIST_IPV6
-    EGRESS_CIDR_BLOCKLIST
-    EGRESS_CIDR_BLOCKLIST_IPV6
-    EVENTS
-    EVENTS_IPV6
-    GLOBAL_SYN_CTR
-    PORT_SCAN
-    RATE_LIMIT
-    CONN_TRACK
-    CONN_TRACK_IPV6
-  )
+  local marker="/run/aegis/instances/${host_if}/abi-v1/ownership.json"
+  local cleanup_args=(--iface "$host_if" cleanup-pins)
 
-  [[ -d "$pin_dir" ]] || return 0
-  # Never delete the shared bpffs root blindly; only remove the owned
-  # instance directory that matches the lab interface identity.
-  for pin in "${pins[@]}"; do
-    rm -f "$pin_dir/$pin" 2>/dev/null
-  done
-  rm -f "$pin_dir/ownership.json" 2>/dev/null
-  rmdir "$pin_dir" 2>/dev/null || true
-  rmdir "$(dirname "$pin_dir")" 2>/dev/null || true
-  rmdir "/sys/fs/bpf/aegis" 2>/dev/null || true
+  if [[ ! -e "$marker" ]]; then
+    cleanup_args+=(--force-orphaned)
+  fi
+  "$ROOT_DIR/target/release/aegis-cli" "${cleanup_args[@]}"
 }
 
 require_clean_privileged_lab_host() {
   local host_if="$1"
   local ns="$2"
   local pin_dir="/sys/fs/bpf/aegis/${host_if}/abi-v1"
+  local marker="/run/aegis/instances/${host_if}/abi-v1/ownership.json"
   local first_pin=""
   local netns_state=""
   local prog_state=""
@@ -451,6 +440,11 @@ require_clean_privileged_lab_host() {
   if [[ -n "$first_pin" ]]; then
     echo "privileged lab requires a clean Aegis bpffs state; found existing pin: $first_pin" >&2
     echo "run this gate only in a disposable VM/lab host or detach/cleanup the existing Aegis instance first" >&2
+    exit 1
+  fi
+  if [[ -e "$marker" ]]; then
+    echo "privileged lab found stale Aegis ownership metadata: $marker" >&2
+    echo "inspect the instance and use the explicit cleanup-pins command before retrying" >&2
     exit 1
   fi
 
@@ -483,6 +477,7 @@ require_clean_privileged_lab_host() {
 
 non_privileged() {
   require_cmd cargo
+  require_cmd python3
   local doc_target_dir="${AEGIS_DOC_TARGET_DIR:-}"
   local cargo_target_dir="${CARGO_TARGET_DIR:-target}"
   local doc_target_is_temporary=0
@@ -495,12 +490,31 @@ non_privileged() {
   run git status --short
   run rustc --version
   run cargo --version
-  run cargo metadata --format-version 1 --no-deps >/dev/null
+  run cargo metadata --locked --format-version 1 --no-deps >/dev/null
+  run cargo metadata --locked --manifest-path verification/Cargo.toml --format-version 1 --no-deps >/dev/null
+  run cargo metadata --locked --manifest-path verification/fuzz/Cargo.toml --format-version 1 --no-deps >/dev/null
+  run cargo metadata --locked --manifest-path aegis-cli/fuzz/Cargo.toml --format-version 1 --no-deps >/dev/null
 
   run cargo fmt --all -- --check
-  run cargo clippy --workspace --all-targets --all-features -- -D warnings
-  run cargo test --workspace --all-features
-  run cargo test --workspace --doc
+  run cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+  run cargo test --locked --workspace --all-features
+  run cargo test --locked --workspace --doc
+  run cargo fmt --manifest-path verification/Cargo.toml --all -- --check
+  run cargo clippy --locked --manifest-path verification/Cargo.toml --all-targets --all-features -- -D warnings
+  run cargo test --locked --manifest-path verification/Cargo.toml
+  run cargo fmt --manifest-path verification/fuzz/Cargo.toml --all -- --check
+  run cargo clippy --locked --manifest-path verification/fuzz/Cargo.toml --all-targets --all-features -- -D warnings
+  run cargo fmt --manifest-path aegis-cli/fuzz/Cargo.toml --all -- --check
+  run cargo clippy --locked --manifest-path aegis-cli/fuzz/Cargo.toml --all-targets --all-features -- -D warnings
+  run bash -n install.sh deploy/deploy.sh scripts/build-packages.sh scripts/check-tla.sh scripts/release-gates.sh verify.sh
+  run env PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile scripts/packet-replay-lab.py
+  run python3 scripts/packet-replay-lab.py --self-test-validator
+  local replay_case_count
+  replay_case_count="$(python3 scripts/packet-replay-lab.py --list-cases | wc -l)"
+  if [[ "$replay_case_count" -ne 18 ]]; then
+    echo "packet replay matrix must contain exactly 18 canonical cases, got: $replay_case_count" >&2
+    return 1
+  fi
   if [[ -z "$doc_target_dir" ]]; then
     doc_target_dir="$(mktemp -d /tmp/aegis-doc-target.XXXXXX)"
     doc_target_is_temporary=1
@@ -517,7 +531,7 @@ non_privileged() {
   if [[ "$doc_rc" -ne 0 ]]; then
     return "$doc_rc"
   fi
-  run cargo run -p xtask -- build-all --profile release
+  run cargo run --locked -p xtask -- build-all --profile release
   run cargo build --locked --release -p aegis-cli -p aegis-cni -p aegis-tower -p xtask
 
   require_cmd file
@@ -555,6 +569,81 @@ non_privileged() {
   fi
 
   run "$cargo_target_dir/release/aegis-cli" --iface lo daemon --help >/dev/null
+}
+
+release_candidate() {
+  require_cmd cargo
+  require_cmd git
+  require_cmd python3
+  require_cmd sha256sum
+  require_cmd tee
+
+  local status
+  local commit
+  local version
+  local timestamp
+  local artifact_dir
+  local gate_rc=0
+
+  status="$(git status --short)"
+  if [[ -n "$status" ]]; then
+    echo "release-candidate validation requires a clean worktree" >&2
+    printf '%s\n' "$status" >&2
+    return 1
+  fi
+
+  commit="$(git rev-parse HEAD)"
+  version="$(
+    cargo metadata --locked --format-version 1 --no-deps |
+      python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "aegis-cli"))'
+  )"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  artifact_dir="$ROOT_DIR/release-artifacts/$version/$commit/$timestamp"
+  mkdir -p "$artifact_dir/metadata" "$artifact_dir/build" "$artifact_dir/tests"
+
+  {
+    echo "mode: release-candidate"
+    echo "version: $version"
+    echo "commit: $commit"
+    echo "timestamp_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "command: CARGO_HOME=${CARGO_HOME:-<default>} ./scripts/release-gates.sh release-candidate"
+  } >"$artifact_dir/metadata/run.txt"
+  git describe --tags --always --dirty >"$artifact_dir/metadata/git-describe.txt"
+  git status --short >"$artifact_dir/metadata/git-status.txt"
+  rustc --version --verbose >"$artifact_dir/metadata/rustc.txt"
+  cargo --version --verbose >"$artifact_dir/metadata/cargo.txt"
+  uname -a >"$artifact_dir/metadata/uname.txt"
+  if [[ -r /etc/os-release ]]; then
+    cp /etc/os-release "$artifact_dir/metadata/os-release"
+  fi
+
+  set +e
+  non_privileged 2>&1 | tee "$artifact_dir/tests/nonpriv.log"
+  gate_rc="${PIPESTATUS[0]}"
+  set -e
+  if [[ "$gate_rc" -ne 0 ]]; then
+    echo "release-candidate nonpriv gate failed; artifacts retained at: $artifact_dir" >&2
+    return "$gate_rc"
+  fi
+
+  sha256sum \
+    target/bpfel-unknown-none/release/aegis \
+    target/bpfel-unknown-none/release/aegis-tc \
+    target/release/aegis-cli \
+    target/release/aegis-cni \
+    target/release/aegis-tower \
+    target/release/xtask >"$artifact_dir/build/SHA256SUMS"
+  cp target/bpfel-unknown-none/release/aegis "$artifact_dir/build/aegis"
+  cp target/bpfel-unknown-none/release/aegis-tc "$artifact_dir/build/aegis-tc"
+  cp "$artifact_dir/build/SHA256SUMS" "$artifact_dir/build/SHA256SUMS.source-paths"
+  (
+    cd "$artifact_dir/build"
+    sha256sum aegis aegis-tc >SHA256SUMS.archived
+    sha256sum -c SHA256SUMS.archived
+  )
+
+  echo "release-candidate nonpriv artifacts: $artifact_dir"
+  echo "privileged verifier/load/attach/replay/stress evidence is still required"
 }
 
 privileged_lab() {
@@ -750,6 +839,9 @@ case "${1:-nonpriv}" in
     non_privileged
     exit 0
     ;;
+  release-candidate)
+    release_candidate
+    ;;
   privileged-lab)
     require_resource_headroom privileged
     non_privileged
@@ -772,7 +864,7 @@ case "${1:-nonpriv}" in
     fi
     ;;
   *)
-    echo "usage: $0 [nonpriv|privileged-lab|stress-lab|evidence-only]" >&2
+    echo "usage: $0 [nonpriv|release-candidate|privileged-lab|stress-lab|evidence-only]" >&2
     exit 2
     ;;
 esac

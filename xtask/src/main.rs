@@ -141,6 +141,7 @@ fn build_bpf_crate(
     // Build arguments
     let mut args = vec![
         "build".to_string(),
+        "--locked".to_string(),
         "-Zbuild-std=core".to_string(),
         "--target".to_string(),
         target.to_string(),

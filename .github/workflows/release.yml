@@ -5,74 +5,211 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-release:
-    name: Build Release
-    runs-on: ubuntu-latest
+    name: Build and attest release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out exact tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate release identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' aegis-cli/Cargo.toml | head -1)"
+          if [[ -z "$version" || "$version" != "$manifest_version" ]]; then
+            echo "tag version '$version' does not match aegis-cli version '$manifest_version'" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --short)" ]]; then
+            echo "release checkout is dirty" >&2
+            git status --short >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "bundle=aegis-${version}-x86_64-linux-musl.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Build with Docker
+      - name: Build release payload
         run: |
-          docker build --output=dist .
-          ls -la dist/
+          set -euo pipefail
+          docker build --progress=plain --output type=local,dest=dist .
+          test -x dist/aegis-cli
+          test -s dist/aegis.o
+          test -s dist/aegis-tc.o
+          test -s dist/install.sh
+          test -s dist/toolchain.txt
 
-      - name: Generate checksums
+      - name: Generate CycloneDX SBOM
         run: |
-          cd dist
-          sha256sum aegis-cli aegis.o aegis-tc.o install.sh > SHA256SUMS
+          set -euo pipefail
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx \
+            --manifest-path Cargo.toml \
+            --format json \
+            --all \
+            --all-features \
+            --target x86_64-unknown-linux-musl \
+            --spec-version 1.5
+          cargo cyclonedx \
+            --manifest-path aegis-ebpf/Cargo.toml \
+            --format json \
+            --all \
+            --all-features \
+            --target all \
+            --spec-version 1.5 \
+            --override-filename aegis-ebpf.cdx
+          cargo cyclonedx \
+            --manifest-path aegis-tc/Cargo.toml \
+            --format json \
+            --all \
+            --all-features \
+            --target all \
+            --spec-version 1.5 \
+            --override-filename aegis-tc.cdx
+          mkdir -p dist/sbom
+          while IFS= read -r -d '' sbom; do
+            install -m 0644 "$sbom" "dist/sbom/$(basename "$sbom")"
+          done < <(
+            find . \
+              -path './target' -prune -o \
+              -path './release-assets' -prune -o \
+              -name '*.cdx.json' -type f -print0
+          )
+          test "$(find dist/sbom -maxdepth 1 -type f -name '*.cdx.json' | wc -l)" -ge 7
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Package immutable release bundle
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          COMMIT: ${{ steps.identity.outputs.commit }}
+          BUNDLE: ${{ steps.identity.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets/bundle
+          install -m 0755 dist/aegis-cli release-assets/bundle/aegis-cli
+          install -m 0644 dist/aegis.o release-assets/bundle/aegis.o
+          install -m 0644 dist/aegis-tc.o release-assets/bundle/aegis-tc.o
+          install -m 0755 dist/install.sh release-assets/bundle/install.sh
+          install -m 0644 deploy/aegis@.service release-assets/bundle/aegis@.service
+          install -m 0644 deploy/config.toml release-assets/bundle/config.toml.example
+          install -m 0644 README.md LICENSE release-assets/bundle/
+          install -m 0644 dist/toolchain.txt release-assets/toolchain.txt
+          mkdir -p release-assets/sbom
+          install -m 0644 dist/sbom/*.cdx.json release-assets/sbom/
+
+          source_date_epoch="$(git show -s --format=%ct "$COMMIT")"
+          tar \
+            --sort=name \
+            --mtime="@${source_date_epoch}" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C release-assets/bundle \
+            -cf - . | gzip -n > "release-assets/${BUNDLE}"
+
+          artifact_sha256="$(sha256sum "release-assets/${BUNDLE}" | awk '{print $1}')"
+          sbom_files="$(
+            find release-assets/sbom -maxdepth 1 -type f -printf '%f\n' |
+              sort |
+              jq -R -s -c 'split("\n") | map(select(length > 0))'
+          )"
+          jq -n \
+            --arg project "Aegis-eBPF" \
+            --arg version "$VERSION" \
+            --arg commit "$COMMIT" \
+            --arg target "x86_64-unknown-linux-musl" \
+            --arg artifact "$BUNDLE" \
+            --arg artifact_sha256 "$artifact_sha256" \
+            --argjson sboms "$sbom_files" \
+            '{
+              project: $project,
+              version: $version,
+              commit: $commit,
+              target: $target,
+              artifact: $artifact,
+              artifact_sha256: $artifact_sha256,
+              sboms: $sboms,
+              sbom_scope: "Release workspace members plus XDP and TC eBPF crates",
+              provenance: "GitHub artifact attestation",
+              distribution_test_matrix: [],
+              kernel_test_matrix: [],
+              runtime_evidence: "must be supplied separately for the exact commit"
+            }' > release-assets/release-manifest.json
+
+          (
+            cd release-assets
+            sha256sum \
+              "$BUNDLE" \
+              release-manifest.json \
+              toolchain.txt > SHA256SUMS
+            find sbom -maxdepth 1 -type f -name '*.cdx.json' -print0 |
+              sort -z |
+              xargs -0 sha256sum >> SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Attest release artifacts provenance
+        uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
         with:
+          subject-path: |
+            release-assets/${{ steps.identity.outputs.bundle }}
+            release-assets/release-manifest.json
+            release-assets/sbom/*.cdx.json
+            release-assets/toolchain.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
+          fail_on_unmatched_files: true
           files: |
-            dist/aegis-cli
-            dist/aegis.o
-            dist/aegis-tc.o
-            dist/install.sh
-            dist/SHA256SUMS
+            release-assets/${{ steps.identity.outputs.bundle }}
+            release-assets/SHA256SUMS
+            release-assets/release-manifest.json
+            release-assets/sbom/*.cdx.json
+            release-assets/toolchain.txt
           body: |
             ## Aegis eBPF Firewall ${{ github.ref_name }}
 
-            ### Quick Install
+            This release candidate is not production-certified without separate,
+            commit-specific privileged load/attach, replay, cleanup, and stress evidence.
+
+            ### Download and verify
+
             ```bash
-            curl -sSfL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh -o install.sh
-            sha256sum install.sh
-            sudo bash install.sh --check
+            bundle="${{ steps.identity.outputs.bundle }}"
+            curl -fLO "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${bundle}"
+            curl -fLO "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS"
+            grep " ${bundle}$" SHA256SUMS | sha256sum -c -
+            gh attestation verify "${bundle}" -R "${{ github.repository }}"
+            tar -xzf "${bundle}"
+            sudo ./install.sh --check
+            sudo ./install.sh --install-only
             ```
 
-            ### Pre-built Binary
-            ```bash
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aegis-cli
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/SHA256SUMS
-            sha256sum -c SHA256SUMS
-            chmod +x aegis-cli
-            sudo install aegis-cli /usr/local/bin/
-            sudo aegis-cli -i eth0 tui
-            ```
+            Static linking removes the glibc dependency. It does not imply universal
+            kernel, verifier, XDP, TC, distribution, or architecture support.
 
-            ### Platform Support
-            Platform support is evidence-bound. See `docs/PORTABILITY.md` in this release source for the current support matrix and treat any unsupported row as best-effort only.
-
-            Do not treat this release as production-validated unless the release assets or CI evidence include:
-            - non-privileged release gate log
-            - privileged verifier/load/attach/detach log
-            - packet replay artifacts for every required case
-            - bounded stress replay summary with `pass: true`
-
-            ### Files
-            | File | Description |
-            |------|-------------|
-            | `aegis-cli` | Main binary (eBPF embedded) |
-            | `aegis.o` | XDP object (advanced) |
-            | `aegis-tc.o` | TC object (advanced) |
-            | `SHA256SUMS` | Integrity checksums |
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            This workflow creates a draft. Publish it only after the exact tag commit
+            has complete privileged runtime, cleanup, stress, install, and portability
+            evidence linked from `docs/RELEASE_EVIDENCE_INDEX.md`.

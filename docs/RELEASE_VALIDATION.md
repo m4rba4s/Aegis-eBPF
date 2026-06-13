@@ -10,10 +10,21 @@ Run on the exact release commit:
 
 ```bash
 git status --short
-git rev-parse --short HEAD
+git rev-parse HEAD
 
-CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh nonpriv
+CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh release-candidate
 ```
+
+The `release-candidate` mode refuses a dirty worktree, runs the complete
+non-privileged gate, and archives the transcript, Git/toolchain/host metadata,
+and XDP/TC object hashes under:
+
+```text
+release-artifacts/<version>/<full-sha>/<timestamp>/
+```
+
+The directory is local evidence staging and is ignored by Git. It is not
+privileged runtime proof.
 
 `AEGIS_DOC_TARGET_DIR` may be set when the documentation output path must be
 stable. If it is omitted, the gate writes `cargo doc` output to a fresh
@@ -30,7 +41,7 @@ Required evidence:
 - `cargo test --workspace --all-features`
 - `cargo test --workspace --doc`
 - `cargo doc --workspace --all-features --no-deps`
-- `cargo run -p xtask -- build-all --profile release`
+- `cargo run --locked -p xtask -- build-all --profile release`
 - release userspace build
 - `file` and `llvm-objdump -h` for XDP and TC objects
 - `cargo audit -D warnings`
@@ -109,6 +120,9 @@ The stress gate repeats the full packet replay matrix for
 It is a stability/enforcement stress check, not a throughput benchmark. Do not
 publish packets-per-second claims from this gate.
 
+With the current 18-case matrix, 25 iterations produce 450 **case runs**, not
+450 stress iterations.
+
 Safety bounds:
 
 - maximum stress iterations: `50`,
@@ -152,6 +166,10 @@ The replay artifact directory must contain one `.log` per case:
 - `truncated_udp_blocked_ipv4_exact.log`
 - `truncated_tcp_blocked_ipv4_cidr.log`
 - `truncated_udp_blocked_ipv4_cidr.log`
+- `xdp_ipv4_pass_allowed.log`
+- `xdp_ipv4_drop_exact.log`
+- `xdp_ipv6_fragment_pass.log`
+- `xdp_ipv6_malformed_extension_drop.log`
 
 Each log must include:
 
@@ -178,12 +196,38 @@ capture_pcap: <path to generated receiver pcap>
 pass: true|false
 ```
 
-Missing logs, wrong case names, or `pass: false` fail the release gate.
+The validator also requires:
+
+- a full SHA matching the checked-out commit,
+- the canonical expected verdict for the named case,
+- active XDP and TC attachment state,
+- a parseable one-packet input PCAP,
+- capture packet count consistent with the observed pass/drop verdict,
+- a non-empty raw command transcript,
+- XDP/TC attach state in the transcript consistent with the structured fields,
+- consistent counter availability.
+
+Missing logs, malformed PCAPs, wrong case names, contradictory observations, or
+`pass: false` fail the release gate.
+
+## Policy Replacement
+
+Live hot reload is disabled for this release candidate. Entry-by-entry mutation
+of CONFIG or BLOCKLIST maps cannot guarantee that packet processing never sees
+a partial policy. Validate complete TOML and YAML files, then restart the
+service:
+
+```bash
+sudo systemctl restart aegis@eth0
+```
+
+Do not claim atomic or zero-downtime policy replacement for this release.
 
 ### Replay Scope Notes
 
 - `vlan_behavior` and `qinq_behavior` validate the **fail-closed DROP** policy for 802.1Q and 802.1ad tagged frames. Aegis does not parse VLAN payloads; these cases prove that tagged traffic is rejected.
-- `ipv6_pass_allowed`, `ipv6_drop_exact`, and `ipv6_drop_cidr` validate **exact IP and CIDR blocklist** enforcement only. Extension header edge cases (hop-by-hop, routing, fragment, destination options) are **not covered** by the current replay matrix and must not be claimed as tested.
+- `ipv6_pass_allowed`, `ipv6_drop_exact`, and `ipv6_drop_cidr` validate **exact IP and CIDR blocklist** enforcement.
+- `xdp_ipv6_fragment_pass` and `xdp_ipv6_malformed_extension_drop` cover two bounded XDP extension-header paths. They do not establish complete hop-by-hop, routing, fragment, and destination-options coverage.
 - `ipv4_ihl_options_behavior` and `ipv4_fragment_behavior` validate fail-closed DROP for packets with IP options and IP fragments respectively.
 
 ## Replay Driver
@@ -223,7 +267,7 @@ A release candidate requires:
 
 ### Historical v4.2.0 Claim
 
-Commit `0dadb3e` recorded a systemd smoke test, an 18-case privileged lab PASS,
+Tagged commit `0dadb3efb737f7a857548383c4d4eeab859dd732` recorded a systemd smoke test, an 18-case privileged lab PASS,
 a 25-iteration stress PASS, and archive SHA-256
 `1830aac91ef2caa96e5e17a99e06b964c63844b7a9f1b0d7830d29171b567cc8`.
 The raw archive is not present or linked as a retrievable release asset in this

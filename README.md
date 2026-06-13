@@ -83,6 +83,9 @@ To maintain transparency as a security tool, features are strictly categorized b
 - **TOML Config File** — `/etc/aegis/config.toml` for persistent settings
 - **Threat Feeds** — Download and load CIDR blocklists from public sources
 - **Save/Restore** — Persist and reload block rules
+- **Policy replacement** — Validate complete TOML/YAML files and restart the
+  service. Live hot reload is disabled for this release candidate because
+  entry-by-entry BPF map replacement is not atomic for packet processing.
 - **Status Command** — Query running daemon state via pinned BPF maps
 - **Single Binary** — eBPF bytecode embedded, no external files
 - **Installer Scripts** — documented for the current release matrix in `docs/PORTABILITY.md`
@@ -95,6 +98,7 @@ Production release claims require archived verifier/load/attach/detach logs and 
 
 - Portability matrix: [`docs/PORTABILITY.md`](docs/PORTABILITY.md)
 - Release validation: [`docs/RELEASE_VALIDATION.md`](docs/RELEASE_VALIDATION.md)
+- Known limitations: [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)
 - Troubleshooting and rollback: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 
 ## Installation
@@ -103,22 +107,35 @@ Production release claims require archived verifier/load/attach/detach logs and 
 - Linux Kernel **>= 5.4** (5.8+ recommended for CAP_BPF)
 - Root privileges (for eBPF loading)
 
-### Quick Install (Recommended)
+### Immutable Release Install
 
-### One-Line Install (SSH/Remote)
+No `v4.3.0-rc.1` release asset is currently published. Do not use an assumed
+release URL. After a release tag has passed the documented gates, download the
+versioned bundle and its checksum file:
+
 ```bash
-curl -sSfL https://github.com/m4rba4s/Aegis-eBPF/releases/download/v4.3.0-rc.1/install.sh -o install.sh
-sha256sum install.sh
-sudo bash install.sh --check
+version="<published-version>"
+bundle="aegis-${version}-x86_64-linux-musl.tar.gz"
+base="https://github.com/m4rba4s/Aegis-eBPF/releases/download/v${version}"
+
+curl -fLO "${base}/${bundle}"
+curl -fLO "${base}/SHA256SUMS"
+grep " ${bundle}$" SHA256SUMS | sha256sum -c -
+gh attestation verify "${bundle}" -R m4rba4s/Aegis-eBPF
+tar -xzf "${bundle}"
+sudo ./install.sh --check
+sudo ./install.sh --install-only
 ```
 
-### Manual Install
+### Development Build From Source
 ```bash
-# Clone and install
 git clone https://github.com/m4rba4s/Aegis-eBPF.git
 cd Aegis-eBPF
 sudo ./install.sh
 ```
+
+The source path follows the checked-out revision and is not an immutable
+release installation.
 
 The installer will:
 - Detect your distro and install dependencies
@@ -129,12 +146,19 @@ The installer will:
 
 TC egress is required by default. `--no-tc` is an explicit ingress-only waiver.
 
+Policy files are not applied live in this release candidate. After validating a
+complete replacement, restart the instance:
+
+```bash
+sudo systemctl restart aegis@eth0
+```
+
 ### Run Without Installing
 
 ```bash
 # Build
-cargo run -p xtask -- build-all --profile release
-cargo build --release -p aegis-cli
+cargo run --locked -p xtask -- build-all --profile release
+cargo build --locked --release -p aegis-cli
 
 # Run (eBPF is embedded in binary)
 sudo ./target/release/aegis-cli -i eth0 tui
@@ -292,7 +316,7 @@ Aegis-eBPF/
 PRs welcome! Please ensure:
 1. `cargo fmt` passes
 2. `cargo clippy` has no warnings
-3. eBPF programs compile with `cargo run -p xtask -- build-all`
+3. eBPF programs compile with `cargo run --locked -p xtask -- build-all`
 
 ## Disclaimer
 

@@ -1,18 +1,33 @@
 # Release Evidence Index
 
 Evidence is valid only when the raw artifact is retrievable and tied to the
-exact commit under assessment.
+exact commit under assessment. Build success is not runtime enforcement proof.
 
-| claim | commit | command | artifact | result | environment |
+The release-hardening changes after commit
+`e6728391d964e3766d303814089fa86f48e6122a` require a new clean commit and a new
+validation set. Earlier local output and historical v4.2.0 claims do not qualify.
+
+| claim | commit | environment | command | artifact | result |
 |---|---|---|---|---|---|
-| current non-privileged gate | `4.3.0-rc.1` | `CARGO_TARGET_DIR=target_test cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`, `cargo build --locked --release` | local workspace logs | pass_observed_unarchived | Fedora workstation |
-| current standalone verification crate | `4.3.0-rc.1` | included in workspace cargo tests | local workspace logs | pass_observed_unarchived | Fedora workstation |
-| current packet serialization matrix | `4.3.0-rc.1` | `python3 scripts/packet-replay-lab.py --validate-packets` | local workspace logs (dry run) | pass_observed_unarchived | Fedora workstation |
-| v4.2.0 privileged replay | claimed for `8b2184d` | `./scripts/release-gates.sh privileged-lab` | archive hash recorded, raw archive unavailable | historical_unverified | claimed disposable VM |
-| v4.2.0 stress replay | claimed for `8b2184d` | `AEGIS_STRESS_ITERATIONS=25 ./scripts/release-gates.sh stress-lab` | archive hash recorded, raw archive unavailable | historical_unverified | claimed disposable VM |
-| current privileged load/attach/replay | `4.3.0-rc.1` | `./scripts/release-gates.sh privileged-lab` | required replay and cleanup logs | not_run | disposable VM required |
-| current bounded stress replay | `4.3.0-rc.1` | `AEGIS_STRESS_ITERATIONS=25 ./scripts/release-gates.sh stress-lab` | `stress-summary.log`, `resource-preflight.log`, replay logs | not_run | disposable VM plus host headroom required |
-| June 12 host freeze cause | local incident only | journal, sysstat, and PCP archive inspection | `docs/release/2026-06-12-host-freeze-postmortem.md` | host resource exhaustion verified; Aegis causation unknown | Fedora workstation hosting a VM |
+| non-privileged release gate | `<release-sha>` | GitHub-hosted Ubuntu and maintainer workstation | `CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh nonpriv` | complete CI log and run URL | requires_rerun |
+| formal verification | `<release-sha>` | GitHub-hosted Ubuntu | Kani and TLA jobs from `.github/workflows/ci.yml` | complete CI log and run URL | requires_rerun |
+| static x86_64-musl artifact | `<release-sha>` | GitHub-hosted Ubuntu | `portable-static-build` CI job | commit-bound workflow artifact | requires_rerun |
+| XDP verifier/load/attach | `<release-sha>` | disposable privileged lab | `./scripts/release-gates.sh privileged-lab` | daemon, attach-state, object hash, and cleanup logs | not_run |
+| TC verifier/load/attach | `<release-sha>` | disposable privileged lab | `./scripts/release-gates.sh privileged-lab` | daemon, attach-state, object hash, and cleanup logs | not_run |
+| IPv4/IPv6 packet enforcement | `<release-sha>` | disposable privileged lab | packet replay matrix | per-case log, input PCAP, capture PCAP, raw transcript | not_run |
+| bounded stress replay | `<release-sha>` | disposable privileged lab | `AEGIS_STRESS_ITERATIONS=25 ./scripts/release-gates.sh stress-lab` | commit-bound `stress-summary.log` and per-case artifacts | not_run |
+| install/uninstall/rollback | `<release-sha>` | clean target VM | immutable release bundle install and uninstall | command transcript and before/after state | not_run |
+| distribution portability | `<release-sha>` | Fedora, Ubuntu, Debian targets | distro-specific install/load/replay/cleanup | target-specific evidence archive | not_run |
+| release bundle checksums/SBOM/provenance | `<release-sha>` | tag workflow | `.github/workflows/release.yml` | `SHA256SUMS`, workspace `*.cdx.json` files, manifest, GitHub attestations | requires_tag_workflow |
 
-The current non-privileged checks (fmt, clippy, tests, release build) pass cleanly on `4.3.0-rc.1`.
-However, the privileged lab and stress replay are marked `not_run` due to sandbox constraints (requiring root, veth, bpf, and a disposable VM). Do not authorize a production, enterprise, or stress-tested claim until the privileged gates are completed and artifacts archived.
+## Historical Evidence
+
+| claim | commit | result | reason |
+|---|---|---|---|
+| v4.2.0 privileged replay | claimed for `0dadb3efb737f7a857548383c4d4eeab859dd732` | historical_unverified | raw archive is not retrievable |
+| v4.2.0 stress replay | claimed for `0dadb3efb737f7a857548383c4d4eeab859dd732` | historical_unverified | raw archive is not retrievable |
+| June 12 workstation freeze | local incident | host resource exhaustion verified | does not prove Aegis runtime behavior or leak freedom |
+
+Do not authorize production, enterprise, portability, stress-tested, or
+leak-free claims until every applicable current-commit row links to its raw
+artifact.
