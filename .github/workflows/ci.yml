@@ -10,6 +10,11 @@ env:
 jobs:
   nonpriv-release-gate:
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: >-
+        --remap-path-prefix=${{ github.workspace }}/target=/usr/src/aegis/target
+        --remap-path-prefix=${{ github.workspace }}=/usr/src/aegis
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
@@ -68,6 +73,11 @@ jobs:
 
   portable-static-build:
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: >-
+        --remap-path-prefix=${{ github.workspace }}/target=/usr/src/aegis/target
+        --remap-path-prefix=${{ github.workspace }}=/usr/src/aegis
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
@@ -86,6 +96,7 @@ jobs:
           file target/x86_64-unknown-linux-musl/release/aegis-cli
           ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "not a dynamic executable" || ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "statically linked"
           target/x86_64-unknown-linux-musl/release/aegis-cli --version
+          ! grep -Fq "$GITHUB_WORKSPACE" < <(strings target/x86_64-unknown-linux-musl/release/aegis-cli)
       - name: Record portable build identity
         id: identity
         env:

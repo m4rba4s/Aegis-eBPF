@@ -41,6 +41,29 @@ resolve_cargo_target_dir() {
   printf '%s\n' "$target_dir"
 }
 
+configure_repeatable_release_build() {
+  local target_dir="$1"
+  local separator=$'\x1f'
+
+  if [[ -n "${RUSTFLAGS:-}" || -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+    echo "release-candidate validation requires unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS" >&2
+    return 1
+  fi
+
+  export CARGO_INCREMENTAL=0
+  export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${target_dir}=/usr/src/aegis/target${separator}--remap-path-prefix=${ROOT_DIR}=/usr/src/aegis"
+}
+
+reject_embedded_path() {
+  local artifact="$1"
+  local physical_path="$2"
+
+  if grep -Fq -- "$physical_path" < <(strings "$artifact"); then
+    echo "release artifact embeds physical build path '$physical_path': $artifact" >&2
+    return 1
+  fi
+}
+
 validate_stress_iterations() {
   local value="$1"
 
@@ -591,6 +614,7 @@ release_candidate() {
   require_cmd git
   require_cmd python3
   require_cmd sha256sum
+  require_cmd strings
   require_cmd tee
 
   local status
@@ -609,6 +633,8 @@ release_candidate() {
     return 1
   fi
 
+  configure_repeatable_release_build "$cargo_target_dir"
+
   commit="$(git rev-parse HEAD)"
   version="$(
     cargo metadata --locked --format-version 1 --no-deps |
@@ -624,6 +650,9 @@ release_candidate() {
     echo "commit: $commit"
     echo "timestamp_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "cargo_target_dir: $cargo_target_dir"
+    echo "cargo_incremental: $CARGO_INCREMENTAL"
+    echo "rust_path_remap_target: /usr/src/aegis/target"
+    echo "rust_path_remap_source: /usr/src/aegis"
     echo "command: CARGO_HOME=${CARGO_HOME:-<default>} CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target} ./scripts/release-gates.sh release-candidate"
   } >"$artifact_dir/metadata/run.txt"
   git describe --tags --always --dirty >"$artifact_dir/metadata/git-describe.txt"
@@ -643,6 +672,15 @@ release_candidate() {
     echo "release-candidate nonpriv gate failed; artifacts retained at: $artifact_dir" >&2
     return "$gate_rc"
   fi
+
+  for artifact in \
+    "$cargo_target_dir/release/aegis-cli" \
+    "$cargo_target_dir/release/aegis-cni" \
+    "$cargo_target_dir/release/aegis-tower" \
+    "$cargo_target_dir/release/xtask"; do
+    reject_embedded_path "$artifact" "$cargo_target_dir"
+    reject_embedded_path "$artifact" "$ROOT_DIR"
+  done
 
   sha256sum \
     "$cargo_target_dir/bpfel-unknown-none/release/aegis" \

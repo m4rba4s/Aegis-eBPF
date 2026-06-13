@@ -26,6 +26,12 @@ release-artifacts/<version>/<full-sha>/<timestamp>/
 The directory is local evidence staging and is ignored by Git. It is not
 privileged runtime proof.
 
+The release-candidate gate also disables Cargo incremental compilation and
+remaps the physical workspace and target directories to stable virtual paths.
+It rejects caller-supplied `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` so a local
+environment cannot silently change the release artifact contract. CI and the
+release container apply the same path-remapping policy.
+
 For an isolated rebuild that cannot reuse workspace artifacts, set a fresh
 target directory. The same directory is used for userspace, XDP, TC, embedded
 objects, validation, and archived hashes:
@@ -82,6 +88,11 @@ The identity manifest records both the source commit and the temporary GitHub
 merge commit used for pull-request CI. A successful static build is build
 portability evidence only; it does not prove verifier acceptance, attach
 behavior, packet enforcement, or distribution support.
+
+Byte-for-byte repeatability must be demonstrated with two clean builds of the
+same commit and toolchain in different physical target directories. Matching
+XDP, TC, and userspace hashes prove only those recorded build environments;
+they do not establish cross-toolchain or cross-platform reproducibility.
 
 ## Privileged Lab Gate
 

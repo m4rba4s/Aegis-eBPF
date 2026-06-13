@@ -16,6 +16,7 @@ FROM rust:1.96.0-bookworm@sha256:19817ead3289c8c631c73df281e18b59b172f6a31f4f563
 
 # Install required system tools + musl cross-compilation support
 RUN apt-get update && apt-get install -y \
+    binutils \
     llvm \
     clang \
     libelf-dev \
@@ -32,6 +33,10 @@ USER builder
 RUN cargo install bpf-linker --version 0.10.1 --locked
 
 WORKDIR /home/builder/build
+
+# Keep release binaries independent of the physical checkout and target paths.
+ENV CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/home/builder/build/target=/usr/src/aegis/target --remap-path-prefix=/home/builder/build=/usr/src/aegis"
 
 # Copy source
 COPY --chown=builder . .
@@ -58,6 +63,7 @@ RUN cargo build --locked --release --target x86_64-unknown-linux-musl -p aegis-c
 # Verify outputs
 RUN ls -la target/x86_64-unknown-linux-musl/release/aegis-cli && \
     file target/x86_64-unknown-linux-musl/release/aegis-cli && \
+    ! strings target/x86_64-unknown-linux-musl/release/aegis-cli | grep -Fq /home/builder/build && \
     ls -la target/bpfel-unknown-none/release/aegis && \
     ls -la target/bpfel-unknown-none/release/aegis-tc
 
