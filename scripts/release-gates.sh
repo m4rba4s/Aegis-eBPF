@@ -32,6 +32,15 @@ require_cmd() {
   }
 }
 
+resolve_cargo_target_dir() {
+  local target_dir="${CARGO_TARGET_DIR:-target}"
+
+  if [[ "$target_dir" != /* ]]; then
+    target_dir="$ROOT_DIR/$target_dir"
+  fi
+  printf '%s\n' "$target_dir"
+}
+
 validate_stress_iterations() {
   local value="$1"
 
@@ -415,11 +424,13 @@ cleanup_aegis_lab_pins() {
   local host_if="${1:-aegis-host0}"
   local marker="/run/aegis/instances/${host_if}/abi-v1/ownership.json"
   local cleanup_args=(--iface "$host_if" cleanup-pins)
+  local cargo_target_dir
+  cargo_target_dir="$(resolve_cargo_target_dir)"
 
   if [[ ! -e "$marker" ]]; then
     cleanup_args+=(--force-orphaned)
   fi
-  "$ROOT_DIR/target/release/aegis-cli" "${cleanup_args[@]}"
+  "$cargo_target_dir/release/aegis-cli" "${cleanup_args[@]}"
 }
 
 require_clean_privileged_lab_host() {
@@ -479,13 +490,10 @@ non_privileged() {
   require_cmd cargo
   require_cmd python3
   local doc_target_dir="${AEGIS_DOC_TARGET_DIR:-}"
-  local cargo_target_dir="${CARGO_TARGET_DIR:-target}"
+  local cargo_target_dir
   local doc_target_is_temporary=0
   local doc_rc=0
-
-  if [[ "$cargo_target_dir" != /* ]]; then
-    cargo_target_dir="$ROOT_DIR/$cargo_target_dir"
-  fi
+  cargo_target_dir="$(resolve_cargo_target_dir)"
 
   run git status --short
   run rustc --version
@@ -535,12 +543,12 @@ non_privileged() {
   run cargo build --locked --release -p aegis-cli -p aegis-cni -p aegis-tower -p xtask
 
   require_cmd file
-  run file target/bpfel-unknown-none/release/aegis
-  run file target/bpfel-unknown-none/release/aegis-tc
+  run file "$cargo_target_dir/bpfel-unknown-none/release/aegis"
+  run file "$cargo_target_dir/bpfel-unknown-none/release/aegis-tc"
 
   if command -v llvm-objdump >/dev/null 2>&1; then
-    run llvm-objdump -h target/bpfel-unknown-none/release/aegis
-    run llvm-objdump -h target/bpfel-unknown-none/release/aegis-tc
+    run llvm-objdump -h "$cargo_target_dir/bpfel-unknown-none/release/aegis"
+    run llvm-objdump -h "$cargo_target_dir/bpfel-unknown-none/release/aegis-tc"
   else
     echo "llvm-objdump not found; skipping object section dump" >&2
   fi
@@ -583,7 +591,9 @@ release_candidate() {
   local version
   local timestamp
   local artifact_dir
+  local cargo_target_dir
   local gate_rc=0
+  cargo_target_dir="$(resolve_cargo_target_dir)"
 
   status="$(git status --short)"
   if [[ -n "$status" ]]; then
@@ -606,7 +616,8 @@ release_candidate() {
     echo "version: $version"
     echo "commit: $commit"
     echo "timestamp_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "command: CARGO_HOME=${CARGO_HOME:-<default>} ./scripts/release-gates.sh release-candidate"
+    echo "cargo_target_dir: $cargo_target_dir"
+    echo "command: CARGO_HOME=${CARGO_HOME:-<default>} CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target} ./scripts/release-gates.sh release-candidate"
   } >"$artifact_dir/metadata/run.txt"
   git describe --tags --always --dirty >"$artifact_dir/metadata/git-describe.txt"
   git status --short >"$artifact_dir/metadata/git-status.txt"
@@ -627,14 +638,14 @@ release_candidate() {
   fi
 
   sha256sum \
-    target/bpfel-unknown-none/release/aegis \
-    target/bpfel-unknown-none/release/aegis-tc \
-    target/release/aegis-cli \
-    target/release/aegis-cni \
-    target/release/aegis-tower \
-    target/release/xtask >"$artifact_dir/build/SHA256SUMS"
-  cp target/bpfel-unknown-none/release/aegis "$artifact_dir/build/aegis"
-  cp target/bpfel-unknown-none/release/aegis-tc "$artifact_dir/build/aegis-tc"
+    "$cargo_target_dir/bpfel-unknown-none/release/aegis" \
+    "$cargo_target_dir/bpfel-unknown-none/release/aegis-tc" \
+    "$cargo_target_dir/release/aegis-cli" \
+    "$cargo_target_dir/release/aegis-cni" \
+    "$cargo_target_dir/release/aegis-tower" \
+    "$cargo_target_dir/release/xtask" >"$artifact_dir/build/SHA256SUMS"
+  cp "$cargo_target_dir/bpfel-unknown-none/release/aegis" "$artifact_dir/build/aegis"
+  cp "$cargo_target_dir/bpfel-unknown-none/release/aegis-tc" "$artifact_dir/build/aegis-tc"
   cp "$artifact_dir/build/SHA256SUMS" "$artifact_dir/build/SHA256SUMS.source-paths"
   (
     cd "$artifact_dir/build"
@@ -667,6 +678,8 @@ privileged_lab() {
   daemon_pid=""
   lab_daemon_started=0
   cleanup_state_written=0
+  local cargo_target_dir
+  cargo_target_dir="$(resolve_cargo_target_dir)"
 
   validate_stress_iterations "$stress_iterations"
 
@@ -737,12 +750,12 @@ privileged_lab() {
   run ip -n "$ns" link set lo up
 
   diagnostic_bpftool_load \
-    target/bpfel-unknown-none/release/aegis \
+    "$cargo_target_dir/bpfel-unknown-none/release/aegis" \
     /sys/fs/bpf/aegis-release-xdp \
     xdp \
     "$replay_dir/bpftool-xdp-load.log"
   diagnostic_bpftool_load \
-    target/bpfel-unknown-none/release/aegis-tc \
+    "$cargo_target_dir/bpfel-unknown-none/release/aegis-tc" \
     /sys/fs/bpf/aegis-release-tc \
     sched_cls \
     "$replay_dir/bpftool-tc-load.log"
@@ -752,7 +765,7 @@ privileged_lab() {
   local daemon_timeout=$(( 120 + stress_iterations * 30 ))
   (
     cd "$lab_dir"
-    timeout "${daemon_timeout}s" "$ROOT_DIR/target/release/aegis-cli" --iface "$host_if" daemon
+    timeout "${daemon_timeout}s" "$cargo_target_dir/release/aegis-cli" --iface "$host_if" daemon
   ) >"$replay_dir/aegis-daemon.log" 2>&1 &
   daemon_pid=$!
   lab_daemon_started=1

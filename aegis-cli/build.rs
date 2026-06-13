@@ -4,7 +4,7 @@
 //! If eBPF objects are not found, the binary will require external files at runtime.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
@@ -18,24 +18,33 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .filter(|output| !output.is_empty())
 }
 
+fn resolve_target_dir(workspace_root: &Path) -> PathBuf {
+    match env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => workspace_root.join(path),
+        None => workspace_root.join("target"),
+    }
+}
+
 fn main() {
     // Tell cargo about custom cfg flags
     println!("cargo::rustc-check-cfg=cfg(embedded_xdp)");
     println!("cargo::rustc-check-cfg=cfg(embedded_tc)");
     // Re-run if eBPF objects change
-    println!("cargo:rerun-if-changed=../target/bpfel-unknown-none/release/aegis");
-    println!("cargo:rerun-if-changed=../target/bpfel-unknown-none/release/aegis-tc");
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/index");
     println!("cargo:rerun-if-env-changed=AEGIS_REQUIRE_EMBEDDED");
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace_root = manifest_dir.parent().unwrap();
+    let target_dir = resolve_target_dir(workspace_root);
     let require_embedded = env::var_os("AEGIS_REQUIRE_EMBEDDED").is_some();
 
     // Check for XDP eBPF object
-    let xdp_path = workspace_root.join("target/bpfel-unknown-none/release/aegis");
+    let xdp_path = target_dir.join("bpfel-unknown-none/release/aegis");
+    println!("cargo:rerun-if-changed={}", xdp_path.display());
     if xdp_path.exists() {
         let canonical = xdp_path.canonicalize().unwrap();
         println!("cargo:rustc-env=AEGIS_XDP_OBJ={}", canonical.display());
@@ -54,7 +63,8 @@ fn main() {
     }
 
     // Check for TC eBPF object
-    let tc_path = workspace_root.join("target/bpfel-unknown-none/release/aegis-tc");
+    let tc_path = target_dir.join("bpfel-unknown-none/release/aegis-tc");
+    println!("cargo:rerun-if-changed={}", tc_path.display());
     if tc_path.exists() {
         let canonical = tc_path.canonicalize().unwrap();
         println!("cargo:rustc-env=AEGIS_TC_OBJ={}", canonical.display());

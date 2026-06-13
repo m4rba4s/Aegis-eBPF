@@ -26,6 +26,18 @@ release-artifacts/<version>/<full-sha>/<timestamp>/
 The directory is local evidence staging and is ignored by Git. It is not
 privileged runtime proof.
 
+For an isolated rebuild that cannot reuse workspace artifacts, set a fresh
+target directory. The same directory is used for userspace, XDP, TC, embedded
+objects, validation, and archived hashes:
+
+```bash
+target_dir="$(mktemp -d /tmp/aegis-release-target.XXXXXX)"
+CARGO_HOME=/tmp/aegis-cargo-home \
+  CARGO_TARGET_DIR="$target_dir" \
+  CARGO_BUILD_JOBS=4 \
+  ./scripts/release-gates.sh release-candidate
+```
+
 `AEGIS_DOC_TARGET_DIR` may be set when the documentation output path must be
 stable. If it is omitted, the gate writes `cargo doc` output to a fresh
 `/tmp/aegis-doc-target.*` directory, then removes it after the documentation
