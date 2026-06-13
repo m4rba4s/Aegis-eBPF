@@ -504,8 +504,12 @@ non_privileged() {
   run cargo metadata --locked --manifest-path aegis-cli/fuzz/Cargo.toml --format-version 1 --no-deps >/dev/null
 
   run cargo fmt --all -- --check
+  run cargo run --locked -p xtask -- build-all --profile release
   run cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
   run cargo test --locked --workspace --all-features
+  run cargo test --locked -p aegis-cli --all-features tests::test_embedded_xdp_elf_valid
+  run cargo test --locked -p aegis-cli --all-features tests::test_embedded_tc_elf_valid
+  run cargo test --locked -p aegis-cli --all-features tests::test_aya_parse_embedded_xdp
   run cargo test --locked --workspace --doc
   run cargo fmt --manifest-path verification/Cargo.toml --all -- --check
   run cargo clippy --locked --manifest-path verification/Cargo.toml --all-targets --all-features -- -D warnings
@@ -539,8 +543,11 @@ non_privileged() {
   if [[ "$doc_rc" -ne 0 ]]; then
     return "$doc_rc"
   fi
-  run cargo run --locked -p xtask -- build-all --profile release
-  run cargo build --locked --release -p aegis-cli -p aegis-cni -p aegis-tower -p xtask
+  run env AEGIS_REQUIRE_EMBEDDED=1 cargo build --locked --release \
+    -p aegis-cli \
+    -p aegis-cni \
+    -p aegis-tower \
+    -p xtask
 
   require_cmd file
   run file "$cargo_target_dir/bpfel-unknown-none/release/aegis"

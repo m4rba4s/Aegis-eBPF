@@ -49,12 +49,13 @@ Required evidence:
 - empty `git status --short`
 - release HEAD
 - `cargo fmt --all -- --check`
+- locked XDP and TC builds before userspace analysis
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
+- explicit embedded XDP, embedded TC, and Aya object parsing tests
 - `cargo test --workspace --doc`
 - `cargo doc --workspace --all-features --no-deps`
-- `cargo run --locked -p xtask -- build-all --profile release`
-- release userspace build
+- release userspace build with `AEGIS_REQUIRE_EMBEDDED=1`
 - `file` and `llvm-objdump -h` for XDP and TC objects
 - `cargo audit -D warnings`
 - `cargo deny check`
