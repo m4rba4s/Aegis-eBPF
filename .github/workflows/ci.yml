@@ -116,12 +116,16 @@ jobs:
               note: "For pull_request events, ci_checkout_commit is the temporary GitHub merge commit."
             }' > target/aegis-ci-build-identity.json
 
-          sha256sum \
-            target/x86_64-unknown-linux-musl/release/aegis-cli \
-            target/bpfel-unknown-none/release/aegis \
-            target/bpfel-unknown-none/release/aegis-tc \
-            target/aegis-ci-build-identity.json \
-            > target/aegis-ci-SHA256SUMS
+          (
+            cd target
+            sha256sum \
+              x86_64-unknown-linux-musl/release/aegis-cli \
+              bpfel-unknown-none/release/aegis \
+              bpfel-unknown-none/release/aegis-tc \
+              aegis-ci-build-identity.json \
+              > aegis-ci-SHA256SUMS
+            sha256sum -c aegis-ci-SHA256SUMS
+          )
 
           echo "name=aegis-${version}-x86_64-linux-musl-source-${SOURCE_COMMIT}-tree-${checkout_commit}" \
             >> "$GITHUB_OUTPUT"

@@ -61,6 +61,28 @@ Required evidence:
 - `cargo deny check`
 - CLI command parse for `aegis-cli --iface lo daemon --help`
 
+## Portable CI Artifact
+
+The `portable-static-build` job uploads the musl CLI, XDP and TC objects,
+commit identity manifest, and `aegis-ci-SHA256SUMS`. GitHub removes the common
+`target/` prefix while constructing the ZIP, so checksum entries are relative
+to the extracted artifact root.
+
+Consumer verification:
+
+```bash
+unzip aegis-4.3.0-rc.1-x86_64-linux-musl-*.zip -d aegis-portable
+cd aegis-portable
+sha256sum -c aegis-ci-SHA256SUMS
+cat aegis-ci-build-identity.json
+./x86_64-unknown-linux-musl/release/aegis-cli --version
+```
+
+The identity manifest records both the source commit and the temporary GitHub
+merge commit used for pull-request CI. A successful static build is build
+portability evidence only; it does not prove verifier acceptance, attach
+behavior, packet enforcement, or distribution support.
+
 ## Privileged Lab Gate
 
 Run only in a disposable VM or lab host:
