@@ -86,11 +86,52 @@ jobs:
           file target/x86_64-unknown-linux-musl/release/aegis-cli
           ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "not a dynamic executable" || ldd target/x86_64-unknown-linux-musl/release/aegis-cli 2>&1 | grep -q "statically linked"
           target/x86_64-unknown-linux-musl/release/aegis-cli --version
+      - name: Record portable build identity
+        id: identity
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          checkout_commit="$(git rev-parse HEAD)"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' aegis-cli/Cargo.toml | head -1)"
+          test "$checkout_commit" = "$CI_COMMIT"
+          test -n "$SOURCE_COMMIT"
+          test -n "$version"
+
+          jq -n \
+            --arg project "Aegis-eBPF" \
+            --arg version "$version" \
+            --arg target "x86_64-unknown-linux-musl" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg ci_checkout_commit "$checkout_commit" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            '{
+              project: $project,
+              version: $version,
+              target: $target,
+              source_commit: $source_commit,
+              ci_checkout_commit: $ci_checkout_commit,
+              event: $event,
+              note: "For pull_request events, ci_checkout_commit is GitHub's temporary merge commit."
+            }' > target/aegis-ci-build-identity.json
+
+          sha256sum \
+            target/x86_64-unknown-linux-musl/release/aegis-cli \
+            target/bpfel-unknown-none/release/aegis \
+            target/bpfel-unknown-none/release/aegis-tc \
+            target/aegis-ci-build-identity.json \
+            > target/aegis-ci-SHA256SUMS
+
+          echo "name=aegis-${version}-x86_64-linux-musl-source-${SOURCE_COMMIT}-tree-${checkout_commit}" \
+            >> "$GITHUB_OUTPUT"
       - name: Upload portable binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: aegis-portable-${{ github.sha }}
+          name: ${{ steps.identity.outputs.name }}
           path: |
             target/x86_64-unknown-linux-musl/release/aegis-cli
             target/bpfel-unknown-none/release/aegis
             target/bpfel-unknown-none/release/aegis-tc
+            target/aegis-ci-build-identity.json
+            target/aegis-ci-SHA256SUMS
