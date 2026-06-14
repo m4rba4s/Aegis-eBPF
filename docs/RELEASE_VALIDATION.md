@@ -194,6 +194,219 @@ The current case count is `18`, obtained from:
 python3 scripts/packet-replay-lab.py --list-cases | wc -l
 ```
 
+### Two-Terminal Stress Runbook
+
+Use these snippets only inside the disposable lab VM. Do not run them on a
+workstation that is already above the host stop rules. Terminal 1 creates a
+shared state file and waits for Terminal 2 before starting, so telemetry covers
+the build, attach, replay, detach, and cleanup phases.
+
+The snippets deliberately enforce the stricter host qualification thresholds:
+at least 8 GiB `MemAvailable` and no more than 50% swap use. Do not set
+`AEGIS_ALLOW_LOW_RESOURCE_LAB=1` for release evidence.
+
+When the lab is a VM, these commands observe the guest. The physical
+virtualization host must still satisfy the host stop rules above and must be
+monitored independently throughout the run.
+
+Before starting, make sure `/tmp/aegis-stress-current.env` is not left from an
+active run. If it exists, inspect the recorded PID and remove the file only
+after confirming that process is no longer running.
+
+Terminal 1 - stress gate:
+
+```bash
+set -Eeuo pipefail
+cd /home/out/Aegis-Portable-Demo
+
+test -z "$(git status --porcelain)" || {
+  echo "refusing stress validation from a dirty worktree" >&2
+  exit 1
+}
+
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+STATE_FILE=/tmp/aegis-stress-current.env
+READY_FILE="${STATE_FILE}.telemetry-ready"
+EVIDENCE_DIR="/tmp/aegis-stress-${SOURCE_COMMIT}-${RUN_ID}"
+TARGET_DIR="/tmp/aegis-stress-target-${SOURCE_COMMIT}-${RUN_ID}"
+DRIVER_LOG="${EVIDENCE_DIR}.driver.log"
+TELEMETRY_LOG="${EVIDENCE_DIR}.telemetry.log"
+
+test ! -e "$STATE_FILE" || {
+  echo "state file already exists: $STATE_FILE" >&2
+  exit 1
+}
+test ! -e "$EVIDENCE_DIR"
+test ! -e "$TARGET_DIR"
+
+sudo -v
+umask 077
+{
+  printf 'SOURCE_COMMIT=%q\n' "$SOURCE_COMMIT"
+  printf 'RUN_ID=%q\n' "$RUN_ID"
+  printf 'EVIDENCE_DIR=%q\n' "$EVIDENCE_DIR"
+  printf 'TARGET_DIR=%q\n' "$TARGET_DIR"
+  printf 'DRIVER_LOG=%q\n' "$DRIVER_LOG"
+  printf 'TELEMETRY_LOG=%q\n' "$TELEMETRY_LOG"
+} >"$STATE_FILE"
+
+echo "Start Terminal 2 now. Waiting up to 120 seconds for telemetry..."
+for _ in $(seq 1 120); do
+  [[ -e "$READY_FILE" ]] && break
+  sleep 1
+done
+test -e "$READY_FILE" || {
+  echo "telemetry did not become ready; stress gate was not started" >&2
+  exit 1
+}
+
+setsid --wait bash -c '
+  printf "STRESS_PID=%q\n" "$$" >>"$1"
+  shift
+  exec "$@"
+' bash "$STATE_FILE" \
+  sudo -E env \
+    AEGIS_PACKET_REPLAY_DIR="$EVIDENCE_DIR" \
+    AEGIS_STRESS_ITERATIONS=25 \
+    AEGIS_MIN_AVAILABLE_MB=8192 \
+    AEGIS_MAX_SWAP_USED_PERCENT=50 \
+    CARGO_HOME=/tmp/aegis-cargo-home \
+    CARGO_TARGET_DIR="$TARGET_DIR" \
+    CARGO_BUILD_JOBS=4 \
+    ./scripts/release-gates.sh stress-lab \
+  > >(tee "$DRIVER_LOG") 2>&1 &
+LAUNCHER_PID=$!
+
+set +e
+wait "$LAUNCHER_PID"
+STRESS_RC=$?
+set -e
+printf 'STRESS_RC=%q\n' "$STRESS_RC" >>"$STATE_FILE"
+echo "stress gate exit code: $STRESS_RC"
+exit "$STRESS_RC"
+```
+
+Terminal 2 - telemetry and resource stop controller:
+
+```bash
+set -Eeuo pipefail
+cd /home/out/Aegis-Portable-Demo
+
+STATE_FILE=/tmp/aegis-stress-current.env
+until [[ -s "$STATE_FILE" ]]; do sleep 1; done
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+sudo -v
+STARTED_AT="$(date --iso-8601=seconds)"
+exec > >(tee -a "$TELEMETRY_LOG") 2>&1
+
+echo "telemetry_start: $STARTED_AT"
+echo "source_commit: $SOURCE_COMMIT"
+echo "evidence_dir: $EVIDENCE_DIR"
+echo "target_dir: $TARGET_DIR"
+touch "${STATE_FILE}.telemetry-ready"
+
+until grep -q '^STRESS_PID=' "$STATE_FILE"; do sleep 1; done
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+sample=0
+while sudo kill -0 "$STRESS_PID" 2>/dev/null; do
+  timestamp="$(date --iso-8601=seconds)"
+  mem_available_kb="$(
+    awk '/^MemAvailable:/ {print $2}' /proc/meminfo
+  )"
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+  swap_free_kb="$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)"
+  if (( swap_total_kb > 0 )); then
+    swap_used_percent="$(( (swap_total_kb - swap_free_kb) * 100 / swap_total_kb ))"
+  else
+    swap_used_percent=0
+  fi
+
+  printf '\n[%s] mem_available_mib=%d swap_used_percent=%d\n' \
+    "$timestamp" "$((mem_available_kb / 1024))" "$swap_used_percent"
+  free -h
+  df -h /tmp
+  ps -eo pid,ppid,stat,rss,%mem,%cpu,etimes,comm,args \
+    --sort=-rss | head -20 || true
+
+  if (( mem_available_kb < 8 * 1024 * 1024 ||
+        swap_used_percent > 50 )); then
+    echo "STOP: resource threshold crossed; terminating stress process group"
+    sudo kill -TERM -- "-$STRESS_PID" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      sudo kill -0 "$STRESS_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if sudo kill -0 "$STRESS_PID" 2>/dev/null; then
+      echo "STOP: process group ignored TERM for 30 seconds; sending KILL"
+      sudo kill -KILL -- "-$STRESS_PID" 2>/dev/null || true
+    fi
+    echo "The run is failed evidence and must not be reported as PASS."
+    break
+  fi
+
+  if (( sample % 6 == 0 )); then
+    sudo ip -details link show dev aegis-host0 2>&1 || true
+    sudo tc qdisc show dev aegis-host0 2>&1 || true
+    sudo tc filter show dev aegis-host0 egress 2>&1 || true
+    sudo bpftool net show 2>&1 || true
+    sudo bpftool prog show 2>&1 || true
+    sudo bpftool map show 2>&1 || true
+    sudo find /sys/fs/bpf/aegis -maxdepth 4 -ls 2>&1 || true
+  fi
+
+  sample=$((sample + 1))
+  sleep 5
+done
+
+echo "telemetry_end: $(date --iso-8601=seconds)"
+sudo journalctl -k --since "$STARTED_AT" --no-pager \
+  2>&1 | tee "${EVIDENCE_DIR}.kernel.log" >/dev/null || true
+```
+
+After both terminals exit, validate and archive the evidence:
+
+```bash
+set -Eeuo pipefail
+cd /home/out/Aegis-Portable-Demo
+
+STATE_FILE=/tmp/aegis-stress-current.env
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+test "$SOURCE_COMMIT" = "$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+test "${STRESS_RC:?stress terminal did not record an exit code}" -eq 0
+
+sudo -E env \
+  AEGIS_PACKET_REPLAY_DIR="$EVIDENCE_DIR" \
+  AEGIS_STRESS_ITERATIONS=25 \
+  ./scripts/release-gates.sh evidence-only
+
+sudo sed -n '1,240p' "$EVIDENCE_DIR/resource-preflight.log"
+sudo sed -n '1,240p' "$EVIDENCE_DIR/stress-summary.log"
+sudo sed -n '1,240p' "$EVIDENCE_DIR/cleanup-state.log"
+
+ARCHIVE="${EVIDENCE_DIR}.tar.gz"
+sudo tar --numeric-owner -C "$(dirname "$EVIDENCE_DIR")" \
+  -czf "$ARCHIVE" "$(basename "$EVIDENCE_DIR")"
+sudo chown "$(id -u):$(id -g)" "$ARCHIVE"
+sha256sum "$ARCHIVE" "${EVIDENCE_DIR}.driver.log" \
+  "${EVIDENCE_DIR}.telemetry.log" "${EVIDENCE_DIR}.kernel.log"
+
+rm -f "$STATE_FILE" "${STATE_FILE}.telemetry-ready"
+```
+
+The run is not a PASS merely because Terminal 1 exits with zero. Accept it only
+when `evidence-only` passes, `stress-summary.log` records the exact commit and
+450 successful case runs, and `cleanup-state.log` proves that the lab
+interface, namespace, qdisc/filter state, programs, maps, and owned pins were
+removed. Preserve the telemetry and kernel logs even when the run fails.
+
 ## Packet Replay Artifacts
 
 The replay artifact directory must contain one `.log` per case:
