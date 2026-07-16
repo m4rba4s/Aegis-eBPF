@@ -64,7 +64,8 @@ pub fn spawn_event_loops(bpf: &mut aya::Ebpf, ctx: EventLoopContext) -> Result<(
     // Lifetime auto-ban counter. This is intentionally a monotonic high-water mark:
     // it's incremented on auto-ban but NEVER decremented on unblock. After 512
     // cumulative auto-bans, the OODA loop permanently disarms. This prevents
-    // attackers from cycling ban/unban to exhaust the BLOCKLIST map (1024 entries).
+    // attackers from cycling ban/unban to exhaust the BLOCKLIST map
+    // (MAP_CAP_BLOCKLIST = 8192 entries).
     let ban_count_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Pre-create a shared UDP socket for remote logging (avoid per-event socket creation)
