@@ -400,10 +400,13 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // --- BLOCKLIST CHECKS (BEFORE CONNTRACK) ---
-    // Critical: these MUST run before conntrack fast-path, otherwise
-    // established flows from blocked IPs bypass manual bans and CIDR feeds.
-    // Hot-reload bans won't work on active connections without this.
+    // --- BLOCKLIST CHECKS ---
+    // Note: XDP is stateless — there is no conntrack fast-path in this program
+    // (CONN_TRACK map is owned by TC). These blocklist checks run unconditionally
+    // on every packet. If a future change adds a conntrack-derived bypass on the
+    // XDP path, the ordering constraint "blocklists MUST run before any
+    // established-flow bypass" must be re-evaluated carefully; see the v4.3.0
+    // red-team conntrack audit before enabling such a fast-path.
 
 
     // Wildcard blocklist (IP-only block, any port/proto)
@@ -437,15 +440,18 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
 
 
     // Fail-closed: DROP packets with IP options (variable-length headers
-    // bypass our fixed L4 offset calculation). <0.01% of legitimate traffic.
+    // bypass our fixed L4 offset calculation). Note this also drops legitimate
+    // IP-options traffic such as LSRR/SSRR diagnostics and CIPSO/FIPS-188
+    // SELinux network peer labeling, which matters on MLS/SELinux-strict hosts.
     let ip_ihl = unsafe { (*ipv4_hdr).ihl() & 0x0F };
     if ip_ihl != 5 {
         return Ok(xdp_action::XDP_DROP);
     }
 
     // Fail-closed: DROP fragmented packets. Fragments bypass L4 port/protocol
-    // parsing, rate limiting, and scan detection. Kernel reassembly happens
-    // after XDP, so legitimate fragmented flows still complete.
+    // parsing, rate limiting, and scan detection. Drops happen at XDP, so the
+    // fragments never reach kernel reassembly — flows that rely on IPv4
+    // fragmentation will not complete through this path.
     let frag_off = u16::from_be(unsafe { (*ipv4_hdr).frag_off });
     if (frag_off & 0x3FFF) != 0 {
         return Ok(xdp_action::XDP_DROP);
