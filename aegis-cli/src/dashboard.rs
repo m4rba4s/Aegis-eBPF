@@ -293,7 +293,7 @@ async function refresh() {
       const rate = d.packets.seen > 0 ? ((d.packets.drop / d.packets.seen) * 100).toFixed(2) + '%' : '0%';
       document.getElementById('drop-rate').textContent = rate;
       document.getElementById('portscan').textContent = fmt(d.portscan_hits);
-      document.getElementById('conntrack').textContent = fmt(d.conntrack_hits);
+      document.getElementById('conntrack').textContent = fmt(d.conntrack_entries);
       document.getElementById('blocks-manual').textContent = fmt(d.blocks.manual);
       document.getElementById('blocks-cidr').textContent = fmt(d.blocks.cidr_feed);
       document.getElementById('bl-count').textContent = d.blocklist_entries;

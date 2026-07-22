@@ -79,6 +79,7 @@ pub struct App<T: std::borrow::BorrowMut<MapData> + 'static> {
     pub pkt_history: VecDeque<u64>,
     pub drop_history: VecDeque<u64>,
     pub last_stats: Stats,
+    pub conntrack_entries: u64,
 }
 
 #[derive(Clone)]
@@ -111,6 +112,7 @@ impl<T: std::borrow::BorrowMut<MapData> + 'static> App<T> {
             pkt_history: VecDeque::with_capacity(200),
             drop_history: VecDeque::with_capacity(200),
             last_stats: Stats::default(),
+            conntrack_entries: 0,
         }
     }
 
@@ -465,6 +467,7 @@ where
                         total.conntrack_hits += cpu_stats.conntrack_hits;
                     }
                     app.update_stats(&total);
+                    app.conntrack_entries = crate::metrics::read_conntrack_count();
                 }
             }
 
@@ -591,12 +594,12 @@ where
     };
 
     let header_text = format!(
-        " Pkts: {} | Pass: {} | Drop: {} ({:.1}%) | ConnTrack(tm): {} | PortScan: {} | Blocks: M:{} C:{}",
+        " Pkts: {} | Pass: {} | Drop: {} ({:.1}%) | ConnTrack: {} | PortScan: {} | Blocks: M:{} C:{}",
         format_num(stats.pkts_seen),
         format_num(stats.pkts_pass),
         format_num(stats.pkts_drop),
         drop_rate,
-        format_num(stats.conntrack_hits),
+        format_num(app.conntrack_entries),
         format_num(stats.portscan_hits),
         stats.block_manual,
         stats.block_cidr,
@@ -896,9 +899,9 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
             ),
         ]),
         Line::from(vec![
-            Span::raw("ConnTrack (telemetry):"),
+            Span::raw("ConnTrack Entries: "),
             Span::styled(
-                format_num(stats.conntrack_hits),
+                format_num(app.conntrack_entries),
                 Style::default().fg(Color::Cyan),
             ),
         ]),

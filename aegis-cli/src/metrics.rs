@@ -44,6 +44,7 @@ pub struct SharedHandles {
 struct CachedStats {
     stats: Option<Stats>,
     blocklist_count: u64,
+    conntrack_entries: u64,
     updated_at: Instant,
 }
 
@@ -52,6 +53,7 @@ impl CachedStats {
         Self {
             stats: None,
             blocklist_count: 0,
+            conntrack_entries: 0,
             updated_at: Instant::now() - Duration::from_secs(10),
         }
     }
@@ -63,6 +65,7 @@ impl CachedStats {
     fn refresh(&mut self, handles: &SharedHandles) {
         self.stats = read_bpf_stats_shared(handles);
         self.blocklist_count = read_blocklist_count_shared(handles);
+        self.conntrack_entries = read_conntrack_count();
         self.updated_at = Instant::now();
     }
 }
@@ -149,7 +152,7 @@ fn read_softnet_stats() -> Option<SoftnetStats> {
 }
 
 /// Count current CONN_TRACK entries (LRU map utilization)
-fn read_conntrack_count() -> u64 {
+pub(crate) fn read_conntrack_count() -> u64 {
     let path = crate::map_manager::map_path("CONN_TRACK");
     let md = match aya::maps::MapData::from_pin(&path) {
         Ok(md) => md,
@@ -274,12 +277,12 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
 
 // ── JSON Renderers ──────────────────────────────────────────────────────
 
-fn json_stats(stats: &Option<Stats>, blocklist_count: u64) -> String {
+fn json_stats(stats: &Option<Stats>, blocklist_count: u64, conntrack_entries: u64) -> String {
     match stats {
         Some(s) => {
             let avg_ns = s.xdp_exec_time_sum_ns.checked_div(s.pkts_seen).unwrap_or(0);
             format!(
-                r#"{{"up":true,"packets":{{"seen":{},"drop":{},"pass":{}}},"blocks":{{"manual":{},"cidr_feed":{}}},"portscan_hits":{},"conntrack_hits":{},"events":{{"ok":{},"fail":{}}},"blocklist_entries":{},"xdp_execution_time":{{"avg_ns":{},"max_ns":{}}}}}"#,
+                r#"{{"up":true,"packets":{{"seen":{},"drop":{},"pass":{}}},"blocks":{{"manual":{},"cidr_feed":{}}},"portscan_hits":{},"conntrack_hits":{},"conntrack_entries":{},"events":{{"ok":{},"fail":{}}},"blocklist_entries":{},"xdp_execution_time":{{"avg_ns":{},"max_ns":{}}}}}"#,
                 s.pkts_seen,
                 s.pkts_drop,
                 s.pkts_pass,
@@ -287,6 +290,7 @@ fn json_stats(stats: &Option<Stats>, blocklist_count: u64) -> String {
                 s.block_cidr,
                 s.portscan_hits,
                 s.conntrack_hits,
+                conntrack_entries,
                 s.events_ok,
                 s.events_fail,
                 blocklist_count,
@@ -663,7 +667,7 @@ async fn route_request(
             if c.is_stale() {
                 c.refresh(handles);
             }
-            let body = json_stats(&c.stats, c.blocklist_count);
+            let body = json_stats(&c.stats, c.blocklist_count, c.conntrack_entries);
             http_json(200, &body)
         }
 
@@ -742,7 +746,7 @@ mod tests {
         assert!(prometheus.contains("aegis_xdp_exec_time_sum_ns 120"));
         assert!(prometheus.contains("aegis_xdp_exec_time_max_ns 50"));
 
-        let json = json_stats(&Some(stats), 7);
+        let json = json_stats(&Some(stats), 7, 0);
         assert!(json.contains(r#""xdp_execution_time":{"avg_ns":30,"max_ns":50}"#));
     }
 
@@ -754,7 +758,21 @@ mod tests {
             ..Stats::default()
         };
 
-        let json = json_stats(&Some(stats), 0);
+        let json = json_stats(&Some(stats), 0, 0);
         assert!(json.contains(r#""xdp_execution_time":{"avg_ns":0,"max_ns":50}"#));
+    }
+
+    #[test]
+    fn json_includes_conntrack_entries_and_hits() {
+        let stats = Stats {
+            pkts_seen: 100,
+            conntrack_hits: 0, // BPF never increments this
+            ..Stats::default()
+        };
+
+        // conntrack_entries=42 passed as gauge from userspace LRU map read
+        let json = json_stats(&Some(stats), 0, 42);
+        assert!(json.contains(r#""conntrack_hits":0"#), "backward-compat field missing");
+        assert!(json.contains(r#""conntrack_entries":42"#), "new gauge field missing");
     }
 }
