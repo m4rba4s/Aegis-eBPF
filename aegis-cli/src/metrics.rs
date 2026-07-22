@@ -772,7 +772,13 @@ mod tests {
 
         // conntrack_entries=42 passed as gauge from userspace LRU map read
         let json = json_stats(&Some(stats), 0, 42);
-        assert!(json.contains(r#""conntrack_hits":0"#), "backward-compat field missing");
-        assert!(json.contains(r#""conntrack_entries":42"#), "new gauge field missing");
+        assert!(
+            json.contains(r#""conntrack_hits":0"#),
+            "backward-compat field missing"
+        );
+        assert!(
+            json.contains(r#""conntrack_entries":42"#),
+            "new gauge field missing"
+        );
     }
 }

@@ -191,4 +191,3 @@ fn read_bpf_snapshot() -> Option<StatsSample> {
         conntrack_entries: crate::metrics::read_conntrack_count(),
     })
 }
-
