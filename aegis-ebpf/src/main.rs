@@ -18,7 +18,9 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
-use headers::{EthHdr, Ipv4Hdr, Ipv6ExtHdr, Ipv6Hdr, ETH_P_IP, ETH_P_IPV6};
+use headers::{
+    EthHdr, Ipv4Hdr, Ipv6ExtHdr, Ipv6FragHdr, Ipv6Hdr, Ipv6RoutingHdr, ETH_P_IP, ETH_P_IPV6,
+};
 use parsing::ptr_at;
 
 // ============================================================
@@ -51,6 +53,7 @@ use aegis_common::{
     MAX_TOKENS,
     NEXTHDR_AUTH,
     NEXTHDR_DEST,
+    NEXTHDR_ESP,
     NEXTHDR_FRAGMENT,
     // IPv6 next header protocol constants
     NEXTHDR_HOP,
@@ -64,6 +67,7 @@ use aegis_common::{
     REASON_DEFAULT,
     // IPv6 constants
     REASON_IPV6_POLICY,
+    ROUTING_TYPE_0,
     REASON_MANUAL_BLOCK,
     REASON_RATELIMIT,
     REASON_TCP_ANOMALY,
@@ -71,6 +75,8 @@ use aegis_common::{
     THREAT_BLOCKLIST,
     THREAT_FLOOD_SYN,
     THREAT_IPV6_EXT_CHAIN,
+    THREAT_IPV6_FRAGMENT,
+    THREAT_IPV6_ROUTING_TYPE0,
     // Threat types - IPv4
     THREAT_NONE,
     THREAT_SCAN_NULL,
@@ -354,11 +360,18 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
     // --- EARLY IPv4 BLOCKLIST/ALLOWLIST CHECKS ---
     // --- WHITELIST CHECK (EARLY) ---
     let src_octets = src_addr.to_be_bytes();
+    // SECURITY (P1-1): Trimmed whitelist. Only true RFC1918 private space is
+    // auto-trusted: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16. The previous
+    // list also trusted 100.64.0.0/10 (CGNAT) and 127.0.0.0/8 (loopback),
+    // which are NOT trust boundaries on an internet-facing interface — an
+    // attacker who spoofs a source in those ranges bypassed every deny rule.
+    //   - CGNAT (100.64/10) is shared carrier-grade address space, not internal.
+    //   - Loopback never needs to traverse XDP in a correct deployment.
+    // Operators who genuinely need to trust a CGNAT/loopback source must add
+    // it explicitly via the ALLOWLIST map (per-IP, deliberate).
     let is_whitelisted = src_octets[0] == 10 ||  // 10.0.0.0/8
         (src_octets[0] == 172 && (src_octets[1] & 0xF0) == 16) ||  // 172.16.0.0/12
-        (src_octets[0] == 192 && src_octets[1] == 168) ||  // 192.168.0.0/16
-        (src_octets[0] == 100 && (src_octets[1] & 0xC0) == 64) ||  // 100.64.0.0/10 CGNAT/VPN
-        src_octets[0] == 127; // 127.0.0.0/8 localhost
+        (src_octets[0] == 192 && src_octets[1] == 168);  // 192.168.0.0/16
 
     // --- DYNAMIC ALLOWLIST ---
     if unsafe { ALLOWLIST.get(&src_addr).is_some() } {
@@ -776,9 +789,31 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 break;
             }
             NEXTHDR_FRAGMENT => {
-                // IP checks passed earlier. Let the kernel reassemble fragments.
-                // We cannot track L4 state for fragments, so we PASS them.
-                return Ok(xdp_action::XDP_PASS);
+                // SECURITY (P0-1): Fail-closed DROP for ALL IPv6 fragments.
+                // An attacker can prepend a Fragment Header (frag_off=0, M=0)
+                // to bypass every L4 rule (exact/wildcard blocklist, scan
+                // detection) because fragments defeat port/proto parsing.
+                // The previous behavior returned XDP_PASS here, which was the
+                // opposite of the IPv4 path (fail-closed at the 0x3FFF mask).
+                // We mirror IPv4: drop non-initial fragments (offset>0) AND
+                // first fragments (offset=0, M=1). The frag header itself is
+                // 8 bytes; read it bounds-checked so a truncated packet fails
+                // closed via the `?` instead of leaking an unsafe read.
+                let frag_hdr: *const Ipv6FragHdr = ptr_at(ctx, l4_offset)?;
+                stats_inc_ipv6_drop();
+                return log_ipv6_drop(
+                    ctx,
+                    &src_addr,
+                    &dst_addr,
+                    src_port,
+                    dst_port,
+                    unsafe { (*frag_hdr).next_header },
+                    tcp_flags,
+                    REASON_IPV6_POLICY,
+                    THREAT_IPV6_FRAGMENT,
+                    payload_len,
+                    ext_hdr_count,
+                );
             }
             NEXTHDR_AUTH => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(ctx, l4_offset)?;
@@ -790,7 +825,48 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 }
                 ext_hdr_count += 1;
             }
-            NEXTHDR_HOP | NEXTHDR_ROUTING | NEXTHDR_DEST => {
+            NEXTHDR_ESP => {
+                // ESP (IPsec) is a terminal payload protocol, not a springboard to a
+                // further L4 header. Treat it as valid L4 so encrypted IPsec
+                // traffic is not spuriously dropped by the ext-header walker.
+                is_valid_l4 = true;
+                break;
+            }
+            NEXTHDR_ROUTING => {
+                // SECURITY (P0-2): RFC 5095 mandates that compliant nodes MUST
+                // silently discard Routing Header Type 0 (RH0) — a known
+                // amplification/avoidance vector. Read the routing_type byte
+                // (3rd byte of the routing header) bounds-checked and DROP if
+                // it is 0. RH2 (Mobile IPv6) and SRH pass through unchanged.
+                let rt_hdr: *const Ipv6RoutingHdr = ptr_at(ctx, l4_offset)?;
+                let routing_type = unsafe { (*rt_hdr).routing_type };
+                if routing_type == ROUTING_TYPE_0 {
+                    stats_inc_ipv6_drop();
+                    return log_ipv6_drop(
+                        ctx,
+                        &src_addr,
+                        &dst_addr,
+                        src_port,
+                        dst_port,
+                        NEXTHDR_ROUTING,
+                        tcp_flags,
+                        REASON_IPV6_POLICY,
+                        THREAT_IPV6_ROUTING_TYPE0,
+                        payload_len,
+                        ext_hdr_count,
+                    );
+                }
+                // Non-RH0 routing header: walk past it like a generic ext hdr.
+                let ext_hdr: *const Ipv6ExtHdr = ptr_at(ctx, l4_offset)?;
+                current_nh = unsafe { (*ext_hdr).next_header };
+                let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
+                l4_offset += ((ext_len as usize) + 1) * 8;
+                if l4_offset > 1500 || ptr_at::<u8>(ctx, l4_offset.saturating_sub(1)).is_err() {
+                    break;
+                }
+                ext_hdr_count += 1;
+            }
+            NEXTHDR_HOP | NEXTHDR_DEST => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(ctx, l4_offset)?;
                 current_nh = unsafe { (*ext_hdr).next_header };
                 let ext_len = unsafe { (*ext_hdr).hdr_ext_len };

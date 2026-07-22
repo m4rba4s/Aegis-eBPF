@@ -87,10 +87,9 @@ impl Ipv6ExtHdr {
 }
 
 /// IPv6 Fragment Header (8 bytes).
-/// Defined for future use; the datapath currently returns XDP_PASS / TC_ACT_OK
-/// as soon as it sees NEXTHDR_FRAGMENT, so the offset/mf accessors below are
-/// not yet exercised by main.rs. See the v4.3.0 red-team notes (IPv6 Fragment
-/// PASS bypass) for the planned fix that will use this struct.
+/// Read by the XDP and TC datapaths in the NEXTHDR_FRAGMENT arm to perform the
+/// P0-1 fail-closed fragment drop (v4.3.0-rc.1 hardening). See main.rs and
+/// aegis-tc/src/main.rs.
 #[repr(C)]
 #[allow(dead_code)]
 pub struct Ipv6FragHdr {
@@ -119,9 +118,9 @@ impl Ipv6FragHdr {
 }
 
 /// IPv6 Routing Header.
-/// Defined for future use; main.rs currently treats NEXTHADR_ROUTING generically
-/// via Ipv6ExtHdr and does NOT read routing_type, so it does not specifically
-/// drop RH0 (RFC 5095). See the v4.3.0 red-team notes for the planned fix.
+/// Read by the XDP and TC datapaths in the NEXTHADR_ROUTING arm to detect and
+/// DROP Routing Header Type 0 (RH0, RFC 5095) as part of the v4.3.0-rc.1 P0-2
+/// hardening. RH2 (Mobile IPv6) and SRH are walked past generically.
 #[repr(C)]
 #[allow(dead_code)]
 pub struct Ipv6RoutingHdr {

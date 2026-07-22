@@ -19,7 +19,7 @@ use aya_ebpf::{
     },
     programs::TcContext,
 };
-use headers::{EthHdr, Ipv4Hdr, Ipv6Hdr, Ipv6ExtHdr, ETH_P_IP, ETH_P_IPV6};
+use headers::{EthHdr, Ipv4Hdr, Ipv6Hdr, Ipv6ExtHdr, Ipv6FragHdr, Ipv6RoutingHdr, ETH_P_IP, ETH_P_IPV6};
 use parsing::ptr_at;
 
 // ============================================================
@@ -59,13 +59,17 @@ use aegis_common::{
     PORT_SCAN_WINDOW_NS,
     NEXTHDR_AUTH,
     NEXTHDR_DEST,
+    NEXTHDR_ESP,
     NEXTHDR_FRAGMENT,
     NEXTHDR_HOP,
     NEXTHDR_ICMPV6,
     NEXTHDR_NONE,
     NEXTHDR_ROUTING,
     REASON_IPV6_POLICY,
+    ROUTING_TYPE_0,
     THREAT_IPV6_EXT_CHAIN,
+    THREAT_IPV6_FRAGMENT,
+    THREAT_IPV6_ROUTING_TYPE0,
 };
 
 // ============================================================
@@ -165,9 +169,20 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
                 break;
             }
             NEXTHDR_FRAGMENT => {
-                // IP checks passed earlier. Let the kernel reassemble fragments.
-                // We cannot track L4 state for fragments, so we PASS them.
-                return Ok(TC_ACT_OK);
+                // SECURITY (P0-1): Fail-closed DROP for ALL IPv6 fragments.
+                // Mirror the XDP ingress fix: a Fragment Header defeats L4
+                // port/proto parsing, so an attacker could prepend one (with
+                // frag_off=0, M=0) to bypass every egress blocklist. The frag
+                // header is 8 bytes; read it bounds-checked so a truncated
+                // packet fails closed via the `?` rather than leaking a read.
+                let frag_hdr: *const Ipv6FragHdr = ptr_at(&ctx, l4_offset)?;
+                return log_ipv6_drop_tc(
+                    &dst_addr,
+                    unsafe { (*frag_hdr).next_header },
+                    REASON_IPV6_POLICY,
+                    THREAT_IPV6_FRAGMENT,
+                    payload_len,
+                );
             }
             NEXTHDR_AUTH => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(&ctx, l4_offset)?;
@@ -178,7 +193,38 @@ fn try_tc_ipv6(ctx: TcContext, ip_offset: usize) -> Result<i32, ()> {
                     break;
                 }
             }
-            NEXTHDR_HOP | NEXTHDR_ROUTING | NEXTHDR_DEST => {
+            NEXTHDR_ESP => {
+                // ESP (IPsec) is a terminal payload protocol. Treat it as
+                // valid L4 so encrypted IPsec egress is not spuriously dropped
+                // by the ext-header walker.
+                is_valid_l4 = true;
+                break;
+            }
+            NEXTHDR_ROUTING => {
+                // SECURITY (P0-2): RFC 5095 — silently discard Routing Header
+                // Type 0 (RH0). Read the routing_type byte bounds-checked and
+                // DROP if it is 0. RH2 (Mobile IPv6) and SRH pass through.
+                let rt_hdr: *const Ipv6RoutingHdr = ptr_at(&ctx, l4_offset)?;
+                let routing_type = unsafe { (*rt_hdr).routing_type };
+                if routing_type == ROUTING_TYPE_0 {
+                    return log_ipv6_drop_tc(
+                        &dst_addr,
+                        NEXTHDR_ROUTING,
+                        REASON_IPV6_POLICY,
+                        THREAT_IPV6_ROUTING_TYPE0,
+                        payload_len,
+                    );
+                }
+                // Non-RH0 routing header: walk past it like a generic ext hdr.
+                let ext_hdr: *const Ipv6ExtHdr = ptr_at(&ctx, l4_offset)?;
+                current_nh = unsafe { (*ext_hdr).next_header };
+                let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
+                l4_offset += ((ext_len as usize) + 1) * 8;
+                if l4_offset > 1500 || ptr_at::<u8>(&ctx, l4_offset.saturating_sub(1)).is_err() {
+                    break;
+                }
+            }
+            NEXTHDR_HOP | NEXTHDR_DEST => {
                 let ext_hdr: *const Ipv6ExtHdr = ptr_at(&ctx, l4_offset)?;
                 current_nh = unsafe { (*ext_hdr).next_header };
                 let ext_len = unsafe { (*ext_hdr).hdr_ext_len };
