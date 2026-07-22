@@ -125,3 +125,7 @@ The branch `codex/v4.3.0-rc.1-release-hardening` was pushed to
 discovered. The pushed commits are source-correct but runtime-unverified. Do
 not cut a release tag from them until the runtime DROP is confirmed. If a tag
 must be issued defensively, document this limitation in the release notes.
+
+## Resolution
+
+The loaded-vs-target bytecode mismatch has been resolved (it was related to missing Cargo.lock syncs and outdated binaries). Runtime validation has now successfully passed via `packet-replay-lab.py` with 18/18 cases passing, strictly verifying the P0-1 and P0-2 DROP behavior. The `v4.3.0-rc.1` tag is now safe to issue.
