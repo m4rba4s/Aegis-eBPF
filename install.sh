@@ -169,6 +169,45 @@ check_runtime_tools() {
     log_ok "Runtime tools available: ${tools[*]}"
 }
 
+# Reverse-path filter (anti-spoofing) advisory check.
+#
+# This is WARNING-ONLY on purpose: it never fails the install (returns 0), so
+# it cannot break lab, test, or asymmetric-routing setups. The P1-1 hardening
+# removed 100.64.0.0/10 (CGNAT) and 127.0.0.0/8 from the XDP auto-whitelist,
+# which closes the spoofed-source bypass in the datapath; strict rp_filter on
+# the protected interface is the kernel-side complement and the recommended
+# deployment posture for internet-facing NICs.
+#
+# We check both net.ipv4.conf.all.rp_filter and the per-interface value. The
+# effective kernel value is max(all, iface); either being < 1 means the
+# reverse-path check is loose or off on this interface.
+check_rp_filter() {
+    local iface="${AEGIS_INTERFACE:-eth0}"
+    local all_val iface_val
+
+    # Only advise on rp_filter for IPv4 interfaces we can actually inspect.
+    command -v sysctl &>/dev/null || return 0
+
+    all_val=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "?")
+    iface_val=$(sysctl -n "net.ipv4.conf.${iface}.rp_filter" 2>/dev/null || echo "?")
+
+    # The kernel effective value is max(all, iface); loose mode is 2, strict is 1.
+    # We recommend strict (1). Warn if either is 0 (off) or 2 (loose).
+    if [[ "$all_val" == "1" && "$iface_val" == "1" ]]; then
+        log_ok "rp_filter strict (1) on ${iface} and all"
+        return 0
+    fi
+
+    log_warn "rp_filter not strict on '${iface}' (all=${all_val}, ${iface}=${iface_val})"
+    log_info "Recommended for internet-facing NICs (anti-spoofing complement to the"
+    log_info "P1-1 whitelist trim):"
+    log_info "  sudo sysctl -w net.ipv4.conf.all.rp_filter=1"
+    log_info "  sudo sysctl -w net.ipv4.conf.${iface}.rp_filter=1"
+    log_info "Persist in /etc/sysctl.d/99-aegis.conf. This is advisory only — the"
+    log_info "install continues. Skip if this host uses asymmetric routing."
+    return 0
+}
+
 # =============================================================================
 # SYSTEM DEPENDENCIES (runs BEFORE any Rust operations)
 # =============================================================================
@@ -1205,6 +1244,9 @@ run_checks() {
 
     # Runtime tools
     check_runtime_tools || ((++errors))
+
+    # rp_filter advisory (warning-only; complements the P1-1 whitelist trim)
+    check_rp_filter
 
     # System tools
     local tools=("gcc" "clang" "llvm-config" "curl" "git")
