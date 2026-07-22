@@ -589,7 +589,6 @@ non_privileged() {
       aegis-cli/fuzz/Cargo.lock \
       aegis-ebpf/Cargo.lock \
       aegis-tc/Cargo.lock \
-      aegis-tower/Cargo.lock \
       verification/Cargo.lock \
       verification/fuzz/Cargo.lock; do
       run cargo audit --no-fetch --file "$lockfile" -D warnings

@@ -224,9 +224,9 @@ CASES: List[ReplayCase] = [
         },
     ),
     ReplayCase(
-        "xdp_ipv6_fragment_pass",
-        "ingress IPv6 first fragment; current policy allows kernel reassembly",
-        "pass",
+        "xdp_ipv6_fragment_drop",
+        "ingress IPv6 first fragment; policy mandates drop to prevent bypass",
+        "drop",
         {
             "direction": "ingress",
             "family": "ipv6",
