@@ -591,7 +591,7 @@ where
     };
 
     let header_text = format!(
-        " Pkts: {} | Pass: {} | Drop: {} ({:.1}%) | ConnTrack: {} | PortScan: {} | Blocks: M:{} C:{}",
+        " Pkts: {} | Pass: {} | Drop: {} ({:.1}%) | ConnTrack(tm): {} | PortScan: {} | Blocks: M:{} C:{}",
         format_num(stats.pkts_seen),
         format_num(stats.pkts_pass),
         format_num(stats.pkts_drop),
@@ -896,7 +896,7 @@ fn render_stats<T: std::borrow::BorrowMut<MapData> + 'static>(
             ),
         ]),
         Line::from(vec![
-            Span::raw("ConnTrack Hits:    "),
+            Span::raw("ConnTrack (telemetry):"),
             Span::styled(
                 format_num(stats.conntrack_hits),
                 Style::default().fg(Color::Cyan),

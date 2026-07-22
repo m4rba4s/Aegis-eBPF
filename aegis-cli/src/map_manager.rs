@@ -463,6 +463,12 @@ pub fn setup_config_map(
         sys_cfg.modules.threat_feeds as u32,
         0,
     )?;
+    // NOTE: CFG_CONN_TRACK is written here for config-map completeness, but no
+    // BPF program reads it in v4.3.0-rc.1 — conntrack is telemetry-only (the
+    // handshake state machine in aegis-common is aspirational and the
+    // conntrack_hits counter is never incremented). Retained rather than
+    // removed so existing config files keep parsing; see
+    // docs/release/v4.3.0-rc.1-hardening.md.
     config.insert(
         aegis_common::CFG_CONN_TRACK,
         sys_cfg.modules.conn_track as u32,

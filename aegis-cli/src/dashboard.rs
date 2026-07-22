@@ -233,7 +233,7 @@ body {
     <div class="value purple" id="portscan">—</div>
   </div>
   <div class="card">
-    <div class="label">Conntrack Cache Hits</div>
+    <div class="label">Conntrack (telemetry-only)</div>
     <div class="value accent" id="conntrack">—</div>
   </div>
   <div class="card">

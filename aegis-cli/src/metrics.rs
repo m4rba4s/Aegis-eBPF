@@ -192,9 +192,14 @@ fn render_prometheus(stats: &Option<Stats>, blocklist_count: u64) -> String {
         let _ = writeln!(buf, "# TYPE aegis_portscan_hits_total counter");
         let _ = writeln!(buf, "aegis_portscan_hits_total {}", s.portscan_hits);
 
+        // NOTE: conntrack is telemetry-only in v4.3.0-rc.1 — no BPF program
+        // ever increments conntrack_hits, so this counter is always 0. It is
+        // retained (not removed) for scrape/format compatibility. The real
+        // conntrack signal is aegis_conntrack_entries below. See
+        // docs/release/v4.3.0-rc.1-hardening.md.
         let _ = writeln!(
             buf,
-            "# HELP aegis_conntrack_hits_total Conntrack fast-path hits"
+            "# HELP aegis_conntrack_hits_total Conntrack fast-path hits (always 0: conntrack is telemetry-only in v4.3.0-rc.1)"
         );
         let _ = writeln!(buf, "# TYPE aegis_conntrack_hits_total counter");
         let _ = writeln!(buf, "aegis_conntrack_hits_total {}", s.conntrack_hits);
