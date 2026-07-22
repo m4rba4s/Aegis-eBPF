@@ -51,3 +51,4 @@ ldd_info.txt
 microbench.rs
 target_test/
 /release-artifacts/
+.zcode/
