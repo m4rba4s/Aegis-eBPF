@@ -26,8 +26,9 @@ use aegis_common::{
 // passing) if a constant is ever renamed/removed.
 use aegis_common::{
     ACTION_ALERT, ACTION_DPI, ACTION_DROP, ACTION_PASS, HOOK_TC_EGRESS, HOOK_TC_INGRESS, HOOK_XDP,
-    NEXTHDR_TCP, NEXTHDR_UDP, THREAT_BLOCKLIST, THREAT_FLOOD_SYN, THREAT_HIGH_ENTROPY, THREAT_NONE,
-    THREAT_SCAN_PORT,
+    NEXTHDR_ESP, NEXTHDR_FRAGMENT, NEXTHDR_ROUTING, NEXTHDR_TCP, NEXTHDR_UDP,
+    ROUTING_TYPE_0, THREAT_BLOCKLIST, THREAT_FLOOD_SYN, THREAT_HIGH_ENTROPY,
+    THREAT_IPV6_FRAGMENT, THREAT_IPV6_ROUTING_TYPE0, THREAT_NONE, THREAT_SCAN_PORT,
 };
 
 /// Struct sizes are the coarsest ABI invariant: a size mismatch means the two
@@ -169,4 +170,32 @@ fn test_hook_constants() {
 fn test_protocol_constants_agree() {
     assert_eq!(NEXTHDR_TCP, 6);
     assert_eq!(NEXTHDR_UDP, 17);
+}
+
+
+/// Wire constants introduced/used by the v4.3.0-rc.1 IPv6 hardening. These
+/// pin the numeric values the BPF datapath (aegis-ebpf / aegis-tc) writes into
+/// PacketLogIpv6.threat_type and reads from the IPv6 next-header / routing
+/// bytes. If any of these drift, the P0-1 (Fragment) and P0-2 (RH0) fail-closed
+/// branches either stop firing or log the wrong threat category, silently. The
+/// canary turns the build red before that can ship.
+///
+/// Values come from aegis-common/src/lib.rs and MUST match the BPF match-arms.
+#[test]
+fn test_ipv6_hardening_constants() {
+    // IPv6 next-header (protocol) numbers the datapath dispatches on.
+    assert_eq!(NEXTHDR_FRAGMENT, 44, "Fragment Header protocol number");
+    assert_eq!(NEXTHDR_ROUTING, 43, "Routing Header protocol number");
+    assert_eq!(NEXTHDR_ESP, 50, "ESP (IPsec) protocol number");
+
+    // RFC 5095: Routing Header Type 0 must be discarded.
+    assert_eq!(ROUTING_TYPE_0, 0, "RH0 routing_type value");
+
+    // Threat categories logged by the new fail-closed branches. These are read
+    // by userspace (TUI / metrics / event loop) to attribute the drop.
+    assert_eq!(THREAT_IPV6_FRAGMENT, 22, "Fragment drop threat type");
+    assert_eq!(
+        THREAT_IPV6_ROUTING_TYPE0, 21,
+        "RH0 drop threat type"
+    );
 }
