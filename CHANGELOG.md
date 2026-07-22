@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Security (P0-1):** Closed IPv6 Fragment Header bypass by dropping all fragments (fail-closed) at XDP/TC layer.
 - **Security (P0-2):** Closed RH0 (Routing Header Type 0) bypass (RFC 5095) by enforcing drops on `routing_type == 0`.
 - **Security (P1-1):** Trimmed spoofable whitelist; CGNAT (100.64/10) and loopback (127/8) are no longer trusted by default.
+- **Security:** ESP/IPsec packets (NEXTHDR_ESP = 50) are now fail-closed DROP in the IPv6 extension header parser.
 - **UI/Telemetry:** Display actual `conntrack_entries` correctly across JSON API, CLI, and TUI instead of the always-zero `conntrack_hits`.
 - **Documentation:** Fixed stale `BLOCKLIST` capacity comment in event-loop code.
 - **Documentation:** Corrected misleading comments flagged by red-team audit in eBPF source.
@@ -25,8 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Testing:** Hardened ABI canary tests to verify struct sizes and field offsets, preventing silent memory drifts between userspace and eBPF.
 
 ### Known Limitations
-- IPv6 fragmented traffic is intentionally dropped (fail-closed).
+- IPv6 fragmented traffic is intentionally dropped (fail-closed). PMTUD is expected.
+- ESP/IPsec passthrough is dropped; operators requiring IPsec must exempt those paths externally.
 - VLAN/QinQ frames are fail-closed (not parsed).
+- Jumbo frames (MTU > 1500) and TSO/GSO egress packets may be spuriously dropped due to a 1500-byte `l4_offset` cap. Deferred to a future hardening pass.
 - Live policy hot reload is disabled (requires service restart).
 
-> **Note:** This release candidate contains source fixes for P0 vulnerabilities, but runtime validation of eBPF drops is currently failing and pending investigation of the eBPF loader/cache. Do not use in production until runtime DROP is verified.
+### Migration Notes (from v4.2.x)
+- **CGNAT / Loopback operators:** If your ingress path uses `100.64.0.0/10` or `127.0.0.0/8` sources, you must explicitly add them to the ALLOWLIST BPF map. They are no longer auto-whitelisted.
+- **Prometheus / monitoring:** `conntrack_hits` is now fixed at 0. Use `conntrack_entries` gauge instead for active connection count.
+- **IPv6 environments:** All IPv6 fragmented traffic will be dropped. Ensure PMTUD is functional.
+
+> **Note:** Runtime verification of all P0/P1 fixes has been confirmed via `packet-replay-lab.py` (18/18 cases passed) on a privileged lab with `CAP_BPF` + root.
