@@ -26,9 +26,9 @@ use aegis_common::{
 // passing) if a constant is ever renamed/removed.
 use aegis_common::{
     ACTION_ALERT, ACTION_DPI, ACTION_DROP, ACTION_PASS, HOOK_TC_EGRESS, HOOK_TC_INGRESS, HOOK_XDP,
-    NEXTHDR_ESP, NEXTHDR_FRAGMENT, NEXTHDR_ROUTING, NEXTHDR_TCP, NEXTHDR_UDP,
-    ROUTING_TYPE_0, THREAT_BLOCKLIST, THREAT_FLOOD_SYN, THREAT_HIGH_ENTROPY,
-    THREAT_IPV6_FRAGMENT, THREAT_IPV6_ROUTING_TYPE0, THREAT_NONE, THREAT_SCAN_PORT,
+    NEXTHDR_ESP, NEXTHDR_FRAGMENT, NEXTHDR_ROUTING, NEXTHDR_TCP, NEXTHDR_UDP, ROUTING_TYPE_0,
+    THREAT_BLOCKLIST, THREAT_FLOOD_SYN, THREAT_HIGH_ENTROPY, THREAT_IPV6_FRAGMENT,
+    THREAT_IPV6_ROUTING_TYPE0, THREAT_NONE, THREAT_SCAN_PORT,
 };
 
 /// Struct sizes are the coarsest ABI invariant: a size mismatch means the two
@@ -172,7 +172,6 @@ fn test_protocol_constants_agree() {
     assert_eq!(NEXTHDR_UDP, 17);
 }
 
-
 /// Wire constants introduced/used by the v4.3.0-rc.1 IPv6 hardening. These
 /// pin the numeric values the BPF datapath (aegis-ebpf / aegis-tc) writes into
 /// PacketLogIpv6.threat_type and reads from the IPv6 next-header / routing
@@ -194,8 +193,5 @@ fn test_ipv6_hardening_constants() {
     // Threat categories logged by the new fail-closed branches. These are read
     // by userspace (TUI / metrics / event loop) to attribute the drop.
     assert_eq!(THREAT_IPV6_FRAGMENT, 22, "Fragment drop threat type");
-    assert_eq!(
-        THREAT_IPV6_ROUTING_TYPE0, 21,
-        "RH0 drop threat type"
-    );
+    assert_eq!(THREAT_IPV6_ROUTING_TYPE0, 21, "RH0 drop threat type");
 }

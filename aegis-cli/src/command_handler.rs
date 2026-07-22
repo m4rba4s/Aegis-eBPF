@@ -267,7 +267,10 @@ pub fn handle_status_command() -> anyhow::Result<()> {
     println!("Manual Blocks:   {}", total.block_manual);
     println!("CIDR Blocks:     {}", total.block_cidr);
     println!("Port Scans:      {}", total.portscan_hits);
-    println!("Conntrack (telemetry-only, always 0): {}", total.conntrack_hits);
+    println!(
+        "Conntrack (telemetry-only, always 0): {}",
+        total.conntrack_hits
+    );
     println!(
         "Events (OK/Fail): {}/{}",
         total.events_ok, total.events_fail
