@@ -19,17 +19,6 @@
 
 **Aegis** is a Rust/Aya firewall built on **eBPF (Extended Berkeley Packet Filter)**, **XDP (eXpress Data Path)**, and **TC (Traffic Control)**. It filters ingress and egress traffic early in the networking stack, with runtime support bounded by the evidence matrix in `docs/PORTABILITY.md`.
 
-### Why Aegis?
-
-| Feature | iptables/nftables | Aegis |
-|---------|-------------------|-------|
-| Packet processing | Kernel netfilter | XDP (driver level) |
-| Performance | Measured by deployment | **Benchmark pending** ¹ |
-| Egress filtering | Yes | Yes (TC) |
-| Connection tracking | Conntrack module | **Experimental eBPF state tracking** |
-| Real-time TUI | No | **Yes** |
-| Memory safety | C | **Rust** |
-| Deployment | Multiple packages | **Single binary** |
 
 > ¹ *No measured throughput claim is made for this release candidate. Benchmark results require archived kernel, NIC/driver, XDP mode, CPU, packet-size, rule-count, and raw command output evidence.*
 
