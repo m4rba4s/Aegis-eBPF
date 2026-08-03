@@ -3,6 +3,10 @@ target = "bpfel-unknown-none"
 
 [target.bpfel-unknown-none]
 linker = "bpf-linker"
+# --btf: emit BTF type info (required for xdpdump, bpftool, CO-RE)
+# bpf-linker does NOT auto-emit BTF from DWARF; the flag is mandatory.
+rustflags = ["-C", "link-arg=--btf"]
 
 [unstable]
 build-std = ["core"]
+

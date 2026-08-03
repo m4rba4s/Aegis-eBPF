@@ -1,6 +1,7 @@
 #!/bin/bash
 # Aegis XDP Firewall - Installer and maintenance script
-# Supports: Ubuntu, Debian, Fedora, CentOS, RHEL, Arch, Alpine, OpenSUSE
+# Contains install handlers for multiple distributions. Runtime support remains
+# limited to targets with commit-specific load/attach/replay evidence.
 # Init systems: systemd, openrc, sysvinit
 #
 # Usage:
@@ -49,6 +50,8 @@ BIN_DIR="$INSTALL_DIR/bin"
 SHARE_DIR="$INSTALL_DIR/share/aegis"
 SERVICE_USER="${AEGIS_SERVICE_USER:-aegis}"
 SERVICE_GROUP="${AEGIS_SERVICE_GROUP:-aegis}"
+RUST_TOOLCHAIN_CHANNEL="nightly-2026-02-12"
+BPF_LINKER_VERSION="0.10.1"
 
 # Colors
 RED='\033[0;31m'
@@ -164,6 +167,45 @@ check_runtime_tools() {
     fi
 
     log_ok "Runtime tools available: ${tools[*]}"
+}
+
+# Reverse-path filter (anti-spoofing) advisory check.
+#
+# This is WARNING-ONLY on purpose: it never fails the install (returns 0), so
+# it cannot break lab, test, or asymmetric-routing setups. The P1-1 hardening
+# removed 100.64.0.0/10 (CGNAT) and 127.0.0.0/8 from the XDP auto-whitelist,
+# which closes the spoofed-source bypass in the datapath; strict rp_filter on
+# the protected interface is the kernel-side complement and the recommended
+# deployment posture for internet-facing NICs.
+#
+# We check both net.ipv4.conf.all.rp_filter and the per-interface value. The
+# effective kernel value is max(all, iface); either being < 1 means the
+# reverse-path check is loose or off on this interface.
+check_rp_filter() {
+    local iface="${AEGIS_INTERFACE:-eth0}"
+    local all_val iface_val
+
+    # Only advise on rp_filter for IPv4 interfaces we can actually inspect.
+    command -v sysctl &>/dev/null || return 0
+
+    all_val=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "?")
+    iface_val=$(sysctl -n "net.ipv4.conf.${iface}.rp_filter" 2>/dev/null || echo "?")
+
+    # The kernel effective value is max(all, iface); loose mode is 2, strict is 1.
+    # We recommend strict (1). Warn if either is 0 (off) or 2 (loose).
+    if [[ "$all_val" == "1" && "$iface_val" == "1" ]]; then
+        log_ok "rp_filter strict (1) on ${iface} and all"
+        return 0
+    fi
+
+    log_warn "rp_filter not strict on '${iface}' (all=${all_val}, ${iface}=${iface_val})"
+    log_info "Recommended for internet-facing NICs (anti-spoofing complement to the"
+    log_info "P1-1 whitelist trim):"
+    log_info "  sudo sysctl -w net.ipv4.conf.all.rp_filter=1"
+    log_info "  sudo sysctl -w net.ipv4.conf.${iface}.rp_filter=1"
+    log_info "Persist in /etc/sysctl.d/99-aegis.conf. This is advisory only — the"
+    log_info "install continues. Skip if this host uses asymmetric routing."
+    return 0
 }
 
 # =============================================================================
@@ -510,26 +552,26 @@ ensure_rust_toolchain() {
 
     prefer_rustup_cargo_proxy
 
-    # Nightly toolchain
-    if ! rustup toolchain list 2>/dev/null | grep -q nightly; then
-        log_info "Installing nightly toolchain..."
-        rustup toolchain install nightly || {
-            log_error "Failed to install nightly toolchain"
+    # Commit-pinned nightly toolchain from rust-toolchain.toml.
+    if ! rustup toolchain list 2>/dev/null | grep -Fq "$RUST_TOOLCHAIN_CHANNEL"; then
+        log_info "Installing Rust toolchain $RUST_TOOLCHAIN_CHANNEL..."
+        rustup toolchain install "$RUST_TOOLCHAIN_CHANNEL" || {
+            log_error "Failed to install Rust toolchain $RUST_TOOLCHAIN_CHANNEL"
             return 1
         }
     fi
 
     # rust-src component (required for -Zbuild-std=core)
-    if ! rustup component list --toolchain nightly 2>/dev/null | grep -q 'rust-src (installed)'; then
-        log_info "Installing rust-src for nightly..."
-        rustup component add rust-src --toolchain nightly || {
+    if ! rustup component list --toolchain "$RUST_TOOLCHAIN_CHANNEL" 2>/dev/null | grep -q 'rust-src (installed)'; then
+        log_info "Installing rust-src for $RUST_TOOLCHAIN_CHANNEL..."
+        rustup component add rust-src --toolchain "$RUST_TOOLCHAIN_CHANNEL" || {
             log_error "Failed to install rust-src"
             return 1
         }
     fi
 
-    if ! cargo +nightly --version &>/dev/null; then
-        log_error "cargo is not the rustup proxy, so 'cargo +nightly' will fail"
+    if ! cargo "+$RUST_TOOLCHAIN_CHANNEL" --version &>/dev/null; then
+        log_error "cargo is not the rustup proxy, so the pinned toolchain cannot be selected"
         log_info "Try: sudo env PATH=\"\$HOME/.cargo/bin:\$PATH\" ./install.sh"
         return 1
     fi
@@ -537,7 +579,7 @@ ensure_rust_toolchain() {
     if [[ "$(detect_distro)" == "alpine" ]]; then
         local rust_llvm_major
         rust_llvm_major=$(
-            rustc +nightly -vV |
+            rustc "+$RUST_TOOLCHAIN_CHANNEL" -vV |
                 awk -F': ' '/^LLVM version:/ { split($2, version, "."); print version[1] }'
         )
         if [[ -z "$rust_llvm_major" ]] ||
@@ -550,25 +592,33 @@ ensure_rust_toolchain() {
     fi
 
     # bpf-linker
-    if ! command -v bpf-linker &>/dev/null; then
-        log_info "Installing bpf-linker (this may take several minutes)..."
+    local installed_bpf_linker_version=""
+    if command -v bpf-linker &>/dev/null; then
+        installed_bpf_linker_version="$(bpf-linker --version 2>/dev/null | awk '{print $2}')"
+    fi
+    if [[ "$installed_bpf_linker_version" != "$BPF_LINKER_VERSION" ]]; then
+        log_info "Installing bpf-linker $BPF_LINKER_VERSION (this may take several minutes)..."
         local bpf_linker_status=0
         if [[ "$(detect_distro)" == "alpine" ]]; then
             # A fully static musl bpf-linker cannot dlopen Alpine's shared LLVM.
-            RUSTFLAGS="-C target-feature=-crt-static" cargo +nightly install bpf-linker ||
+            RUSTFLAGS="-C target-feature=-crt-static" \
+                cargo "+$RUST_TOOLCHAIN_CHANNEL" install bpf-linker \
+                --version "$BPF_LINKER_VERSION" --locked --force ||
                 bpf_linker_status=$?
         else
-            cargo +nightly install bpf-linker || bpf_linker_status=$?
+            cargo "+$RUST_TOOLCHAIN_CHANNEL" install bpf-linker \
+                --version "$BPF_LINKER_VERSION" --locked --force ||
+                bpf_linker_status=$?
         fi
         if [[ $bpf_linker_status -ne 0 ]]; then
             log_error "Failed to install bpf-linker"
             log_info "Common fix: ensure llvm and clang are installed"
-            log_info "Manual: cargo +nightly install bpf-linker"
+            log_info "Manual: cargo +$RUST_TOOLCHAIN_CHANNEL install bpf-linker --version $BPF_LINKER_VERSION --locked"
             return 1
         fi
     fi
 
-    log_ok "Nightly + rust-src + bpf-linker ready"
+    log_ok "$RUST_TOOLCHAIN_CHANNEL + rust-src + bpf-linker $BPF_LINKER_VERSION ready"
 }
 
 # =============================================================================
@@ -620,6 +670,9 @@ ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
+RuntimeDirectory=aegis/instances/%i
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 
 # Process isolation
 NoNewPrivileges=true
@@ -872,7 +925,7 @@ restart_services() {
 show_banner() {
     echo ""
     echo "═══════════════════════════════════════════════════════════"
-    echo "  🛡️  AEGIS eBPF FIREWALL — UNIVERSAL INSTALLER"
+    echo "  🛡️  AEGIS eBPF FIREWALL — RELEASE INSTALLER"
     echo "═══════════════════════════════════════════════════════════"
     echo ""
 }
@@ -912,21 +965,21 @@ install_prebuilt() {
 
     if [[ -z "$cli_bin" ]]; then
         log_error "aegis-cli binary not found!"
-        log_info "Build first: cargo run -p xtask -- build-all && cargo build --release -p aegis-cli"
+        log_info "Build first: cargo run --locked -p xtask -- build-all && cargo build --locked --release -p aegis-cli"
         return 1
     fi
 
     if [[ -z "$xdp_obj" ]]; then
         log_error "XDP eBPF object not found!"
         log_info "Expected one of: $SCRIPT_DIR/aegis.o, $SCRIPT_DIR/target/bpfel-unknown-none/release/aegis, ./aegis.o"
-        log_info "Build first: cargo run -p xtask -- build-all --profile release"
+        log_info "Build first: cargo run --locked -p xtask -- build-all --profile release"
         return 1
     fi
 
     if [[ -z "$tc_obj" ]]; then
         log_error "TC eBPF object not found; TC egress is required by default."
         log_info "Expected one of: $SCRIPT_DIR/aegis-tc.o, $SCRIPT_DIR/target/bpfel-unknown-none/release/aegis-tc, ./aegis-tc.o"
-        log_info "Build first: cargo run -p xtask -- build-all --profile release"
+        log_info "Build first: cargo run --locked -p xtask -- build-all --profile release"
         return 1
     fi
 
@@ -967,32 +1020,64 @@ build_and_install() {
 
     # 3. Build eBPF programs (release profile — debug panics bpf-linker)
     log_info "Building eBPF programs (release)..."
-    cargo run -p xtask -- build-all --profile release
+    cargo run --locked -p xtask -- build-all --profile release
 
     # 4. Build CLI (eBPF bytecode gets embedded by build.rs)
     log_info "Building aegis-cli..."
-    cargo build --release -p aegis-cli
+    cargo build --locked --release -p aegis-cli
 
     # 5. Install the built binary
     install_prebuilt
 }
 
+cleanup_owned_pins() {
+    local iface="$1"
+    local pin_dir="/sys/fs/bpf/aegis/${iface}/abi-v1"
+    local marker="/run/aegis/instances/${iface}/abi-v1/ownership.json"
+    local cleanup_cli=""
+    local cleanup_args=(--iface "$iface" cleanup-pins)
+
+    if [[ ! -d "$pin_dir" && ! -e "$marker" ]]; then
+        return 0
+    fi
+
+    for path in \
+        "$SCRIPT_DIR/aegis-cli" \
+        "$SCRIPT_DIR/target/release/aegis-cli" \
+        "$BIN_DIR/aegis-cli"
+    do
+        if [[ -x "$path" ]]; then
+            cleanup_cli="$path"
+            break
+        fi
+    done
+
+    if [[ -z "$cleanup_cli" ]]; then
+        log_error "Cannot safely clean Aegis pins for interface $iface: compatible aegis-cli not found"
+        log_info "Pins were preserved at $pin_dir"
+        return 1
+    fi
+
+    if [[ ! -e "$marker" ]]; then
+        cleanup_args+=(--force-orphaned)
+    fi
+
+    if ! "$cleanup_cli" "${cleanup_args[@]}"; then
+        log_error "Bounded pin cleanup failed for interface $iface"
+        log_info "Inspect before retrying: find '$pin_dir' -maxdepth 1 -ls"
+        return 1
+    fi
+    log_ok "BPF maps cleaned for owned instance $iface"
+}
+
 cleanup_old_install() {
     local iface=""
-    local pin_dir=""
 
     if [[ -r /etc/aegis/config.toml ]]; then
         iface="$(awk -F'"' '/^interface[[:space:]]*=/{print $2; exit}' /etc/aegis/config.toml)"
     fi
     iface="${iface:-eth0}"
-    pin_dir="/sys/fs/bpf/aegis/${iface}/abi-v1"
-
-    if [[ -d "$pin_dir" ]]; then
-        log_info "Cleaning up pinned BPF maps for owned instance: $pin_dir"
-        rm -rf "$pin_dir"
-        rmdir "/sys/fs/bpf/aegis/${iface}" 2>/dev/null || true
-        rmdir /sys/fs/bpf/aegis 2>/dev/null || true
-    fi
+    cleanup_owned_pins "$iface"
 }
 
 # =============================================================================
@@ -1160,6 +1245,9 @@ run_checks() {
     # Runtime tools
     check_runtime_tools || ((++errors))
 
+    # rp_filter advisory (warning-only; complements the P1-1 whitelist trim)
+    check_rp_filter
+
     # System tools
     local tools=("gcc" "clang" "llvm-config" "curl" "git")
     for tool in "${tools[@]}"; do
@@ -1240,6 +1328,13 @@ uninstall_aegis() {
 
     stop_running_services
 
+    local iface=""
+    if [[ -r /etc/aegis/config.toml ]]; then
+        iface="$(awk -F'"' '/^interface[[:space:]]*=/{print $2; exit}' /etc/aegis/config.toml)"
+    fi
+    iface="${iface:-eth0}"
+    cleanup_owned_pins "$iface"
+
     local init_system
     init_system=$(detect_init_system)
     case "$init_system" in
@@ -1272,20 +1367,6 @@ uninstall_aegis() {
 
     rm -rf "$SHARE_DIR"
     log_ok "Shared data removed"
-
-    local iface=""
-    local pin_dir=""
-    if [[ -r /etc/aegis/config.toml ]]; then
-        iface="$(awk -F'"' '/^interface[[:space:]]*=/{print $2; exit}' /etc/aegis/config.toml)"
-    fi
-    iface="${iface:-eth0}"
-    pin_dir="/sys/fs/bpf/aegis/${iface}/abi-v1"
-    if [[ -d "$pin_dir" ]]; then
-        rm -rf "$pin_dir"
-        rmdir "/sys/fs/bpf/aegis/${iface}" 2>/dev/null || true
-        rmdir /sys/fs/bpf/aegis 2>/dev/null || true
-        log_ok "BPF maps cleaned for owned instance"
-    fi
 
     rm -f /etc/bash_completion.d/aegis-cli 2>/dev/null
     rm -f /usr/share/zsh/site-functions/_aegis-cli 2>/dev/null

@@ -10,9 +10,38 @@ Run on the exact release commit:
 
 ```bash
 git status --short
-git rev-parse --short HEAD
+git rev-parse HEAD
 
-CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh nonpriv
+CARGO_HOME=/tmp/aegis-cargo-home ./scripts/release-gates.sh release-candidate
+```
+
+The `release-candidate` mode refuses a dirty worktree, runs the complete
+non-privileged gate, and archives the transcript, Git/toolchain/host metadata,
+and XDP/TC object hashes under:
+
+```text
+release-artifacts/<version>/<full-sha>/<timestamp>/
+```
+
+The directory is local evidence staging and is ignored by Git. It is not
+privileged runtime proof.
+
+The release-candidate gate also disables Cargo incremental compilation and
+remaps the physical workspace and target directories to stable virtual paths.
+It rejects caller-supplied `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` so a local
+environment cannot silently change the release artifact contract. CI and the
+release container apply the same path-remapping policy.
+
+For an isolated rebuild that cannot reuse workspace artifacts, set a fresh
+target directory. The same directory is used for userspace, XDP, TC, embedded
+objects, validation, and archived hashes:
+
+```bash
+target_dir="$(mktemp -d /tmp/aegis-release-target.XXXXXX)"
+CARGO_HOME=/tmp/aegis-cargo-home \
+  CARGO_TARGET_DIR="$target_dir" \
+  CARGO_BUILD_JOBS=4 \
+  ./scripts/release-gates.sh release-candidate
 ```
 
 `AEGIS_DOC_TARGET_DIR` may be set when the documentation output path must be
@@ -26,16 +55,44 @@ Required evidence:
 - empty `git status --short`
 - release HEAD
 - `cargo fmt --all -- --check`
+- locked XDP and TC builds before userspace analysis
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
+- explicit embedded XDP, embedded TC, and Aya object parsing tests
 - `cargo test --workspace --doc`
 - `cargo doc --workspace --all-features --no-deps`
-- `cargo run -p xtask -- build-all --profile release`
-- release userspace build
+- release userspace build with `AEGIS_REQUIRE_EMBEDDED=1`
 - `file` and `llvm-objdump -h` for XDP and TC objects
 - `cargo audit -D warnings`
 - `cargo deny check`
 - CLI command parse for `aegis-cli --iface lo daemon --help`
+
+## Portable CI Artifact
+
+The `portable-static-build` job uploads the musl CLI, XDP and TC objects,
+commit identity manifest, and `aegis-ci-SHA256SUMS`. GitHub removes the common
+`target/` prefix while constructing the ZIP, so checksum entries are relative
+to the extracted artifact root.
+
+Consumer verification:
+
+```bash
+unzip aegis-4.3.0-rc.1-x86_64-linux-musl-*.zip -d aegis-portable
+cd aegis-portable
+sha256sum -c aegis-ci-SHA256SUMS
+cat aegis-ci-build-identity.json
+./x86_64-unknown-linux-musl/release/aegis-cli --version
+```
+
+The identity manifest records both the source commit and the temporary GitHub
+merge commit used for pull-request CI. A successful static build is build
+portability evidence only; it does not prove verifier acceptance, attach
+behavior, packet enforcement, or distribution support.
+
+Byte-for-byte repeatability must be demonstrated with two clean builds of the
+same commit and toolchain in different physical target directories. Matching
+XDP, TC, and userspace hashes prove only those recorded build environments;
+they do not establish cross-toolchain or cross-platform reproducibility.
 
 ## Privileged Lab Gate
 
@@ -109,6 +166,9 @@ The stress gate repeats the full packet replay matrix for
 It is a stability/enforcement stress check, not a throughput benchmark. Do not
 publish packets-per-second claims from this gate.
 
+With the current 18-case matrix, 25 iterations produce 450 **case runs**, not
+450 stress iterations.
+
 Safety bounds:
 
 - maximum stress iterations: `50`,
@@ -134,6 +194,219 @@ The current case count is `18`, obtained from:
 python3 scripts/packet-replay-lab.py --list-cases | wc -l
 ```
 
+### Two-Terminal Stress Runbook
+
+Use these snippets only inside the disposable lab VM. Do not run them on a
+workstation that is already above the host stop rules. Terminal 1 creates a
+shared state file and waits for Terminal 2 before starting, so telemetry covers
+the build, attach, replay, detach, and cleanup phases.
+
+The snippets deliberately enforce the stricter host qualification thresholds:
+at least 8 GiB `MemAvailable` and no more than 50% swap use. Do not set
+`AEGIS_ALLOW_LOW_RESOURCE_LAB=1` for release evidence.
+
+When the lab is a VM, these commands observe the guest. The physical
+virtualization host must still satisfy the host stop rules above and must be
+monitored independently throughout the run.
+
+Before starting, make sure `/tmp/aegis-stress-current.env` is not left from an
+active run. If it exists, inspect the recorded PID and remove the file only
+after confirming that process is no longer running.
+
+Terminal 1 - stress gate:
+
+```bash
+set -Eeuo pipefail
+cd /home/out/Aegis-Portable-Demo
+
+test -z "$(git status --porcelain)" || {
+  echo "refusing stress validation from a dirty worktree" >&2
+  exit 1
+}
+
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+STATE_FILE=/tmp/aegis-stress-current.env
+READY_FILE="${STATE_FILE}.telemetry-ready"
+EVIDENCE_DIR="/tmp/aegis-stress-${SOURCE_COMMIT}-${RUN_ID}"
+TARGET_DIR="/tmp/aegis-stress-target-${SOURCE_COMMIT}-${RUN_ID}"
+DRIVER_LOG="${EVIDENCE_DIR}.driver.log"
+TELEMETRY_LOG="${EVIDENCE_DIR}.telemetry.log"
+
+test ! -e "$STATE_FILE" || {
+  echo "state file already exists: $STATE_FILE" >&2
+  exit 1
+}
+test ! -e "$EVIDENCE_DIR"
+test ! -e "$TARGET_DIR"
+
+sudo -v
+umask 077
+{
+  printf 'SOURCE_COMMIT=%q\n' "$SOURCE_COMMIT"
+  printf 'RUN_ID=%q\n' "$RUN_ID"
+  printf 'EVIDENCE_DIR=%q\n' "$EVIDENCE_DIR"
+  printf 'TARGET_DIR=%q\n' "$TARGET_DIR"
+  printf 'DRIVER_LOG=%q\n' "$DRIVER_LOG"
+  printf 'TELEMETRY_LOG=%q\n' "$TELEMETRY_LOG"
+} >"$STATE_FILE"
+
+echo "Start Terminal 2 now. Waiting up to 120 seconds for telemetry..."
+for _ in $(seq 1 120); do
+  [[ -e "$READY_FILE" ]] && break
+  sleep 1
+done
+test -e "$READY_FILE" || {
+  echo "telemetry did not become ready; stress gate was not started" >&2
+  exit 1
+}
+
+setsid --wait bash -c '
+  printf "STRESS_PID=%q\n" "$$" >>"$1"
+  shift
+  exec "$@"
+' bash "$STATE_FILE" \
+  sudo -E env \
+    AEGIS_PACKET_REPLAY_DIR="$EVIDENCE_DIR" \
+    AEGIS_STRESS_ITERATIONS=25 \
+    AEGIS_MIN_AVAILABLE_MB=8192 \
+    AEGIS_MAX_SWAP_USED_PERCENT=50 \
+    CARGO_HOME=/tmp/aegis-cargo-home \
+    CARGO_TARGET_DIR="$TARGET_DIR" \
+    CARGO_BUILD_JOBS=4 \
+    ./scripts/release-gates.sh stress-lab \
+  > >(tee "$DRIVER_LOG") 2>&1 &
+LAUNCHER_PID=$!
+
+set +e
+wait "$LAUNCHER_PID"
+STRESS_RC=$?
+set -e
+printf 'STRESS_RC=%q\n' "$STRESS_RC" >>"$STATE_FILE"
+echo "stress gate exit code: $STRESS_RC"
+exit "$STRESS_RC"
+```
+
+Terminal 2 - telemetry and resource stop controller:
+
+```bash
+set -Eeuo pipefail
+cd /home/out/Aegis-Portable-Demo
+
+STATE_FILE=/tmp/aegis-stress-current.env
+until [[ -s "$STATE_FILE" ]]; do sleep 1; done
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+sudo -v
+STARTED_AT="$(date --iso-8601=seconds)"
+exec > >(tee -a "$TELEMETRY_LOG") 2>&1
+
+echo "telemetry_start: $STARTED_AT"
+echo "source_commit: $SOURCE_COMMIT"
+echo "evidence_dir: $EVIDENCE_DIR"
+echo "target_dir: $TARGET_DIR"
+touch "${STATE_FILE}.telemetry-ready"
+
+until grep -q '^STRESS_PID=' "$STATE_FILE"; do sleep 1; done
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+sample=0
+while sudo kill -0 "$STRESS_PID" 2>/dev/null; do
+  timestamp="$(date --iso-8601=seconds)"
+  mem_available_kb="$(
+    awk '/^MemAvailable:/ {print $2}' /proc/meminfo
+  )"
+  swap_total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)"
+  swap_free_kb="$(awk '/^SwapFree:/ {print $2}' /proc/meminfo)"
+  if (( swap_total_kb > 0 )); then
+    swap_used_percent="$(( (swap_total_kb - swap_free_kb) * 100 / swap_total_kb ))"
+  else
+    swap_used_percent=0
+  fi
+
+  printf '\n[%s] mem_available_mib=%d swap_used_percent=%d\n' \
+    "$timestamp" "$((mem_available_kb / 1024))" "$swap_used_percent"
+  free -h
+  df -h /tmp
+  ps -eo pid,ppid,stat,rss,%mem,%cpu,etimes,comm,args \
+    --sort=-rss | head -20 || true
+
+  if (( mem_available_kb < 8 * 1024 * 1024 ||
+        swap_used_percent > 50 )); then
+    echo "STOP: resource threshold crossed; terminating stress process group"
+    sudo kill -TERM -- "-$STRESS_PID" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      sudo kill -0 "$STRESS_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if sudo kill -0 "$STRESS_PID" 2>/dev/null; then
+      echo "STOP: process group ignored TERM for 30 seconds; sending KILL"
+      sudo kill -KILL -- "-$STRESS_PID" 2>/dev/null || true
+    fi
+    echo "The run is failed evidence and must not be reported as PASS."
+    break
+  fi
+
+  if (( sample % 6 == 0 )); then
+    sudo ip -details link show dev aegis-host0 2>&1 || true
+    sudo tc qdisc show dev aegis-host0 2>&1 || true
+    sudo tc filter show dev aegis-host0 egress 2>&1 || true
+    sudo bpftool net show 2>&1 || true
+    sudo bpftool prog show 2>&1 || true
+    sudo bpftool map show 2>&1 || true
+    sudo find /sys/fs/bpf/aegis -maxdepth 4 -ls 2>&1 || true
+  fi
+
+  sample=$((sample + 1))
+  sleep 5
+done
+
+echo "telemetry_end: $(date --iso-8601=seconds)"
+sudo journalctl -k --since "$STARTED_AT" --no-pager \
+  2>&1 | tee "${EVIDENCE_DIR}.kernel.log" >/dev/null || true
+```
+
+After both terminals exit, validate and archive the evidence:
+
+```bash
+set -Eeuo pipefail
+cd /home/out/Aegis-Portable-Demo
+
+STATE_FILE=/tmp/aegis-stress-current.env
+# shellcheck disable=SC1090
+source "$STATE_FILE"
+
+test "$SOURCE_COMMIT" = "$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+test "${STRESS_RC:?stress terminal did not record an exit code}" -eq 0
+
+sudo -E env \
+  AEGIS_PACKET_REPLAY_DIR="$EVIDENCE_DIR" \
+  AEGIS_STRESS_ITERATIONS=25 \
+  ./scripts/release-gates.sh evidence-only
+
+sudo sed -n '1,240p' "$EVIDENCE_DIR/resource-preflight.log"
+sudo sed -n '1,240p' "$EVIDENCE_DIR/stress-summary.log"
+sudo sed -n '1,240p' "$EVIDENCE_DIR/cleanup-state.log"
+
+ARCHIVE="${EVIDENCE_DIR}.tar.gz"
+sudo tar --numeric-owner -C "$(dirname "$EVIDENCE_DIR")" \
+  -czf "$ARCHIVE" "$(basename "$EVIDENCE_DIR")"
+sudo chown "$(id -u):$(id -g)" "$ARCHIVE"
+sha256sum "$ARCHIVE" "${EVIDENCE_DIR}.driver.log" \
+  "${EVIDENCE_DIR}.telemetry.log" "${EVIDENCE_DIR}.kernel.log"
+
+rm -f "$STATE_FILE" "${STATE_FILE}.telemetry-ready"
+```
+
+The run is not a PASS merely because Terminal 1 exits with zero. Accept it only
+when `evidence-only` passes, `stress-summary.log` records the exact commit and
+450 successful case runs, and `cleanup-state.log` proves that the lab
+interface, namespace, qdisc/filter state, programs, maps, and owned pins were
+removed. Preserve the telemetry and kernel logs even when the run fails.
+
 ## Packet Replay Artifacts
 
 The replay artifact directory must contain one `.log` per case:
@@ -152,6 +425,10 @@ The replay artifact directory must contain one `.log` per case:
 - `truncated_udp_blocked_ipv4_exact.log`
 - `truncated_tcp_blocked_ipv4_cidr.log`
 - `truncated_udp_blocked_ipv4_cidr.log`
+- `xdp_ipv4_pass_allowed.log`
+- `xdp_ipv4_drop_exact.log`
+- `xdp_ipv6_fragment_pass.log`
+- `xdp_ipv6_malformed_extension_drop.log`
 
 Each log must include:
 
@@ -178,12 +455,38 @@ capture_pcap: <path to generated receiver pcap>
 pass: true|false
 ```
 
-Missing logs, wrong case names, or `pass: false` fail the release gate.
+The validator also requires:
+
+- a full SHA matching the checked-out commit,
+- the canonical expected verdict for the named case,
+- active XDP and TC attachment state,
+- a parseable one-packet input PCAP,
+- capture packet count consistent with the observed pass/drop verdict,
+- a non-empty raw command transcript,
+- XDP/TC attach state in the transcript consistent with the structured fields,
+- consistent counter availability.
+
+Missing logs, malformed PCAPs, wrong case names, contradictory observations, or
+`pass: false` fail the release gate.
+
+## Policy Replacement
+
+Live hot reload is disabled for this release candidate. Entry-by-entry mutation
+of CONFIG or BLOCKLIST maps cannot guarantee that packet processing never sees
+a partial policy. Validate complete TOML and YAML files, then restart the
+service:
+
+```bash
+sudo systemctl restart aegis@eth0
+```
+
+Do not claim atomic or zero-downtime policy replacement for this release.
 
 ### Replay Scope Notes
 
 - `vlan_behavior` and `qinq_behavior` validate the **fail-closed DROP** policy for 802.1Q and 802.1ad tagged frames. Aegis does not parse VLAN payloads; these cases prove that tagged traffic is rejected.
-- `ipv6_pass_allowed`, `ipv6_drop_exact`, and `ipv6_drop_cidr` validate **exact IP and CIDR blocklist** enforcement only. Extension header edge cases (hop-by-hop, routing, fragment, destination options) are **not covered** by the current replay matrix and must not be claimed as tested.
+- `ipv6_pass_allowed`, `ipv6_drop_exact`, and `ipv6_drop_cidr` validate **exact IP and CIDR blocklist** enforcement.
+- `xdp_ipv6_fragment_pass` and `xdp_ipv6_malformed_extension_drop` cover two bounded XDP extension-header paths. They do not establish complete hop-by-hop, routing, fragment, and destination-options coverage.
 - `ipv4_ihl_options_behavior` and `ipv4_fragment_behavior` validate fail-closed DROP for packets with IP options and IP fragments respectively.
 
 ## Replay Driver
@@ -223,7 +526,7 @@ A release candidate requires:
 
 ### Historical v4.2.0 Claim
 
-Commit `0dadb3e` recorded a systemd smoke test, an 18-case privileged lab PASS,
+Tagged commit `0dadb3efb737f7a857548383c4d4eeab859dd732` recorded a systemd smoke test, an 18-case privileged lab PASS,
 a 25-iteration stress PASS, and archive SHA-256
 `1830aac91ef2caa96e5e17a99e06b964c63844b7a9f1b0d7830d29171b567cc8`.
 The raw archive is not present or linked as a retrievable release asset in this

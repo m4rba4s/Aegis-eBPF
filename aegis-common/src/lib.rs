@@ -262,7 +262,10 @@ pub const CFG_INTERFACE_MODE: u32 = 0; // 0 = L2/Ethernet, 1 = L3/raw IP
 pub const CFG_PORT_SCAN: u32 = 1; // Port scan detection toggle
 pub const CFG_RATE_LIMIT: u32 = 2; // Rate limiting toggle
 pub const CFG_THREAT_FEEDS: u32 = 3; // Threat feeds toggle
-pub const CFG_CONN_TRACK: u32 = 4; // Connection tracking toggle
+/// Connection tracking toggle. NOTE: as of v4.3.0-rc.1 this is a no-op at
+/// the BPF layer — no XDP/TC program reads it. Written by userspace for
+/// config-map completeness only. Conntrack is telemetry-only this release.
+pub const CFG_CONN_TRACK: u32 = 4; // Connection tracking toggle (no-op in BPF)
 pub const CFG_SCAN_DETECT: u32 = 5; // Scan detection toggle
 pub const CFG_VERBOSE: u32 = 6; // Verbose logging toggle
 pub const CFG_ENTROPY: u32 = 7; // Entropy analysis toggle

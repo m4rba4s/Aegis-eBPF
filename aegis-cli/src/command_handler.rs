@@ -267,7 +267,8 @@ pub fn handle_status_command() -> anyhow::Result<()> {
     println!("Manual Blocks:   {}", total.block_manual);
     println!("CIDR Blocks:     {}", total.block_cidr);
     println!("Port Scans:      {}", total.portscan_hits);
-    println!("Conntrack Hits:  {}", total.conntrack_hits);
+    let ct_entries = crate::metrics::read_conntrack_count();
+    println!("Conntrack Entries:  {}", ct_entries);
     println!(
         "Events (OK/Fail): {}/{}",
         total.events_ok, total.events_fail

@@ -132,6 +132,12 @@ enum Commands {
         #[clap(default_value = ".")]
         dir: String,
     },
+    /// Clean this interface's instance-scoped pinned maps
+    CleanupPins {
+        /// Recover known Aegis pins when the runtime ownership marker is missing
+        #[clap(long)]
+        force_orphaned: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -311,6 +317,18 @@ async fn main() -> Result<(), anyhow::Error> {
         std::process::exit(1);
     }
 
+    if let Commands::CleanupPins { force_orphaned } = &opt.command {
+        if *force_orphaned {
+            map_manager::cleanup_orphaned_instance_pin_dir(&opt.iface)?;
+        } else {
+            let pin_dir =
+                map_manager::instance_pin_dir(&map_manager::instance_id_for_interface(&opt.iface));
+            map_manager::cleanup_instance_pin_dir(&pin_dir, &opt.iface)?;
+        }
+        println!("Cleaned owned Aegis pins for interface {}", opt.iface);
+        return Ok(());
+    }
+
     // Banner shown conditionally (not for TUI, Completions, or Manpage)
     if !matches!(
         opt.command,
@@ -375,7 +393,14 @@ async fn main() -> Result<(), anyhow::Error> {
         map_manager::INSTANCE_ENV,
         map_manager::instance_id_for_interface(&opt.iface),
     );
-    let pin_root = map_manager::ensure_instance_pin_dir(&opt.iface)?;
+    let pin_root = if matches!(
+        opt.command,
+        Commands::Load | Commands::Tui | Commands::Daemon
+    ) {
+        map_manager::ensure_instance_pin_dir(&opt.iface)?
+    } else {
+        map_manager::instance_pin_dir(&map_manager::instance_id_for_interface(&opt.iface))
+    };
 
     // Handle Allow command early (no eBPF needed)
     if let Commands::Allow { action } = &opt.command {
@@ -738,7 +763,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     }
                 }
 
-                // Spawn config hot-reload watcher
+                // Report the release policy-replacement behavior. Live reload is disabled.
                 hot_reload::spawn_config_watcher("/etc/aegis/config.toml", "/etc/aegis/aegis.yaml");
 
                 // Spawn historical stats collector
@@ -856,6 +881,9 @@ async fn main() -> Result<(), anyhow::Error> {
             unreachable!("Completions command should be handled before eBPF loading");
         }
         Commands::Status | Commands::Allow { .. } => {}
+        Commands::CleanupPins { .. } => {
+            unreachable!("CleanupPins command should be handled before eBPF loading");
+        }
     }
 
     Ok(())

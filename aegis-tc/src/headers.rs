@@ -64,3 +64,32 @@ impl Ipv6ExtHdr {
         ((self.hdr_ext_len as usize) + 1) * 8
     }
 }
+
+
+/// IPv6 Fragment Header (8 bytes). Used by try_tc_ipv6 for the P0-1 fail-closed
+/// fragment drop. Must stay layout-identical to aegis-ebpf/src/headers.rs.
+#[repr(C)]
+#[allow(dead_code)]
+pub struct Ipv6FragHdr {
+    pub next_header: u8,
+    pub reserved: u8,
+    /// Fragment offset (13 bits) + Reserved (2 bits) + M flag (1 bit)
+    pub frag_off_m: u16,
+    pub identification: u32,
+}
+
+#[allow(dead_code)]
+impl Ipv6FragHdr {
+    pub const LEN: usize = 8;
+}
+
+/// IPv6 Routing Header. Used by try_tc_ipv6 for the P0-2 RH0 (RFC 5095) drop.
+/// Must stay layout-identical to aegis-ebpf/src/headers.rs.
+#[repr(C)]
+#[allow(dead_code)]
+pub struct Ipv6RoutingHdr {
+    pub next_header: u8,
+    pub hdr_ext_len: u8,
+    pub routing_type: u8,
+    pub segments_left: u8,
+}

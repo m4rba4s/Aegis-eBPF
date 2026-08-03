@@ -41,6 +41,9 @@ ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 ReadWritePaths=/var/log/aegis /var/lib/aegis /sys/fs/bpf
+RuntimeDirectory=aegis/instances/%i
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
 
 # Process isolation
 NoNewPrivileges=true

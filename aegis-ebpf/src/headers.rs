@@ -64,8 +64,9 @@ impl Ipv6Hdr {
 }
 
 /// Generic IPv6 Extension Header
-/// Most extension headers start with next_header + hdr_ext_len
-/// NOTE: Currently unused - extension header parsing disabled due to verifier limits
+/// Most extension headers start with next_header + hdr_ext_len.
+/// Used by the IPv6 ext-header walk in main.rs (try_xdp_ipv6) for HBH /
+/// Routing / Dest options and AH length accounting.
 #[repr(C)]
 #[allow(dead_code)]
 pub struct Ipv6ExtHdr {
@@ -85,8 +86,10 @@ impl Ipv6ExtHdr {
     }
 }
 
-/// IPv6 Fragment Header (8 bytes)
-/// NOTE: Currently unused - extension header parsing disabled due to verifier limits
+/// IPv6 Fragment Header (8 bytes).
+/// Read by the XDP and TC datapaths in the NEXTHDR_FRAGMENT arm to perform the
+/// P0-1 fail-closed fragment drop (v4.3.0-rc.1 hardening). See main.rs and
+/// aegis-tc/src/main.rs.
 #[repr(C)]
 #[allow(dead_code)]
 pub struct Ipv6FragHdr {
@@ -114,8 +117,10 @@ impl Ipv6FragHdr {
     }
 }
 
-/// IPv6 Routing Header
-/// NOTE: Currently unused - extension header parsing disabled due to verifier limits
+/// IPv6 Routing Header.
+/// Read by the XDP and TC datapaths in the NEXTHADR_ROUTING arm to detect and
+/// DROP Routing Header Type 0 (RH0, RFC 5095) as part of the v4.3.0-rc.1 P0-2
+/// hardening. RH2 (Mobile IPv6) and SRH are walked past generically.
 #[repr(C)]
 #[allow(dead_code)]
 pub struct Ipv6RoutingHdr {

@@ -31,6 +31,7 @@ pub struct StatsSample {
     pub blocks_cidr: u64,
     pub portscan_hits: u64,
     pub conntrack_hits: u64,
+    pub conntrack_entries: u64,
 }
 
 struct StatsHistory {
@@ -100,31 +101,7 @@ impl StatsHistory {
 // ── Public API ──────────────────────────────────────────────────────
 
 /// Record a stats sample (called by metrics server on each scrape)
-pub fn record_sample(
-    pkts_seen: u64,
-    pkts_pass: u64,
-    pkts_drop: u64,
-    blocks_manual: u64,
-    blocks_cidr: u64,
-    portscan_hits: u64,
-    conntrack_hits: u64,
-) {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let sample = StatsSample {
-        timestamp: ts,
-        pkts_seen,
-        pkts_pass,
-        pkts_drop,
-        blocks_manual,
-        blocks_cidr,
-        portscan_hits,
-        conntrack_hits,
-    };
-
+pub fn record_sample(sample: StatsSample) {
     if let Ok(mut history) = HISTORY.write() {
         history.push(sample);
     }
@@ -161,15 +138,15 @@ pub fn spawn_collector() {
             interval.tick().await;
 
             // Read current stats from BPF STATS map
-            if let Some((seen, pass, drop, manual, cidr, scan, ct)) = read_bpf_stats() {
-                record_sample(seen, pass, drop, manual, cidr, scan, ct);
+            if let Some(sample) = read_bpf_snapshot() {
+                record_sample(sample);
             }
         }
     });
 }
 
-/// Read aggregated stats from BPF PerCpuArray
-fn read_bpf_stats() -> Option<(u64, u64, u64, u64, u64, u64, u64)> {
+/// Read aggregated stats from BPF PerCpuArray and build a StatsSample
+fn read_bpf_snapshot() -> Option<StatsSample> {
     use aegis_common::Stats;
     use aya::maps::PerCpuArray;
 
@@ -197,5 +174,20 @@ fn read_bpf_stats() -> Option<(u64, u64, u64, u64, u64, u64, u64)> {
         ct += cpu_stats.conntrack_hits;
     }
 
-    Some((seen, pass, drop, manual, cidr, scan, ct))
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    Some(StatsSample {
+        timestamp: ts,
+        pkts_seen: seen,
+        pkts_pass: pass,
+        pkts_drop: drop,
+        blocks_manual: manual,
+        blocks_cidr: cidr,
+        portscan_hits: scan,
+        conntrack_hits: ct,
+        conntrack_entries: crate::metrics::read_conntrack_count(),
+    })
 }

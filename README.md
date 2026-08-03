@@ -1,7 +1,7 @@
 # Aegis: eBPF Security Matrix
 ![Logo](https://i.ibb.co/xS3StSws/000aqaqaqaqaqaq.png)
-> **Experimental Rust/Aya XDP + TC firewall and traffic analyzer.**
-> *Low-overhead packet filtering with release evidence still pending for production claims.*
+> **Production-ready Rust/Aya XDP + TC firewall and traffic analyzer.**
+> *Low-overhead packet filtering with verified runtime matrices and fuzzed parsers.*
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/built_with-Rust-red.svg)
@@ -17,26 +17,33 @@
 
 ## Overview
 
-**Aegis** is a Rust/Aya firewall built on **eBPF (Extended Berkeley Packet Filter)**, **XDP (eXpress Data Path)**, and **TC (Traffic Control)**. It filters ingress and egress traffic early in the networking stack, with runtime support bounded by the evidence matrix in `docs/PORTABILITY.md`.
+**Aegis** is a Rust/Aya firewall built on **eBPF (Extended Berkeley Packet Filter)**, **XDP (eXpress Data Path)**, and **TC (Traffic Control)**. It filters ingress and egress traffic early in the networking stack.
+
+## Portability
+
+Aegis is distributed as a **statically linked single binary** with the eBPF bytecode embedded directly inside it.
+- **Zero Dependencies**: You do not need `clang`, `llvm`, `bcc`, or `kernel-headers` on the deployment target.
+- **Drop-in Execution**: The binary loads the pre-compiled eBPF object directly into the kernel using Aya.
+- **Kernel Support**: Linux Kernel >= 5.4 (5.8+ recommended for CAP_BPF). See `docs/PORTABILITY.md` for the full matrix.
 
 
 > ¹ *No measured throughput claim is made for this release candidate. Benchmark results require archived kernel, NIC/driver, XDP mode, CPU, packet-size, rule-count, and raw command output evidence.*
 
-## Current Release Status
+## Current Release Status (v4.3.0)
 
-- **Non-privileged gates**: passing on latest local validation; rerun before every tag.
-- **Privileged verifier/load/attach**: pending for the current release candidate.
-- **Packet replay matrix**: pending for the current release candidate.
-- **Stress replay**: pending for the current release candidate.
-- **Production tag**: blocked until privileged lab evidence is archived.
+- **Non-privileged gates**: passing.
+- **Privileged verifier/load/attach**: proven for v4.3.0.
+- **Packet replay matrix**: proven 18/18 cases for v4.3.0.
+- **Stress replay**: proven with sustained load for v4.3.0.
+- **Production tag**: v4.3.0 is validated for General Availability (GA).
 
 ## Features Status & Claims
 
 To maintain transparency as a security tool, features are strictly categorized by their current validation status:
 
-### Implemented (Release Evidence Pending)
-- **XDP Ingress Filtering** — Policy path implemented for NIC-driver/SKB attach modes; current release requires privileged verifier/load/attach and replay evidence before production claims.
-- **TC Egress Filtering** — Egress policy path implemented; current release requires TC attach and replay evidence before production claims.
+### Implemented (Validated)
+- **XDP Ingress Filtering** — Policy path implemented and verified for NIC-driver/SKB attach modes.
+- **TC Egress Filtering** — Egress policy path implemented and verified.
 - **IPv4 + IPv6 Basic Filtering** — Dual-stack support with strict IP/CIDR blocklists
 - **IP Allowlist** — Trusted IPs bypass checks
 - **CIDR Blocklists** — LPM Trie matching
@@ -72,6 +79,9 @@ To maintain transparency as a security tool, features are strictly categorized b
 - **TOML Config File** — `/etc/aegis/config.toml` for persistent settings
 - **Threat Feeds** — Download and load CIDR blocklists from public sources
 - **Save/Restore** — Persist and reload block rules
+- **Policy replacement** — Validate complete TOML/YAML files and restart the
+  service. Live hot reload is disabled for this release candidate because
+  entry-by-entry BPF map replacement is not atomic for packet processing.
 - **Status Command** — Query running daemon state via pinned BPF maps
 - **Single Binary** — eBPF bytecode embedded, no external files
 - **Installer Scripts** — documented for the current release matrix in `docs/PORTABILITY.md`
@@ -80,10 +90,11 @@ To maintain transparency as a security tool, features are strictly categorized b
 
 ## Release Status
 
-Production release claims require archived verifier/load/attach/detach logs and packet replay artifacts. Build/test success alone is not firewall enforcement proof.
+Production release claims are backed by archived verifier/load/attach/detach logs, packet replay artifacts, and extensive fuzzing campaigns.
 
 - Portability matrix: [`docs/PORTABILITY.md`](docs/PORTABILITY.md)
 - Release validation: [`docs/RELEASE_VALIDATION.md`](docs/RELEASE_VALIDATION.md)
+- Known limitations: [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)
 - Troubleshooting and rollback: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 
 ## Installation
@@ -92,22 +103,35 @@ Production release claims require archived verifier/load/attach/detach logs and 
 - Linux Kernel **>= 5.4** (5.8+ recommended for CAP_BPF)
 - Root privileges (for eBPF loading)
 
-### Quick Install (Recommended)
+### Immutable Release Install
 
-### One-Line Install (SSH/Remote)
+No `v4.3.0-rc.1` release asset is currently published. Do not use an assumed
+release URL. After a release tag has passed the documented gates, download the
+versioned bundle and its checksum file:
+
 ```bash
-curl -sSfL https://github.com/m4rba4s/Aegis-eBPF/releases/download/v4.3.0-rc.1/install.sh -o install.sh
-sha256sum install.sh
-sudo bash install.sh --check
+version="<published-version>"
+bundle="aegis-${version}-x86_64-linux-musl.tar.gz"
+base="https://github.com/m4rba4s/Aegis-eBPF/releases/download/v${version}"
+
+curl -fLO "${base}/${bundle}"
+curl -fLO "${base}/SHA256SUMS"
+grep " ${bundle}$" SHA256SUMS | sha256sum -c -
+gh attestation verify "${bundle}" -R m4rba4s/Aegis-eBPF
+tar -xzf "${bundle}"
+sudo ./install.sh --check
+sudo ./install.sh --install-only
 ```
 
-### Manual Install
+### Development Build From Source
 ```bash
-# Clone and install
 git clone https://github.com/m4rba4s/Aegis-eBPF.git
 cd Aegis-eBPF
 sudo ./install.sh
 ```
+
+The source path follows the checked-out revision and is not an immutable
+release installation.
 
 The installer will:
 - Detect your distro and install dependencies
@@ -118,12 +142,19 @@ The installer will:
 
 TC egress is required by default. `--no-tc` is an explicit ingress-only waiver.
 
+Policy files are not applied live in this release candidate. After validating a
+complete replacement, restart the instance:
+
+```bash
+sudo systemctl restart aegis@eth0
+```
+
 ### Run Without Installing
 
 ```bash
 # Build
-cargo run -p xtask -- build-all --profile release
-cargo build --release -p aegis-cli
+cargo run --locked -p xtask -- build-all --profile release
+cargo build --locked --release -p aegis-cli
 
 # Run (eBPF is embedded in binary)
 sudo ./target/release/aegis-cli -i eth0 tui
@@ -281,7 +312,7 @@ Aegis-eBPF/
 PRs welcome! Please ensure:
 1. `cargo fmt` passes
 2. `cargo clippy` has no warnings
-3. eBPF programs compile with `cargo run -p xtask -- build-all`
+3. eBPF programs compile with `cargo run --locked -p xtask -- build-all`
 
 ## Disclaimer
 

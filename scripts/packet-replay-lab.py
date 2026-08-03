@@ -13,6 +13,7 @@ import errno
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -223,9 +224,9 @@ CASES: List[ReplayCase] = [
         },
     ),
     ReplayCase(
-        "xdp_ipv6_fragment_pass",
-        "ingress IPv6 first fragment; current policy allows kernel reassembly",
-        "pass",
+        "xdp_ipv6_fragment_drop",
+        "ingress IPv6 first fragment; policy mandates drop to prevent bypass",
+        "drop",
         {
             "direction": "ingress",
             "family": "ipv6",
@@ -349,7 +350,7 @@ def xdp_mode_from_state(state: str) -> str:
 
 def tc_attached_from_state(state: str) -> bool:
     lowered = state.lower()
-    return "clsact" in lowered or "egress" in lowered
+    return "clsact" in lowered and "name tc_egress" in lowered
 
 
 def write_pcap(path: Path, packet) -> None:
@@ -365,6 +366,10 @@ def write_command_output(
     sender_stderr: str,
     receiver_stdout: str,
     receiver_stderr: str,
+    xdp_state: str,
+    tc_state: str,
+    counter_before: str,
+    counter_after: str,
 ) -> Path:
     output_path = out_dir / f"{case.name}.command.log"
     output_path.write_text(
@@ -380,6 +385,14 @@ def write_command_output(
                 receiver_stdout.strip() or "",
                 "[receiver.stderr]",
                 receiver_stderr.strip() or "",
+                "[xdp.state]",
+                xdp_state.strip() or "",
+                "[tc.state]",
+                tc_state.strip() or "",
+                "[counter.before]",
+                counter_before.strip() or "",
+                "[counter.after]",
+                counter_after.strip() or "",
                 "",
             ]
         )
@@ -397,6 +410,70 @@ def evidence_fields(log_path: Path) -> Dict[str, str]:
     return fields
 
 
+def transcript_section(transcript: str, name: str) -> str:
+    match = re.search(
+        rf"^\[{re.escape(name)}\]\n(.*?)(?=^\[|\Z)",
+        transcript,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def resolve_artifact_path(log_path: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else log_path.parent / path
+
+
+def pcap_packet_count(path: Path) -> int:
+    """Parse a classic PCAP and return its packet-record count."""
+
+    data = path.read_bytes()
+    if len(data) < 24:
+        raise ValueError(f"{path}: truncated PCAP global header")
+
+    magic = data[:4]
+    if magic in {b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"}:
+        endian = "<"
+    elif magic in {b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"}:
+        endian = ">"
+    else:
+        raise ValueError(f"{path}: unsupported PCAP magic {magic.hex()}")
+
+    _, major, minor, _, _, snaplen, _ = struct.unpack(f"{endian}IHHIIII", data[:24])
+    if (major, minor) != (2, 4):
+        raise ValueError(f"{path}: unsupported PCAP version {major}.{minor}")
+    if snaplen == 0:
+        raise ValueError(f"{path}: invalid zero PCAP snaplen")
+
+    offset = 24
+    packets = 0
+    while offset < len(data):
+        if len(data) - offset < 16:
+            raise ValueError(f"{path}: truncated PCAP packet header")
+        _, _, included_len, original_len = struct.unpack(
+            f"{endian}IIII", data[offset : offset + 16]
+        )
+        if included_len > snaplen or included_len > original_len:
+            raise ValueError(
+                f"{path}: invalid packet lengths incl={included_len} "
+                f"orig={original_len} snaplen={snaplen}"
+            )
+        offset += 16
+        packet_end = offset + included_len
+        if packet_end > len(data):
+            raise ValueError(f"{path}: truncated PCAP packet data")
+        offset = packet_end
+        packets += 1
+    return packets
+
+
+def canonical_case(name: str) -> ReplayCase:
+    for case in CASES:
+        if case.name == name:
+            return case
+    raise SystemExit(f"unknown replay evidence case: {name}")
+
+
 def validate_log(
     log_path: Path,
     expected_case: str,
@@ -405,8 +482,8 @@ def validate_log(
     """Reject partial or cross-commit replay evidence.
 
     The validator is intentionally strict: it requires the full release
-    metadata, a matching commit SHA, a verdict match, and concrete artifact
-    paths for the generated input/capture pcaps and raw command transcript.
+    metadata, a matching full commit SHA, valid attach state, parseable PCAP
+    artifacts, and packet observations consistent with the claimed verdict.
     """
 
     required = {
@@ -439,9 +516,24 @@ def validate_log(
         raise SystemExit(
             f"{log_path}: case mismatch: expected {expected_case}, got {fields['case']}"
         )
+    if not re.fullmatch(r"[0-9a-f]{40}", fields["commit"]):
+        raise SystemExit(f"{log_path}: commit must be a full lowercase Git SHA")
     if fields["commit"] != expected_commit:
         raise SystemExit(
             f"{log_path}: commit mismatch: expected {expected_commit}, got {fields['commit']}"
+        )
+    case = canonical_case(expected_case)
+    if fields["release_version"] in {"", "unknown"}:
+        raise SystemExit(f"{log_path}: release_version must identify the candidate")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", fields["timestamp"]):
+        raise SystemExit(f"{log_path}: timestamp must be UTC ISO-8601")
+    for key in ("distribution", "kernel", "architecture", "interface", "packet", "command"):
+        if fields[key] in {"", "unknown", "unavailable"}:
+            raise SystemExit(f"{log_path}: {key} must be concrete")
+    if fields["expected_verdict"] != case.expected:
+        raise SystemExit(
+            f"{log_path}: expected verdict does not match canonical case "
+            f"({fields['expected_verdict']} != {case.expected})"
         )
     if fields["expected_verdict"] != fields["observed_verdict"]:
         raise SystemExit(
@@ -450,18 +542,73 @@ def validate_log(
         )
     if fields["pass"].lower() != "true":
         raise SystemExit(f"{log_path}: pass must be true for release evidence")
-    if fields["xdp_mode"] not in {"not_attached", "attached", "skb", "driver"}:
+    if fields["xdp_mode"] not in {"attached", "skb", "driver"}:
         raise SystemExit(f"{log_path}: invalid xdp_mode {fields['xdp_mode']}")
-    if fields["tc_attached"].lower() not in {"true", "false"}:
-        raise SystemExit(f"{log_path}: invalid tc_attached {fields['tc_attached']}")
-    if fields["counter_before"] != "unavailable" and fields["counter_before"] == fields["counter_after"]:
-        raise SystemExit(f"{log_path}: counter evidence did not change")
+    if fields["tc_attached"].lower() != "true":
+        raise SystemExit(f"{log_path}: TC must be attached for the release replay matrix")
+
+    before_unavailable = fields["counter_before"] == "unavailable"
+    after_unavailable = fields["counter_after"] == "unavailable"
+    if before_unavailable != after_unavailable:
+        raise SystemExit(f"{log_path}: counter availability is inconsistent")
+    direction = str(case.spec.get("direction", "egress"))
+    if (
+        direction == "egress"
+        and not before_unavailable
+        and fields["counter_before"] == fields["counter_after"]
+    ):
+        raise SystemExit(f"{log_path}: egress counter evidence did not change")
+
+    artifacts = {}
     for key in ("input_pcap", "capture_pcap", "command_output"):
         path_text = fields.get(key, "")
         if not path_text:
             raise SystemExit(f"{log_path}: missing {key}")
-        if not Path(path_text).exists():
-            raise SystemExit(f"{log_path}: {key} does not exist: {path_text}")
+        path = resolve_artifact_path(log_path, path_text)
+        if not path.is_file():
+            raise SystemExit(f"{log_path}: {key} does not exist: {path}")
+        if path.stat().st_size == 0:
+            raise SystemExit(f"{log_path}: {key} is empty: {path}")
+        artifacts[key] = path
+
+    transcript = artifacts["command_output"].read_text(
+        encoding="utf-8", errors="replace"
+    ).strip()
+    if not transcript:
+        raise SystemExit(f"{log_path}: command_output has no transcript")
+    if f"command: {fields['command']}" not in transcript:
+        raise SystemExit(f"{log_path}: command_output does not record the claimed command")
+
+    xdp_state = transcript_section(transcript, "xdp.state")
+    tc_state = transcript_section(transcript, "tc.state")
+    if not xdp_state or not tc_state:
+        raise SystemExit(f"{log_path}: command_output is missing attach-state sections")
+    transcript_xdp_mode = xdp_mode_from_state(xdp_state)
+    if transcript_xdp_mode != fields["xdp_mode"]:
+        raise SystemExit(
+            f"{log_path}: xdp_mode contradicts command_output "
+            f"({fields['xdp_mode']} != {transcript_xdp_mode})"
+        )
+    if fields["interface"] not in xdp_state:
+        raise SystemExit(f"{log_path}: XDP state does not identify the claimed interface")
+    if not tc_attached_from_state(tc_state):
+        raise SystemExit(f"{log_path}: TC attach claim contradicts command_output")
+
+    try:
+        input_packets = pcap_packet_count(artifacts["input_pcap"])
+        capture_packets = pcap_packet_count(artifacts["capture_pcap"])
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if input_packets != 1:
+        raise SystemExit(
+            f"{log_path}: input PCAP must contain exactly one packet, got {input_packets}"
+        )
+    if fields["observed_verdict"] == "pass" and capture_packets < 1:
+        raise SystemExit(f"{log_path}: pass verdict contradicts empty capture PCAP")
+    if fields["observed_verdict"] == "drop" and capture_packets != 0:
+        raise SystemExit(
+            f"{log_path}: drop verdict contradicts capture PCAP with {capture_packets} packet(s)"
+        )
     return 0
 
 
@@ -470,10 +617,18 @@ def self_test_validator() -> int:
 
     metadata = runtime_metadata()
 
+    def write_test_pcap(path: Path, packet_count: int) -> None:
+        body = bytearray(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
+        packet = b"\x00" * 14
+        for _ in range(packet_count):
+            body.extend(struct.pack("<IIII", 0, 0, len(packet), len(packet)))
+            body.extend(packet)
+        path.write_bytes(body)
+
     def write_log(
         out_dir: Path,
         *,
-        case: str = "validator_case",
+        case: str = "ipv4_pass_allowed",
         commit: str = metadata.commit,
         expected: str = "pass",
         observed: str = "pass",
@@ -483,13 +638,41 @@ def self_test_validator() -> int:
         include_command_output: bool = True,
         counter_before: str = "before: 1",
         counter_after: str = "after: 2",
+        xdp_mode: str = "driver",
+        tc_attached: str = "true",
+        malformed_input_pcap: bool = False,
     ) -> Path:
         input_pcap = out_dir / f"{case}.input.pcap"
         capture_pcap = out_dir / f"{case}.capture.pcap"
         command_output = out_dir / f"{case}.command.log"
-        input_pcap.write_bytes(b"pcap")
-        capture_pcap.write_bytes(b"pcap")
-        command_output.write_text("command transcript\n", encoding="utf-8")
+        write_test_pcap(input_pcap, 1)
+        write_test_pcap(capture_pcap, 1 if observed == "pass" else 0)
+        if malformed_input_pcap:
+            input_pcap.write_bytes(b"not a pcap")
+        xdp_state = {
+            "driver": "2: aegis-host0: prog/xdp id 1 driver",
+            "skb": "2: aegis-host0: prog/xdp id 1 generic",
+            "attached": "2: aegis-host0: prog/xdp id 1",
+            "not_attached": "2: aegis-host0: state UP",
+        }[xdp_mode]
+        tc_state = (
+            "qdisc clsact ffff: dev aegis-host0\n1: sched_cls name tc_egress"
+            if tc_attached == "true"
+            else "qdisc noqueue 0: dev aegis-host0"
+        )
+        command_output.write_text(
+            "\n".join(
+                [
+                    "command: synthetic command",
+                    "[xdp.state]",
+                    xdp_state,
+                    "[tc.state]",
+                    tc_state,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         log_path = out_dir / f"{case}.log"
         lines = [
             f"case: {case}",
@@ -500,8 +683,8 @@ def self_test_validator() -> int:
             f"kernel: {metadata.kernel}",
             f"architecture: {metadata.architecture}",
             "interface: aegis-host0",
-            "xdp_mode: driver",
-            "tc_attached: true",
+            f"xdp_mode: {xdp_mode}",
+            f"tc_attached: {tc_attached}",
             "packet: synthetic validator case",
             f"expected_verdict: {expected}",
             f"observed_verdict: {observed}",
@@ -526,51 +709,83 @@ def self_test_validator() -> int:
     with tempfile.TemporaryDirectory(prefix="aegis-validator-selftest.") as tmp:
         out_dir = Path(tmp)
         good = write_log(out_dir)
-        assert validate_log(good, "validator_case", metadata.commit) == 0
+        assert validate_log(good, "ipv4_pass_allowed", metadata.commit) == 0
 
-        missing = write_log(out_dir, case="missing_field")
+        missing = write_log(out_dir)
         missing.write_text(
             missing.read_text(encoding="utf-8").replace("capture_pcap:", "capture_pcap_missing:"),
             encoding="utf-8",
         )
         try:
-            validate_log(missing, "missing_field", metadata.commit)
+            validate_log(missing, "ipv4_pass_allowed", metadata.commit)
             raise AssertionError("missing field should fail")
         except SystemExit:
             pass
 
-        wrong_commit = write_log(out_dir, case="wrong_commit", commit="deadbeef")
+        wrong_commit = write_log(
+            out_dir, commit="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        )
         try:
-            validate_log(wrong_commit, "wrong_commit", metadata.commit)
+            validate_log(wrong_commit, "ipv4_pass_allowed", metadata.commit)
             raise AssertionError("wrong commit should fail")
         except SystemExit:
             pass
 
-        mismatch = write_log(out_dir, case="mismatch", expected="drop", observed="pass")
+        mismatch = write_log(out_dir, expected="drop", observed="pass")
         try:
-            validate_log(mismatch, "mismatch", metadata.commit)
+            validate_log(mismatch, "ipv4_pass_allowed", metadata.commit)
             raise AssertionError("verdict mismatch should fail")
         except SystemExit:
             pass
 
-        missing_pcap = write_log(out_dir, case="missing_pcap", include_capture_pcap=False)
+        missing_pcap = write_log(out_dir, include_capture_pcap=False)
         try:
-            validate_log(missing_pcap, "missing_pcap", metadata.commit)
+            validate_log(missing_pcap, "ipv4_pass_allowed", metadata.commit)
             raise AssertionError("missing capture pcap should fail")
         except SystemExit:
             pass
 
         stale_counters = write_log(
             out_dir,
-            case="stale_counters",
             counter_before="same: 1",
             counter_after="same: 1",
         )
         try:
-            validate_log(stale_counters, "stale_counters", metadata.commit)
+            validate_log(stale_counters, "ipv4_pass_allowed", metadata.commit)
             raise AssertionError("stale counters should fail")
         except SystemExit:
             pass
+
+        no_attach = write_log(out_dir, xdp_mode="not_attached", tc_attached="false")
+        try:
+            validate_log(no_attach, "ipv4_pass_allowed", metadata.commit)
+            raise AssertionError("missing attach state should fail")
+        except SystemExit:
+            pass
+
+        malformed_pcap = write_log(out_dir, malformed_input_pcap=True)
+        try:
+            validate_log(malformed_pcap, "ipv4_pass_allowed", metadata.commit)
+            raise AssertionError("malformed PCAP should fail")
+        except SystemExit:
+            pass
+
+        false_pass = write_log(out_dir, passed="false")
+        try:
+            validate_log(false_pass, "ipv4_pass_allowed", metadata.commit)
+            raise AssertionError("pass:false should fail")
+        except SystemExit:
+            pass
+
+        drop_capture = write_log(
+            out_dir,
+            case="ipv4_drop_exact",
+            expected="drop",
+            observed="drop",
+            counter_before="unavailable",
+            counter_after="unavailable",
+        )
+        assert validate_log(drop_capture, "ipv4_drop_exact", metadata.commit) == 0
 
     print("validator self-test passed")
     return 0
@@ -765,6 +980,7 @@ def write_stress_summary(
     failures: List[str],
     duration_seconds: float,
     args: argparse.Namespace,
+    metadata: RuntimeMetadata,
 ) -> None:
     command = (
         "python3 scripts/packet-replay-lab.py "
@@ -779,6 +995,12 @@ def write_stress_summary(
         "\n".join(
             [
                 "case: stress_replay_matrix",
+                f"commit: {metadata.commit}",
+                f"release_version: {metadata.release_version}",
+                f"timestamp: {metadata.timestamp}",
+                f"distribution: {metadata.distribution}",
+                f"kernel: {metadata.kernel}",
+                f"architecture: {metadata.architecture}",
                 f"packet: bounded repeated replay of {len(CASES)} required release cases",
                 "expected_verdict: every replay case matches its expected verdict",
                 f"observed_verdict: {'pass' if passed else 'fail'}",
@@ -908,7 +1130,9 @@ def run_case(
 
         counters_before = run_text(["tc", "-s", "filter", "show", "dev", args.host_if, "egress"])
         xdp_state = run_text(["ip", "-details", "link", "show", "dev", args.host_if])
-        tc_state = run_text(["tc", "qdisc", "show", "dev", args.host_if])
+        tc_qdisc_state = run_text(["tc", "qdisc", "show", "dev", args.host_if])
+        tc_program_state = run_text(["bpftool", "prog", "show"])
+        tc_state = "\n".join([tc_qdisc_state, tc_program_state])
         xdp_mode = xdp_mode_from_state(xdp_state)
         tc_attached = tc_attached_from_state(tc_state)
 
@@ -982,6 +1206,10 @@ def run_case(
             send_error,
             stdout,
             stderr,
+            xdp_state,
+            tc_state,
+            counters_before,
+            counters_after,
         )
         write_log(
             out_dir,
@@ -1038,7 +1266,14 @@ def run_stress(args: argparse.Namespace, host_mac: str, peer_mac: str) -> bool:
                 )
 
     duration = time.monotonic() - start
-    write_stress_summary(Path(args.out_dir), args.stress_iterations, failures, duration, args)
+    write_stress_summary(
+        Path(args.out_dir),
+        args.stress_iterations,
+        failures,
+        duration,
+        args,
+        metadata,
+    )
     return not failures
 
 
