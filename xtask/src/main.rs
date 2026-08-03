@@ -170,10 +170,38 @@ fn build_bpf_crate(
         args.push("--release".to_string());
     }
 
+    // Assemble RUSTFLAGS: always include -Cdebuginfo=2 for BTF generation.
+    // bpf-linker converts DWARF → BTF; without it xdpdump/bpftool fail.
+    // We use CARGO_ENCODED_RUSTFLAGS (0x1f-separated) to avoid conflicts
+    // with any outer RUSTFLAGS the caller may have set.
+    // NOTE: CARGO_ENCODED_RUSTFLAGS overrides .cargo/config.toml [target.*.rustflags],
+    // so we must include -Clink-arg=--btf here as well.
+    let mut rustflags = vec![
+        "-Cdebuginfo=2".to_string(),
+        "-Clink-arg=--btf".to_string(),
+    ];
+
+    // Preserve any existing CARGO_ENCODED_RUSTFLAGS from the environment
+    if let Ok(existing) = env::var("CARGO_ENCODED_RUSTFLAGS") {
+        for flag in existing.split('\x1f') {
+            let flag = flag.trim();
+            if !flag.is_empty()
+                && !flag.starts_with("-Cdebuginfo")
+                && flag != "-Clink-arg=--btf"
+            {
+                rustflags.push(flag.to_string());
+            }
+        }
+    }
+
     let status = Command::new("cargo")
         .current_dir(crate_dir)
         .args(&args)
+        .env("CARGO_ENCODED_RUSTFLAGS", rustflags.join("\x1f"))
+        // Clear RUSTFLAGS to prevent interference (CARGO_ENCODED_RUSTFLAGS takes precedence)
+        .env_remove("RUSTFLAGS")
         .status()?;
+
 
     if !status.success() {
         anyhow::bail!("❌ Failed to build {}", name);

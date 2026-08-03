@@ -11,6 +11,7 @@ mod parsing;
 
 use aya_ebpf::{
     bindings::xdp_action,
+    helpers::bpf_printk,
     macros::{map, xdp},
     maps::{
         lpm_trie::{Key, LpmTrie},
@@ -1058,6 +1059,11 @@ fn log_ipv6_drop(
     packet_len: u16,
     ext_hdr_count: u8,
 ) -> Result<u32, ()> {
+    // bpf_printk for trace_pipe visibility on IPv6 drops
+    unsafe {
+        bpf_printk!(b"AEGIS6 DROP rsn=%d", reason as u32);
+    }
+
     let log = PacketLogIpv6 {
         src_ip: *src_ip,
         dst_ip: *dst_ip,
@@ -1123,6 +1129,7 @@ fn log_packet(
     }
 }
 
+#[inline(always)]
 fn log_and_return(
     _ctx: &XdpContext,
     src_ip: u32,
@@ -1137,6 +1144,13 @@ fn log_and_return(
     packet_len: u16,
 ) -> Result<u32, ()> {
     let timestamp = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+    // bpf_printk for trace_pipe visibility on DROP events
+    if action == ACTION_DROP {
+        unsafe {
+            bpf_printk!(b"AEGIS DROP ip=%x rsn=%d", src_ip, reason as u32);
+        }
+    }
 
     let log_entry = PacketLog {
         src_ip,

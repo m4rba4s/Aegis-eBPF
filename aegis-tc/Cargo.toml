@@ -12,3 +12,17 @@ aegis-common = { path = "../aegis-common", default-features = false }
 [[bin]]
 name = "aegis-tc"
 path = "src/main.rs"
+
+# BTF requires DWARF debug info — bpf-linker converts it.
+# This crate is excluded from workspace, so it needs its own profile.
+[profile.release]
+debug = 2               # DWARF → BTF via bpf-linker
+opt-level = "z"         # Minimize code size for eBPF verifier
+codegen-units = 1       # Deterministic object
+overflow-checks = false # No panic infra in no_std eBPF
+
+[profile.dev]
+debug = 2
+opt-level = 1           # Some optimization even in dev (verifier is strict)
+overflow-checks = false
+
