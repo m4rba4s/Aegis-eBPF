@@ -509,6 +509,9 @@ pub const MAP_CAP_CONNTRACK: u32 = 65536;
 pub const MAP_CAP_RATE_LIMIT: u32 = 65536;
 /// Port scan detection (LRU, attacker-controlled)
 pub const MAP_CAP_PORT_SCAN: u32 = 65536;
+
+/// Rate limiting IPv6 (LRU, attacker-controlled)
+pub const MAP_CAP_RATE_LIMIT_IPV6: u32 = 65536;
 /// Config toggles
 pub const MAP_CAP_CONFIG: u32 = 16;
 /// Stats per-CPU array

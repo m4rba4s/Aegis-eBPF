@@ -44,11 +44,11 @@ pub fn freeze_map(path: &str) {
         )
     };
 
+    // AEGIS-SEC-007: close fd unconditionally — was leaking on freeze failure
+    unsafe { libc::close(fd as i32); }
+
     if ret == 0 {
         tracing::info!("🔒 eBPF Map {} frozen (read-only from userspace)", path);
-    }
-    unsafe {
-        libc::close(fd as i32);
     }
 }
 
@@ -59,11 +59,11 @@ pub fn drop_privileges() -> anyhow::Result<()> {
     let uid = std::env::var("SUDO_UID")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(65534);
+        .ok_or_else(|| anyhow::anyhow!("AEGIS-SEC-009: SUDO_UID not found. Must run via sudo, not direct root, to properly drop privileges."))?;
     let gid = std::env::var("SUDO_GID")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(65534);
+        .ok_or_else(|| anyhow::anyhow!("AEGIS-SEC-009: SUDO_GID not found. Must run via sudo, not direct root."))?;
 
     // NOTE: Do NOT chown BPF maps to non-root — writable BPF maps allow
     // unprivileged modification of firewall state. Maps remain root-owned.

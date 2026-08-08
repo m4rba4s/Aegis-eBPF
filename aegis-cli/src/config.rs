@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr};
 
 /// Maximum config file size (1 MB) to prevent YAML bomb attacks
@@ -69,9 +68,15 @@ impl Config {
             );
         }
 
-        let reader = BufReader::new(file);
+        use std::io::Read;
+        let mut content = String::new();
+        let mut file_ref = &file;
+        file_ref.read_to_string(&mut content).context("Failed to read config file")?;
+        
+        // AEGIS-SEC-008: Use from_str instead of from_reader to enforce
+        // strict memory bounds and prevent streaming YAML bomb expansion.
         let config: Config =
-            serde_yaml::from_reader(reader).context("Failed to parse YAML config")?;
+            serde_yaml::from_str(&content).context("Failed to parse YAML config")?;
         Ok(config)
     }
 

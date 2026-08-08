@@ -127,7 +127,7 @@ fn is_module_enabled(key: u32) -> bool {
 pub fn tc_egress(ctx: TcContext) -> i32 {
     match try_tc_egress(ctx) {
         Ok(ret) => ret,
-        Err(_) => TC_ACT_OK, // Fail-open on parse errors (safety)
+        Err(_) => TC_ACT_SHOT, // AEGIS-SEC-001: Fail-closed on parse errors (security)
     }
 }
 
@@ -489,7 +489,10 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
         let ack = tcp_flags & 0x10 != 0;
 
         if syn && !ack {
-            let port_index = (dst_port & 0xFF) as usize;
+            // AEGIS-SEC-004: Hash the full 16-bit port into the 256-bit bitmap space.
+            // Previous code used (dst_port & 0xFF), aliasing ports N and N+256.
+            // Knuth multiplicative hash distributes all 65536 ports across 256 bits.
+            let port_index = (((dst_port as u32).wrapping_mul(0x9E37_79B9)) >> 24) as usize;
             let bitmap_index = port_index / 32;
             let bit_position = port_index % 32;
 

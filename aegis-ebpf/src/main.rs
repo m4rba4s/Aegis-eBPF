@@ -93,6 +93,7 @@ use aegis_common::{
     MAP_CAP_DPI_RING_BYTES,
     MAP_CAP_EVENT_RING_BYTES,
     MAP_CAP_RATE_LIMIT,
+    MAP_CAP_RATE_LIMIT_IPV6,
     MAP_CAP_CONFIG,
     MAP_CAP_STATS,
 };
@@ -158,6 +159,14 @@ static CIDR_BLOCKLIST_IPV6: LpmTrie<LpmKeyIpv6, CidrBlockEntry> =
 /// IPv6 event log (separate due to larger struct size)
 #[map]
 static EVENTS_IPV6: RingBuf = RingBuf::with_byte_size(MAP_CAP_EVENT_RING_BYTES, 0);
+
+/// IPv6 rate limiting map: IPv6 addr -> RateLimitState (LRU)
+#[map]
+static RATE_LIMIT_IPV6: LruHashMap<[u8; 16], RateLimitState> = LruHashMap::with_max_entries(MAP_CAP_RATE_LIMIT_IPV6, 0);
+
+/// Global IPv6 SYN flood counter: [0]=syn_count, [1]=window_start_ns (PerCpuArray)
+#[map]
+static GLOBAL_SYN_CTR_IPV6: PerCpuArray<u64> = PerCpuArray::with_max_entries(2, 0);
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -345,7 +354,8 @@ fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // --- IPv4 PROCESSING ---
+    // AEGIS-SEC-005: Fixed L4 offset assumes IHL=5 (no IP options).
+    // Safe: packets with IHL!=5 are dropped at line 461 before any L4 read.
     let l4_base_offset = ip_offset + 20;
 
     let ipv4_hdr: *const Ipv4Hdr = ptr_at(&ctx, ip_offset)?;
@@ -1037,6 +1047,99 @@ fn try_xdp_ipv6(ctx: &XdpContext, ip_offset: usize) -> Result<u32, ()> {
                 payload_len,
                 ext_hdr_count,
             );
+        }
+    }
+
+    // --- IPv6 SYN FLOOD RATE LIMITING ---
+    if is_module_enabled(CFG_RATE_LIMIT) && next_header == NEXTHDR_TCP {
+        let syn = tcp_flags & 0x02 != 0;
+        let ack = tcp_flags & 0x10 != 0;
+
+        if syn && !ack {
+            let now_ns = unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() };
+
+            // === Global IPv6 SYN rate detection ===
+            let idx_count: u32 = 0;
+            let idx_ts: u32 = 1;
+            let mut global_drop = false;
+
+            if let Some(syn_count) = GLOBAL_SYN_CTR_IPV6.get_ptr_mut(idx_count) {
+                if let Some(window_ts) = GLOBAL_SYN_CTR_IPV6.get_ptr_mut(idx_ts) {
+                    let count = unsafe { &mut *syn_count };
+                    let ts = unsafe { &mut *window_ts };
+
+                    let elapsed_ns = now_ns.saturating_sub(*ts);
+
+                    if elapsed_ns >= 1_000_000_000 {
+                        *count = 1;
+                        *ts = now_ns;
+                    } else {
+                        *count = count.saturating_add(1);
+                        if *count > GLOBAL_SYN_RATE_THRESHOLD as u64 {
+                            global_drop = true;
+                        }
+                    }
+                }
+            }
+
+            if global_drop {
+                stats_inc_ipv6_drop();
+                return log_ipv6_drop(
+                    ctx,
+                    &src_addr,
+                    &dst_addr,
+                    src_port,
+                    dst_port,
+                    next_header,
+                    tcp_flags,
+                    REASON_RATELIMIT,
+                    THREAT_FLOOD_SYN,
+                    payload_len,
+                    ext_hdr_count,
+                );
+            }
+
+            // === Per-IP IPv6 SYN rate limiting ===
+            if let Some(state) = RATE_LIMIT_IPV6.get_ptr_mut(&src_addr) {
+                let state = unsafe { &mut *state };
+
+                let delta_ns = now_ns.saturating_sub(state.last_update);
+                let delta_sec = (delta_ns / 1_000_000_000) as u32;
+
+                let new_tokens = state.tokens.saturating_add(delta_sec * TOKENS_PER_SEC);
+                state.tokens = if new_tokens > MAX_TOKENS {
+                    MAX_TOKENS
+                } else {
+                    new_tokens
+                };
+                state.last_update = now_ns;
+
+                if state.tokens > 0 {
+                    state.tokens -= 1;
+                } else {
+                    stats_inc_ipv6_drop();
+                    return log_ipv6_drop(
+                        ctx,
+                        &src_addr,
+                        &dst_addr,
+                        src_port,
+                        dst_port,
+                        next_header,
+                        tcp_flags,
+                        REASON_RATELIMIT,
+                        THREAT_FLOOD_SYN,
+                        payload_len,
+                        ext_hdr_count,
+                    );
+                }
+            } else {
+                let new_state = RateLimitState {
+                    tokens: MAX_TOKENS - 1,
+                    _pad: [0; 4],
+                    last_update: now_ns,
+                };
+                let _ = RATE_LIMIT_IPV6.insert(&src_addr, &new_state, 0);
+            }
         }
     }
 
